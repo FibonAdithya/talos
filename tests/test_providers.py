@@ -25,6 +25,8 @@ def test_fake_provider_scripted_and_metered():
     p = FakeProvider(["first", "second"])
     a = p.complete("sys", "u1")
     b = p.complete("sys", "u2")
+    # mutation: not advancing self._i would return "first" for both calls, and skipping
+    # the calls.append would let a caller run unlogged prompts through a "recording" fake
     assert (a.text, b.text) == ("first", "second") and p.calls == [("sys", "u1"), ("sys", "u2")]
     assert a.usage.cost_usd == pytest.approx(0.01) and p.metered
 
@@ -40,6 +42,8 @@ def test_openai_compat_request_shape_and_usage():
     assert c.text == "hello" and c.usage.input_tokens == 12 and c.usage.output_tokens == 3
     assert seen["url"] == "https://api.openai.com/v1/chat/completions"
     assert seen["headers"]["Authorization"] == "Bearer k"
+    # mutation: swapping prompt_tokens/completion_tokens in the Usage mapping, or swapping
+    # the system/user message order, would silently mis-report cost and mis-prompt the model
     assert seen["body"]["messages"][0] == {"role": "system", "content": "SYS"}
     assert seen["body"]["messages"][1] == {"role": "user", "content": "USER"}
 
@@ -92,6 +96,8 @@ def test_codex_cli_reads_last_message_file(tmp_path):
 
 def test_make_provider_kinds_and_validate():
     fp = make_provider("fake", "m")
+    # mutation: not raising ValueError for an unknown kind would return None and defer the
+    # failure to a later, harder-to-diagnose AttributeError when .complete() is called
     assert isinstance(fp, FakeProvider) and validate_provider(fp) is None
     with pytest.raises(ValueError):
         make_provider("nope", "m")
