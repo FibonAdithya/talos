@@ -2,6 +2,10 @@
 
 Run directly: `python scripts/test_search_replace.py` (no pytest in this repo).
 """
+# Copied verbatim from tig-foundation/prometheus-swarm (scripts/test_search_replace.py), the
+# upstream of talos/search_replace.py. It is exempt from this repo's "every test states the
+# mutation it catches" rule: editing it would break the correspondence with upstream, which is
+# what makes it useful as a conformance check when the upstream file is re-synced.
 
 from talos.search_replace import parse_blocks, apply_blocks
 

@@ -48,8 +48,12 @@ def save(root: Path, config: Config, api_key: str | None) -> None:
         sdir = root / ".talos"
         sdir.mkdir(exist_ok=True)
         sp = sdir / "secrets.json"
-        sp.write_text(json.dumps({"api_key": api_key}) + "\n")
-        os.chmod(sp, 0o600)
+        # Create the file 0600 rather than writing at the process umask and narrowing it after:
+        # between write_text and chmod the key was readable by anyone on the machine.
+        fd = os.open(sp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps({"api_key": api_key}) + "\n")
+        os.chmod(sp, 0o600)  # an existing file keeps its old mode through O_CREAT
 
 
 def resolve_api_key(config: Config) -> str | None:

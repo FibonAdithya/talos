@@ -143,8 +143,14 @@ class JobState:
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    """os.replace is atomic, but only against the file contents that actually reached the disk:
+    without the fsync a crash can leave the renamed file empty or truncated, which for
+    state.json is an unresumable job."""
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
