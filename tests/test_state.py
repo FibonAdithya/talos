@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from talos.budget import Budget, Spend
 from talos.state import JobSpec, JobState, JobStore, TERMINAL
 from talos.types import NonceSet
@@ -23,6 +25,17 @@ def test_spec_roundtrip_and_redaction(tmp_path):
     red = spec().redacted()
     # mutation: forgetting to strip nonce-set hashes leaks the seed via `training`
     assert "ab" * 32 not in json.dumps(red)
+
+
+def test_write_spec_refuses_to_overwrite(tmp_path):
+    # mutation: dropping the exists() guard lets a resume or a retry silently
+    # rewrite the job's inputs
+    store = JobStore(tmp_path)
+    store.write_spec(spec())
+    before = (tmp_path / "job.json").read_text()
+    with pytest.raises(FileExistsError):
+        store.write_spec(spec())
+    assert (tmp_path / "job.json").read_text() == before
 
 
 def test_state_roundtrip_atomic(tmp_path):

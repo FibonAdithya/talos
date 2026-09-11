@@ -154,7 +154,10 @@ class JobStore:
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
     def write_spec(self, spec: JobSpec) -> None:
-        _atomic_write(self.run_dir / "job.json", json.dumps(spec.to_dict(), indent=1))
+        path = self.run_dir / "job.json"
+        if path.exists():
+            raise FileExistsError(f"{path} already exists; job.json is immutable")
+        _atomic_write(path, json.dumps(spec.to_dict(), indent=1))
 
     def read_spec(self) -> JobSpec:
         return JobSpec.from_dict(json.loads((self.run_dir / "job.json").read_text()))
