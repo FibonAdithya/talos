@@ -1,7 +1,8 @@
 import pytest
 
-from talos.prompts import (PromptContext, STRATEGY_TAGS, distill_prompts, edit_prompts,
-                           hypothesis_prompts, parse_distillation, parse_hypothesis)
+from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts, distill_prompts,
+                           edit_prompts, edit_repair_prompts, hypothesis_prompts,
+                           parse_distillation, parse_hypothesis)
 
 
 def ctx(**kw):
@@ -57,6 +58,49 @@ def test_parse_hypothesis_tolerates_prose_and_validates_tag():
     assert parse_hypothesis(bad)["strategy_tag"] == "hybrid"
     with pytest.raises(ValueError):
         parse_hypothesis("no json here")
+
+
+def test_parse_hypothesis_survives_braces_in_description():
+    # mutation: the non-greedy brace regex cuts the object at the first `}` inside the
+    # description
+    text = ('Idea:\n{"title": "A", "description": "Use {x: y} sets for lookups", '
+            '"strategy_tag": "data_structure"}')
+    h = parse_hypothesis(text)
+    assert h == {"title": "A", "description": "Use {x: y} sets for lookups",
+                 "strategy_tag": "data_structure"}
+    # a leading JSON object without title/description must be skipped in favour of the
+    # next, valid one
+    text2 = ('{"note": 1}\n{"title": "A", "description": "B", '
+             '"strategy_tag": "local_search"}')
+    assert parse_hypothesis(text2) == {"title": "A", "description": "B",
+                                        "strategy_tag": "local_search"}
+
+
+def test_compile_fix_and_repair_prompts_carry_inputs():
+    # mutation: dropping the compiler output, file content, SEARCH format, or rust rules
+    # from these prompts leaves the fixer without the context it needs
+    system, user = compile_fix_prompts(ctx(), {"mod.rs": "fn broken("},
+                                       "error[E0308]: mismatched types")
+    assert "error[E0308]: mismatched types" in user
+    assert "fn broken(" in user
+    assert "<<<<<<< SEARCH" in system
+    # distinctive substring from talos/data/rust_rules.md, unlikely to appear elsewhere
+    assert "RULE 1 - NO DUPLICATE STRUCTS" in system
+
+    system2, user2 = edit_repair_prompts(ctx(), {"mod.rs": "fn x(){}"},
+                                         "- [not_found] in mod.rs: ...")
+    assert "- [not_found] in mod.rs: ..." in user2
+    assert "fn x(){}" in user2
+    assert "<<<<<<< SEARCH" in system2
+
+
+def test_compile_fix_prompts_truncates_compiler_output():
+    # mutation: dropping the `[-6000:]` slice blows the prompt budget on long build logs
+    # distinct head/tail content (not a repeated char) so substring checks are discriminating
+    long_output = "A" * 4000 + "B" * 6000
+    _, user = compile_fix_prompts(ctx(), {"mod.rs": "fn x(){}"}, long_output)
+    assert long_output[-6000:] in user
+    assert "A" * 4000 not in user
 
 
 def test_distill_roundtrip():

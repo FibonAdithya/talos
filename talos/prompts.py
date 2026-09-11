@@ -3,8 +3,8 @@ packaged Rust rules once."""
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from importlib import resources
 
 STRATEGY_TAGS = ["construction", "local_search", "metaheuristic", "constraint_relaxation",
@@ -24,6 +24,7 @@ emit several blocks for several places; never emit whole-file rewrites; never to
 other than the algorithm files shown."""
 
 
+@lru_cache(maxsize=1)
 def _rust_rules() -> str:
     return resources.files("talos.data").joinpath("rust_rules.md").read_text()
 
@@ -116,16 +117,16 @@ def distill_prompts(ctx: PromptContext, failed: list[dict]) -> tuple[str, str]:
     return system, user
 
 
-_JSON_RE = re.compile(r"\{.*?\}", re.S)
-
-
 def parse_hypothesis(text: str) -> dict:
-    for m in _JSON_RE.finditer(text):
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
         try:
-            d = json.loads(m.group(0))
+            d, _ = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
             continue
-        if "title" in d and "description" in d:
+        if isinstance(d, dict) and "title" in d and "description" in d:
             tag = d.get("strategy_tag")
             return {"title": str(d["title"]), "description": str(d["description"]),
                     "strategy_tag": tag if tag in STRATEGY_TAGS else "hybrid"}
