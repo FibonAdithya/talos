@@ -125,6 +125,43 @@ def test_run_nonce_classifies_no_solution(tmp_path):
     assert not row["ok"] and row["error"] == "no_solution" and row["quality"] is None
 
 
+def test_verifier_gets_only_the_time_the_runtime_left(tmp_path):
+    # The Modal function timeout is NONCE_TIMEOUT_S + 120, so a runtime and a verifier that each
+    # get the full per-nonce timeout can exceed it and have the container killed.
+    # mutation: passing timeout_s to the verifier makes the pair's worst case 2 x timeout_s
+    seen = []
+    now = [0.0]
+
+    def run(cmd, **kw):
+        seen.append((cmd[0], kw.get("timeout")))
+        if cmd[0] == "tig-runtime":
+            now[0] += 500.0  # the runtime took 500s of the 600s budget
+            (Path(cmd[cmd.index("--output") + 1]) / f"{cmd[3]}.json").write_text("{}")
+            return Result(0, "", "")
+        return Result(0, "quality: 1\n", "")
+
+    row = inside.run_nonce("c003", "n=1", "ab" * 32, 1, Path("/x.so"), 10, 600, None, run,
+                           tmp_path, clock=lambda: now[0])
+    assert seen[0] == ("tig-runtime", 600)
+    assert seen[1] == ("tig-verifier", 100)
+    assert row["runtime_ms"] == 500_000
+    # mutation: `timeout_s - elapsed` without the floor passes 0 or a negative timeout, which
+    # subprocess treats as "expire immediately"
+    now[0] = 0.0
+    seen.clear()
+
+    def slow(cmd, **kw):
+        seen.append((cmd[0], kw.get("timeout")))
+        if cmd[0] == "tig-runtime":
+            now[0] += 599.9
+            (Path(cmd[cmd.index("--output") + 1]) / f"{cmd[3]}.json").write_text("{}")
+        return Result(0, "quality: 1\n", "")
+
+    inside.run_nonce("c003", "n=1", "ab" * 32, 1, Path("/x.so"), 10, 600, None, slow, tmp_path,
+                     clock=lambda: now[0])
+    assert seen[1] == ("tig-verifier", 1)
+
+
 def test_run_nonce_handles_a_verifier_timeout(tmp_path):
     def run(cmd, **kw):
         if cmd[0] == "tig-runtime":
