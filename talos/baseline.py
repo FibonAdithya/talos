@@ -7,7 +7,7 @@ from pathlib import Path
 
 from talos import mainnet as _mainnet
 from talos.challenges import MONOREPO_REF
-from talos.state import BaselineRecord
+from talos.state import BaselineRecord, _atomic_write
 from talos.types import NonceResult, NonceSet
 
 
@@ -37,8 +37,13 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
     key = cache_key(challenge, MONOREPO_REF, name, training, holdout, fuel, hardware_class)
     cache_file = Path(cache_dir) / challenge / f"{key}.json"
     if cache_file.exists():
-        log(f"baseline {name}: cache hit {key}")
-        return BaselineRecord.from_dict(json.loads(cache_file.read_text())), template
+        try:
+            rec = BaselineRecord.from_dict(json.loads(cache_file.read_text()))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            log(f"baseline {name}: cache file {cache_file} is corrupt; re-measuring")
+        else:
+            log(f"baseline {name}: cache hit {key}")
+            return rec, template
     files = mainnet.fetch_algorithm_files(challenge, name)
     log(f"baseline {name} (adoption {adoption}): compiling {len(files)} file(s)")
     c = bench.compile(challenge, files)
@@ -52,5 +57,5 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
     rec = BaselineRecord(name=name, adoption=adoption, artifact_id=c.artifact_id, files=files,
                          training=tr, holdout=ho)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps(rec.to_dict(), indent=1))
+    _atomic_write(cache_file, json.dumps(rec.to_dict(), indent=1))
     return rec, template

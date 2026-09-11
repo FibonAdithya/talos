@@ -1,9 +1,11 @@
+import json
 import types
 
 import pytest
 
 from talos.baseline import BaselineError, cache_key, resolve_baseline
 from talos.bench import FakeBench
+from talos.challenges import MONOREPO_REF
 from talos.types import NonceSet
 
 TR = [NonceSet("t", "ab" * 32, 0, 2)]
@@ -61,3 +63,18 @@ def test_baseline_compile_failure_is_an_error_with_output(tmp_path):
     with pytest.raises(BaselineError) as ei:
         resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4", mainnet=fake_mainnet())
     assert "E0308" in str(ei.value)
+
+
+def test_corrupt_cache_is_remeasured(tmp_path):
+    # mutation: letting JSONDecodeError escape aborts the job on a half-written cache file
+    key = cache_key("knapsack", MONOREPO_REF, "algo_x", TR, HO, 5, "cpu4")
+    cache_file = tmp_path / "knapsack" / f"{key}.json"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text("{not json")
+
+    fb = FakeBench(lambda ch, files, ns: [10 + n for n in ns.nonces()])
+    rec, _template = resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4",
+                                      mainnet=fake_mainnet())
+    assert fb.compile_calls == 1 and fb.score_calls == 2
+    assert [r.quality for r in rec.training] == [10, 11]
+    assert json.loads(cache_file.read_text())["name"] == "algo_x"
