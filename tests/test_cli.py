@@ -1,5 +1,7 @@
 import json
+import os
 import stat
+import time
 import types
 
 import pytest
@@ -203,6 +205,83 @@ def test_resume_restarts_a_cancelled_job(tmp_path, monkeypatch, capsys):
     events = [json.loads(ln)["kind"]
               for ln in (run_dir / "timeline.jsonl").read_text().splitlines()]
     assert "resumed" in events
+
+
+def test_resume_after_the_hours_window_shifts_the_clock(tmp_path, monkeypatch, capsys):
+    # mutation: keeping the original started_at makes every late resume exhausted — a job with
+    # --budget-hours 4 that is resumed five hours later exits "exhausted (hours)" at once and can
+    # never be resumed again
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    assert cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                     "--budget-iterations", "5", "--budget-hours", "4", "--yes"]) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    st = json.loads((run_dir / "state.json").read_text())
+    st.update(status="cancelled", stop_reason="user requested stop", best=None, iteration=0,
+              confirmed=[], hypotheses=[])
+    st["spend"]["iterations"] = 0
+    cancelled_at = time.time() - 5 * 3600  # cancelled five hours ago, an hour past the window
+    st["spend"]["started_at"] = cancelled_at - 60
+    (run_dir / "state.json").write_text(json.dumps(st))
+    os.utime(run_dir / "state.json", (cancelled_at, cancelled_at))
+    capsys.readouterr()
+    rc = cli.main(["run", "--resume", run_dir.name])
+    out = capsys.readouterr().out
+    assert rc == 0 and "Status: won" in out
+    resumed = [json.loads(ln) for ln in (run_dir / "timeline.jsonl").read_text().splitlines()
+               if json.loads(ln)["kind"] == "resumed"]
+    # the pause is approximated as the time since the last save, and recorded, not silent
+    assert resumed and resumed[-1]["paused_s"] >= 4 * 3600
+
+
+def test_resume_uses_the_spec_not_the_current_config(tmp_path, monkeypatch, capsys):
+    # mutation: resuming with today's talos.config.json switches provider/model/mode mid-job, so
+    # the iterations before and after the resume were produced by different agents
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    assert fake_run(monkeypatch) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    spec = json.loads((run_dir / "job.json").read_text())
+    spec.update(provider="anthropic", model="spec-model", mode="single-shot")
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    st = json.loads((run_dir / "state.json").read_text())
+    st.update(status="cancelled", best=None, iteration=0, confirmed=[], hypotheses=[])
+    st["spend"]["iterations"] = 0
+    (run_dir / "state.json").write_text(json.dumps(st))
+    # the config now says a different model
+    save(tmp_path, Config(provider="anthropic", model="config-model", mode="single-shot",
+                          api_base=None), None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    seen = {}
+
+    def capture(kind, model, api_key=None, api_base=None):
+        seen.update(kind=kind, model=model)
+        raise RuntimeError("stop before the loop starts")
+
+    monkeypatch.setattr(cli, "make_provider", capture)
+    with pytest.raises(RuntimeError):
+        cli.main(["run", "--resume", run_dir.name])
+    assert seen == {"kind": "anthropic", "model": "spec-model"}
+    # mutation: allowing --mode on a resume silently changes how the rest of the job is produced
+    assert cli.main(["run", "--resume", run_dir.name, "--mode", "agentic"]) == 2
+    assert "start a new job to change mode" in capsys.readouterr().err
+
+
+def test_resume_without_state_json_is_refused(tmp_path, monkeypatch, capsys):
+    # mutation: guarding on job.json alone tracebacks on a run whose credential was refused
+    # before the first save (job.json written, state.json never)
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    monkeypatch.setattr(cli, "execute_job", lambda spec, store, cfg, resume: 2)
+    assert cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                     "--budget-iterations", "1", "--yes"]) == 2
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert not (run_dir / "state.json").exists()
+    assert cli.main(["run", "--resume", run_dir.name]) == 2
+    assert "missing state.json" in capsys.readouterr().err
 
 
 def test_resume_of_finished_job_and_of_missing_job(tmp_path, monkeypatch, capsys):

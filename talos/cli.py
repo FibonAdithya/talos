@@ -146,9 +146,14 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
             return 1
         if state.status in ("cancelled", "failed", "paused"):
             previous = state.status
+            # The wall-clock budget measures time the job was WORKING. started_at is shifted
+            # forward by the pause (approximated as the time since the last save), or a job
+            # resumed after its window has passed exits "exhausted (hours)" at once, for ever.
+            paused_s = max(0.0, time.time() - (store.run_dir / "state.json").stat().st_mtime)
+            state.spend.started_at += paused_s
             state.status, state.stop_reason = "researching", None
             store.save(state)
-            store.event("resumed", previous_status=previous)
+            store.event("resumed", previous_status=previous, paused_s=round(paused_s, 1))
     else:
         store.save(state)
 
@@ -220,24 +225,38 @@ def cmd_run(args, ask) -> int:
         except ConfigError as e:
             print(str(e), file=sys.stderr)
             return 2
+    # spec §10: say so before a single dollar is spent, not at the first iteration.
+    from talos.agentic import CODEX_AGENTIC_REFUSAL, codex_agentic_refused
+    if args.resume:
+        run_dir = root / "runs" / args.resume
+        # A run that was refused before its first save (a bad credential, say) has job.json but
+        # no state.json; loading it would traceback instead of reporting a resumable job.
+        missing = [f for f in ("job.json", "state.json") if not (run_dir / f).exists()]
+        if missing:
+            print(f"no job to resume at {run_dir}: missing {', '.join(missing)}", file=sys.stderr)
+            return 2
+        store = JobStore(run_dir)
+        spec = store.read_spec()
+        # job.json records how the job was started, and every iteration so far was produced that
+        # way. A resume runs the same provider, model and mode whatever the config says today.
+        if args.mode and args.mode != spec.mode:
+            print(f"job {spec.job_id} was started in {spec.mode} mode; start a new job to "
+                  f"change mode", file=sys.stderr)
+            return 2
+        cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
+        if codex_agentic_refused(cfg.provider, cfg.mode):
+            print(CODEX_AGENTIC_REFUSAL, file=sys.stderr)
+            return 2
+        return execute_job(spec, store, cfg, resume=True)
     if args.mode:
         if args.mode == "agentic" and cfg.provider not in CLI_PROVIDERS:
             print(f"--mode agentic needs a CLI provider ({' or '.join(CLI_PROVIDERS)}), "
                   f"not {cfg.provider!r}", file=sys.stderr)
             return 2
         cfg = replace(cfg, mode=args.mode)
-    # spec §10: say so before a single dollar is spent, not at the first iteration.
-    from talos.agentic import CODEX_AGENTIC_REFUSAL, codex_agentic_refused
     if codex_agentic_refused(cfg.provider, cfg.mode):
         print(CODEX_AGENTIC_REFUSAL, file=sys.stderr)
         return 2
-    if args.resume:
-        run_dir = root / "runs" / args.resume
-        if not (run_dir / "job.json").exists():
-            print(f"no job to resume at {run_dir}", file=sys.stderr)
-            return 2
-        store = JobStore(run_dir)
-        return execute_job(store.read_spec(), store, cfg, resume=True)
     challenge = args.challenge or ask(f"Challenge ({', '.join(CHALLENGES)})", "vehicle_routing")
     if challenge not in CHALLENGES:
         print(f"unknown challenge {challenge!r}", file=sys.stderr)
