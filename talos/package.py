@@ -18,9 +18,12 @@ def scores_markdown(baseline: list[NonceResult], candidate: list[NonceResult]) -
         b = by_b.get((c.track, c.nonce))
         bq = b.quality if b and b.ok else (b.error if b else "missing")
         cq = c.quality if c.ok else c.error
-        note = ""
-        if b and b.ok and c.ok:
+        if not c.ok or (b is not None and not b.ok):
+            note = "err"
+        elif b and b.ok and c.ok:
             note = "+" if c.quality > b.quality else ("=" if c.quality == b.quality else "-")
+        else:
+            note = ""
         rows.append(f"| {c.track} | {c.nonce} | {bq} | {cq} | {note} |")
     try:
         d = bundle_delta(baseline, candidate)
@@ -65,17 +68,29 @@ def evidence_draft(spec: JobSpec, state: JobState) -> str:
     return filled + bench
 
 
+def _readme_no_candidate(spec: JobSpec, state: JobState) -> str:
+    baseline = f" Baseline: mainnet `{state.baseline.name}`." if state.baseline else ""
+    return ("# Talos hand-back\n\n"
+            f"No candidate beat the baseline.{baseline} Status: {state.status}. "
+            f"Reason: {state.stop_reason}\n\n"
+            "There is nothing to submit from this job.\n")
+
+
 def _readme(spec: JobSpec, state: JobState) -> str:
-    confirmed = state.best is not None and state.best.iteration in state.confirmed
+    confirmed = state.best.iteration in state.confirmed
+    false_positive = state.best.iteration in state.false_positives
     head = ("# Talos hand-back\n\n"
             f"Challenge: {spec.challenge}. Baseline: mainnet `{state.baseline.name}`. "
             f"Status: {state.status}. Reason: {state.stop_reason}\n\n")
     if confirmed:
         head += ("This candidate beat the baseline on both the training and the held-out nonce "
                  "sets. See scores.md.\n\n")
+    elif false_positive:
+        head += ("This candidate beat the baseline on the training nonces but NOT on the "
+                 "held-out nonces (a false positive); see scores.md.\n\n")
     else:
-        head += ("This is the best candidate found, but it was **not confirmed** against the "
-                 "held-out nonces. Treat scores.md as indicative only.\n\n")
+        head += ("This candidate was never scored on the held-out nonces; it did not beat the "
+                 "baseline on training.\n\n")
     head += ("## Submitting\n\n1. Copy the algorithm files into "
              f"`tig-algorithms/src/{spec.challenge}/<your_name>/` in a monorepo checkout.\n"
              "2. Add the copyright header the TIG Inbound Game License requires.\n"
@@ -84,14 +99,26 @@ def _readme(spec: JobSpec, state: JobState) -> str:
     return head
 
 
+def _hypothesis_line(h: dict) -> str:
+    line = (f"- #{h['iteration']} (vs best #{h.get('against', '?')}) [{h.get('strategy_tag', '')}] "
+            f"{h.get('title', '')}: {h.get('description', '')} -> {h.get('outcome', '')}")
+    error = h.get("error")
+    if error:
+        line += f" — {error[:200]}"
+    return line
+
+
 def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     pkg = store.run_dir / "package"
     if pkg.exists():
         shutil.rmtree(pkg)
     pkg.mkdir()
-    if state.best is None or state.baseline is None:
-        (pkg / "README.md").write_text(_readme(spec, state) if state.baseline else
-                                        "# Talos hand-back\n\nNo candidate was produced.\n")
+    if state.best is None:
+        (pkg / "README.md").write_text(_readme_no_candidate(spec, state))
+        shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
+        return pkg
+    if state.baseline is None:
+        (pkg / "README.md").write_text("# Talos hand-back\n\nNo candidate was produced.\n")
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
     for name, text in state.best.files.items():
@@ -102,8 +129,7 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     if state.best.holdout:
         scores += "\n# Held-out nonces\n\n" + scores_markdown(state.baseline.holdout, state.best.holdout)
     (pkg / "scores.md").write_text(scores)
-    hyps = "\n".join(f"- #{h['iteration']} [{h.get('strategy_tag','')}] {h.get('title','')}: "
-                     f"{h.get('description','')} -> {h.get('outcome','')}" for h in state.hypotheses)
+    hyps = "\n".join(_hypothesis_line(h) for h in state.hypotheses)
     (pkg / "hypotheses.md").write_text("# Hypotheses\n\n" + hyps + "\n")
     (pkg / "evidence_draft.md").write_text(evidence_draft(spec, state))
     (pkg / "README.md").write_text(_readme(spec, state))
