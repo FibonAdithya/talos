@@ -19,11 +19,19 @@ class AgenticError(ValueError):
 
 def sandbox_settings(worktree: Path) -> dict:
     """Deny is evaluated before allow in Claude Code, so never deny a glob that covers an
-    allowed path. Unlisted tools are refused by `dontAsk` mode rather than prompted for."""
+    allowed path. Unlisted tools are refused by `dontAsk` mode rather than prompted for.
+
+    Reads alone do not let a `dontAsk` agent discover file names under `algorithm/`: Glob and
+    Grep are separate tools from Read and need their own allow entries over the same read
+    scope (mirrors Prometheus's `_build_sandbox_settings`)."""
+    read_scope = ["algorithm/**", "CHALLENGE.md", "tacit.md", "AGENTS.md",
+                  ".talos/hypothesis.json"]
+    allow = []
+    for tool in ("Read", "Glob", "Grep"):
+        allow += [f"{tool}({p})" for p in read_scope]
+    allow += ["Edit(algorithm/**)", "Edit(.talos/hypothesis.json)", "Bash(talos compile:*)"]
     return {"permissions": {
-        "allow": ["Read(algorithm/**)", "Read(CHALLENGE.md)", "Read(tacit.md)", "Read(AGENTS.md)",
-                  "Read(.talos/hypothesis.json)", "Edit(algorithm/**)",
-                  "Edit(.talos/hypothesis.json)", "Bash(talos compile:*)"],
+        "allow": allow,
         "deny": ["WebFetch", "WebSearch", "Write(**)", "Bash(curl:*)", "Bash(wget:*)", "Bash(git:*)",
                  "Bash(ssh:*)", "Bash(python:*)", "Bash(pip:*)", "Bash(nc:*)", "Bash(rm:*)"],
         "defaultMode": "dontAsk"}}
@@ -44,6 +52,8 @@ Rules:
 - Before you stop, EDIT the existing file `.talos/hypothesis.json` (it starts as `{{}}`) so it
   holds keys "title", "description", "strategy_tag" (one of: {", ".join(STRATEGY_TAGS)}).
   Use the Edit tool; creating new files is not permitted.
+
+The algorithm files are: {", ".join(f"algorithm/{name}" for name in sorted(ctx.files))}.
 
 Direction from the user:
 {ctx.direction}
@@ -77,27 +87,54 @@ def prepare_worktree(run_dir: Path, ctx: PromptContext) -> Path:
 
 
 def read_back(worktree: Path, ctx: PromptContext) -> tuple[dict, dict[str, str]]:
+    """spec §9: an edit outside the algorithm files fails the iteration in both modes. For codex,
+    which ignores .claude/settings.json, this scope check is the ONLY enforcement of that rule."""
     hp = worktree / ".talos" / "hypothesis.json"
     if not hp.exists() or hp.read_text().strip() in ("", "{}"):
         raise AgenticError("agent did not fill in .talos/hypothesis.json")
     try:
         h = json.loads(hp.read_text())
-        hypothesis = {"title": str(h["title"]), "description": str(h["description"]),
+        hypothesis = {"title": str(h["title"])[:200], "description": str(h["description"])[:4000],
                       "strategy_tag": h.get("strategy_tag") if h.get("strategy_tag") in STRATEGY_TAGS else "hybrid"}
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         raise AgenticError(f"bad hypothesis.json: {e}") from None
-    files = {name: (worktree / "algorithm" / name).read_text() for name in ctx.files
-             if (worktree / "algorithm" / name).exists()}
+    algo_dir = worktree / "algorithm"
+    on_disk = {p.relative_to(algo_dir).as_posix() for p in algo_dir.rglob("*") if p.is_file()}
+    extra = on_disk - set(ctx.files)
+    if extra:
+        raise AgenticError(f"agent created files outside the algorithm set: {sorted(extra)}")
+    missing = set(ctx.files) - on_disk
+    if missing:
+        raise AgenticError(f"agent deleted algorithm files: {sorted(missing)}")
+    files = {name: (algo_dir / name).read_text() for name in ctx.files}
     if files == ctx.files:
         raise AgenticError("agent changed no algorithm file")
     return hypothesis, files
 
 
+# spec §7.6/§10: `talos compile` inside the sandbox runs agent-controlled build code, and
+# anything left in the environment is exfiltratable through it. So the child gets an allowlist,
+# not the scrubbed-copy Prometheus uses (Prometheus's `_scrubbed_env` removes only known secret
+# keys/prefixes and passes the rest of os.environ through). We keep: PATH (interpreter's bin dir
+# prepended, as before), the login/locale/terminal basics a CLI needs to run at all (HOME, USER,
+# LOGNAME, SHELL, TERM, LANG, LC_*, TZ, TMPDIR, XDG_*), and proxy variables — Prometheus's comment
+# on `_scrubbed_env` notes it deliberately lets proxy vars pass through so the claude/codex login
+# session still works on networks that require an outbound proxy. No provider keys, no Modal
+# tokens, no anything else.
+_AGENT_ENV_ALLOWLIST = frozenset({
+    "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+})
+
+_TRANSCRIPT_CAP = 200_000
+
+
 def _agent_env() -> dict[str, str]:
     """The agent runs `talos compile`; make sure the interpreter that runs Talos is first on PATH so
     the console script resolves even when the venv is not activated in the agent's shell."""
-    env = dict(os.environ)
-    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+    env = {k: v for k, v in os.environ.items()
+           if k in _AGENT_ENV_ALLOWLIST or k.startswith("XDG_")}
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
     return env
 
 
@@ -108,8 +145,8 @@ def _run_agent(cmd: list[str], wt: Path, timeout_s: int, run) -> None:
         raise AgenticError(f"{cmd[0]} CLI not found on PATH") from None
     except subprocess.TimeoutExpired:
         raise AgenticError(f"{cmd[0]} timed out after {timeout_s}s") from None
-    (wt / ".talos" / "agent_stdout.txt").write_text(r.stdout or "")
-    (wt / ".talos" / "agent_stderr.txt").write_text(r.stderr or "")
+    (wt / ".talos" / "agent_stdout.txt").write_text((r.stdout or "")[-_TRANSCRIPT_CAP:])
+    (wt / ".talos" / "agent_stderr.txt").write_text((r.stderr or "")[-_TRANSCRIPT_CAP:])
     if r.returncode != 0:
         raise AgenticError(f"{cmd[0]} exited {r.returncode}: {(r.stderr or '')[-500:]}")
 
@@ -122,6 +159,20 @@ def _run_claude(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
 def _run_codex(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
     _run_agent(["codex", "exec", "-m", model, "--sandbox", "workspace-write",
                 "--skip-git-repo-check", prompt], wt, timeout_s, run)
+
+
+def _copy_transcript(wt: Path, loop) -> None:
+    """prepare_worktree wipes the agentic worktree on the next iteration (shutil.rmtree), so a
+    failed iteration's stdout/stderr must be copied into the iteration dir now or it is lost.
+    loop._n is only set on a real Loop mid-iterate; the test's SimpleNamespace stub has none."""
+    n = getattr(loop, "_n", None)
+    if n is None:
+        return
+    it_dir = loop.store.iteration_dir(n)
+    for name in ("agent_stdout.txt", "agent_stderr.txt"):
+        src = wt / ".talos" / name
+        if src.exists():
+            shutil.copy(src, it_dir / name)
 
 
 def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
@@ -140,7 +191,10 @@ def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
         if ctx.forced_tag:
             prompt += f"\nYou have stagnated: use strategy_tag \"{ctx.forced_tag}\"."
         loop._check_budget()
-        runner(wt, model, prompt, timeout_s, run)
+        try:
+            runner(wt, model, prompt, timeout_s, run)
+        finally:
+            _copy_transcript(wt, loop)
         hypothesis, files = read_back(wt, ctx)
         loop._event("hypothesis", **hypothesis)
         return hypothesis, files
