@@ -56,7 +56,9 @@ def cmd_setup(args, ask) -> int:
     root = Path.cwd()
     kinds = ", ".join(k for k in KINDS if k != "fake")
     kind = ask(f"Provider ({kinds})", "anthropic")
-    if kind not in KINDS:
+    # "fake" is the in-process test double: it is in KINDS, but setting it up would write a
+    # config whose runs never touch an LLM at all.
+    if kind not in KINDS or kind == "fake":
         print(f"unknown provider {kind!r}", file=sys.stderr)
         return 2
     model = ask("Model", DEFAULT_MODELS.get(kind) or None)
@@ -82,6 +84,41 @@ def cmd_setup(args, ask) -> int:
     save(root, Config(provider=kind, model=model, mode=mode, api_base=api_base), api_key)
     print("Setup complete. Run `talos run` to start a job.")
     return 0
+
+
+def _ask_number(ask, prompt: str, default: str, cast=float, tries: int = 3):
+    """Wizard answers are typed by a human: "abc" or "20 usd" must re-prompt rather than
+    traceback out of `float(...)` and throw away everything already answered."""
+    for _ in range(tries):
+        raw = ask(prompt, default)
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            print(f"not a number: {raw!r}", file=sys.stderr)
+    raise ConfigError(f"{prompt}: no number given after {tries} tries")
+
+
+def _challenge_prompt() -> str:
+    """spec §5.2: GPU challenges are labelled with their Modal GPU class and approximate cost,
+    so the expensive choices are visible before one is picked."""
+    from talos.bench import GPU_USD_PER_SECOND
+    names = []
+    for name, cs in CHALLENGES.items():
+        if cs.is_gpu:
+            names.append(f"{name} (GPU: {cs.gpu}, "
+                         f"≈${GPU_USD_PER_SECOND[cs.gpu] * 3600:.2f}/h estimated)")
+        else:
+            names.append(name)
+    return f"Challenge ({', '.join(names)})"
+
+
+def _codex_refused(cfg: Config) -> bool:
+    """spec §10: say so before a single dollar is spent, not at the first iteration."""
+    from talos.agentic import CODEX_AGENTIC_REFUSAL, codex_agentic_refused
+    if codex_agentic_refused(cfg.provider, cfg.mode):
+        print(CODEX_AGENTIC_REFUSAL, file=sys.stderr)
+        return True
+    return False
 
 
 def _budget_from_args(args) -> Budget:
@@ -174,7 +211,10 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     hardware = hardware_class(CHALLENGES[spec.challenge])
 
     def on_event(kind, data):
-        line = f"[{time.strftime('%H:%M:%S')}] it={state.iteration} {kind} " + \
+        # loop._n is the iteration the event belongs to; state.iteration only catches up when an
+        # iteration finishes, so it labels iteration 1's events "it=0".
+        n = getattr(loop, "_n", state.iteration)
+        line = f"[{time.strftime('%H:%M:%S')}] it={n} {kind} " + \
                " ".join(f"{k}={str(v)[:60]}" for k, v in data.items())
         print(line, flush=True)
         if kind == "iteration_done":
@@ -224,8 +264,6 @@ def cmd_run(args, ask) -> int:
         except ConfigError as e:
             print(str(e), file=sys.stderr)
             return 2
-    # spec §10: say so before a single dollar is spent, not at the first iteration.
-    from talos.agentic import CODEX_AGENTIC_REFUSAL, codex_agentic_refused
     if args.resume:
         run_dir = root / "runs" / args.resume
         # A run that was refused before its first save (a bad credential, say) has job.json but
@@ -243,8 +281,7 @@ def cmd_run(args, ask) -> int:
                   f"change mode", file=sys.stderr)
             return 2
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
-        if codex_agentic_refused(cfg.provider, cfg.mode):
-            print(CODEX_AGENTIC_REFUSAL, file=sys.stderr)
+        if _codex_refused(cfg):
             return 2
         return execute_job(spec, store, cfg, resume=True)
     if args.mode:
@@ -253,10 +290,9 @@ def cmd_run(args, ask) -> int:
                   f"not {cfg.provider!r}", file=sys.stderr)
             return 2
         cfg = replace(cfg, mode=args.mode)
-    if codex_agentic_refused(cfg.provider, cfg.mode):
-        print(CODEX_AGENTIC_REFUSAL, file=sys.stderr)
+    if _codex_refused(cfg):
         return 2
-    challenge = args.challenge or ask(f"Challenge ({', '.join(CHALLENGES)})", "vehicle_routing")
+    challenge = args.challenge or ask(_challenge_prompt(), "vehicle_routing")
     if challenge not in CHALLENGES:
         print(f"unknown challenge {challenge!r}", file=sys.stderr)
         return 2
@@ -273,27 +309,43 @@ def cmd_run(args, ask) -> int:
     if not direction:
         direction = ask("Direction for the agent (what to explore)")
     metered = cfg.provider not in CLI_PROVIDERS
-    if not args.yes and args.budget_usd is None and args.budget_hours is None \
-            and args.budget_iterations is None:
-        if metered:
-            args.budget_usd = float(ask("LLM budget in USD", "20"))
-        else:
-            args.budget_iterations = int(ask("Iteration budget", "50"))
-        args.budget_hours = float(ask("Wall-clock budget in hours", "4"))
     try:
-        budget = _budget_from_args(args)
-    except ValueError as e:
+        if not args.yes and args.budget_usd is None and args.budget_hours is None \
+                and args.budget_iterations is None:
+            if metered:
+                args.budget_usd = _ask_number(ask, "LLM budget in USD", "20")
+            else:
+                args.budget_iterations = _ask_number(ask, "Iteration budget", "50", int)
+            args.budget_hours = _ask_number(ask, "Wall-clock budget in hours", "4")
+        try:
+            budget = _budget_from_args(args)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        # spec §5.2: Modal spend is always capped. The default is applied only after the budget
+        # has been validated, so it can never stand in for the LLM/time/iteration cap the run
+        # needs.
+        if budget.modal_usd is None:
+            if args.yes:
+                budget = replace(budget, modal_usd=DEFAULT_MODAL_USD)
+                print(f"No --budget-modal-usd given; capping Modal spend at "
+                      f"${DEFAULT_MODAL_USD:.2f}.")
+            else:
+                budget = replace(budget, modal_usd=_ask_number(
+                    ask, "Modal budget in USD", str(DEFAULT_MODAL_USD)))
+    except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
-    # spec §5.2: Modal spend is always capped. The default is applied only after the budget has
-    # been validated, so it can never stand in for the LLM/time/iteration cap the run needs.
-    if budget.modal_usd is None:
-        if args.yes:
-            budget = replace(budget, modal_usd=DEFAULT_MODAL_USD)
-            print(f"No --budget-modal-usd given; capping Modal spend at ${DEFAULT_MODAL_USD:.2f}.")
-        else:
-            budget = replace(budget, modal_usd=float(ask("Modal budget in USD",
-                                                         str(DEFAULT_MODAL_USD))))
+    # spec §5.2 step 4: mode for CLI providers, with the cost warning before the prompt.
+    if not args.yes and args.mode is None and cfg.provider in CLI_PROVIDERS:
+        print("agentic mode uses roughly 5-20x the tokens of single-shot")
+        mode = ask("Mode (single-shot or agentic)", cfg.mode)
+        if mode not in ("single-shot", "agentic"):
+            print(f"unknown mode {mode!r}", file=sys.stderr)
+            return 2
+        cfg = replace(cfg, mode=mode)
+        if _codex_refused(cfg):
+            return 2
     # A dollar cap on an unpriced model is a cap that can never fire: the provider reports no
     # cost, so llm_usd never rises. Refuse rather than run a job with no effective cap at all.
     if unpriced(cfg.provider, cfg.model):
@@ -303,13 +355,21 @@ def cmd_run(args, ask) -> int:
             return 2
         print(f"warning: model {cfg.model} has no price-table entry; LLM spend is not measured "
               f"and --budget-usd is not enforced for this run", file=sys.stderr)
+    cs = CHALLENGES[challenge]
     if args.fake:
-        info = ChallengeInfo(id="c003", name=challenge, is_gpu=False, tracks=["n=1"], max_fuel=1)
+        info = ChallengeInfo(id=cs.id, name=challenge, is_gpu=cs.is_gpu, tracks=["n=1"], max_fuel=1)
     else:
         try:
             info = fetch_challenge_info(challenge)
         except MainnetError as e:
             print(f"mainnet unreachable: {e}", file=sys.stderr)
+            return 1
+        # The Modal side scores against the static table: its challenge id goes into the runtime
+        # settings and its is_gpu picks the CPU or GPU function. If mainnet has moved, every
+        # score would be measured under the wrong challenge, so stop before the job exists.
+        if info.id != cs.id or info.is_gpu != cs.is_gpu:
+            print(f"challenge table drift: mainnet says {info.id}/{info.is_gpu}, Talos has "
+                  f"{cs.id}/{cs.is_gpu}; update talos/challenges.py", file=sys.stderr)
             return 1
     rand_hash = new_rand_hash()
     training, holdout = draw_nonce_sets(info.tracks, rand_hash)
@@ -330,10 +390,15 @@ def cmd_run(args, ask) -> int:
 
 
 def cmd_compile(args, ask) -> int:
-    from talos.bench import ModalBench
     d = Path(args.dir)
-    files = {str(p.relative_to(d)): p.read_text() for p in d.rglob("*")
-             if p.is_file() and p.suffix in (".rs", ".cu")}
+    files = ({str(p.relative_to(d)): p.read_text() for p in d.rglob("*")
+              if p.is_file() and p.suffix in (".rs", ".cu")} if d.is_dir() else {})
+    # An empty file map builds nothing on the far side: refuse here rather than pay for a
+    # container that can only report a mystery failure.
+    if not files:
+        print(f"no .rs/.cu files under {d}", file=sys.stderr)
+        return 2
+    from talos.bench import ModalBench
     r = ModalBench().compile(args.challenge, files)
     print(r.output[-4000:])
     return 0 if r.ok else 1

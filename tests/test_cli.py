@@ -88,6 +88,102 @@ def test_run_requires_budget_and_creates_job(tmp_path, monkeypatch):
     assert rc2 == 2
 
 
+def test_setup_rejects_the_fake_provider(tmp_path, monkeypatch, capsys):
+    # mutation: accepting "fake" writes a config whose runs never call an LLM at all — the
+    # in-process test double is not a provider a user can set up
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
+    assert cli.main(["setup"], ask=scripted(["fake"])) == 2
+    assert "unknown provider 'fake'" in capsys.readouterr().err
+    assert not (tmp_path / "talos.config.json").exists()
+
+
+def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, monkeypatch,
+                                                                   capsys):
+    # spec §5.2: GPU challenges carry their GPU class and approximate cost; CLI providers are
+    # asked for a mode, after the 5-20x token warning.
+    # mutation: an unlabelled challenge list hides that a GPU challenge costs ~$2/h while a CPU
+    # one costs cents; dropping the mode prompt means agentic can only be reached by flag
+    # mutation: float(ask(...)) on a non-numeric answer tracebacks out of the wizard
+    monkeypatch.chdir(tmp_path)
+    save(tmp_path, Config(provider="claude-cli", model="claude-opus-5", mode="single-shot",
+                          api_base=None), None)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = {}
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec, cfg=cfg) or 0)
+    prompts = []
+    answers = iter(["knapsack", "go", "abc", "3", "4", "5", "agentic"])
+
+    def ask(prompt, default=None, secret=False):
+        prompts.append(prompt)
+        return next(answers)
+
+    assert cli.main(["run"], ask=ask) == 0
+    captured = capsys.readouterr()
+    assert "not a number: 'abc'" in captured.err
+    assert "hypergraph (GPU: L40S, ≈$1.95/h estimated)" in prompts[0]
+    assert "knapsack" in prompts[0] and "knapsack (GPU" not in prompts[0]
+    assert prompts.count("Iteration budget") == 2  # the typo was re-asked, not fatal
+    assert prompts[-1] == "Mode (single-shot or agentic)"
+    assert "agentic mode uses roughly 5-20x the tokens of single-shot" in captured.out
+    assert seen["spec"].budget.iterations == 3 and seen["spec"].budget.hours == 4.0
+    assert seen["spec"].budget.modal_usd == 5.0
+    assert seen["cfg"].mode == "agentic" and seen["spec"].mode == "agentic"
+
+
+def test_wizard_gives_up_after_three_non_numbers(tmp_path, monkeypatch, capsys):
+    # mutation: an unbounded re-ask loop never terminates on a piped/empty stdin
+    monkeypatch.chdir(tmp_path)
+    save(tmp_path, Config(provider="claude-cli", model="claude-opus-5", mode="single-shot",
+                          api_base=None), None)
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: pytest.fail("must not start a job"))
+    assert cli.main(["run"], ask=scripted(["knapsack", "go", "abc", "def", "ghi"])) == 2
+    assert "no number given after 3 tries" in capsys.readouterr().err
+
+
+def test_challenge_table_drift_stops_before_the_job_exists(tmp_path, monkeypatch, capsys):
+    # mutation: not cross-checking mainnet against talos/challenges.py scores every nonce under
+    # the wrong challenge id (or on the wrong hardware) and reports the result as if it counted
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+
+    def drifted(**over):
+        fields = {"id": "c003", "name": "knapsack", "is_gpu": False, "tracks": ["n=1"],
+                  "max_fuel": 7}
+        fields.update(over)
+        return type("I", (), fields)()
+
+    argv = ["run", "--challenge", "knapsack", "--direction", "go", "--budget-iterations", "1",
+            "--yes"]
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: drifted(id="c999"))
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "challenge table drift" in err and "c999" in err and "talos/challenges.py" in err
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: drifted(is_gpu=True))
+    assert cli.main(argv) == 1
+    assert "challenge table drift" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()  # nothing was created either time
+
+
+def test_compile_refuses_an_empty_or_missing_dir(tmp_path, monkeypatch, capsys):
+    # mutation: shipping an empty file map pays Modal for a container that can only fail, and
+    # reports the failure as a compiler error
+    monkeypatch.chdir(tmp_path)
+
+    def boom():
+        raise AssertionError("the bench must not be constructed for an empty file map")
+
+    monkeypatch.setattr("talos.bench.ModalBench", boom)
+    assert cli.main(["compile", "--challenge", "knapsack"]) == 2  # no algorithm/ at all
+    assert "no .rs/.cu files under algorithm" in capsys.readouterr().err
+    (tmp_path / "algorithm").mkdir()
+    (tmp_path / "algorithm" / "notes.txt").write_text("not a source file\n")
+    assert cli.main(["compile", "--challenge", "knapsack", "--dir", "algorithm"]) == 2
+
+
 def test_resolve_api_key_prefers_file_then_env(tmp_path, monkeypatch):
     # mutation: reading the env var first, or treating "" as a key, fails these three asserts
     save(tmp_path, Config(provider="openai", model="gpt-5", mode="single-shot", api_base=None), "from-file")
@@ -163,6 +259,8 @@ def test_fake_run_end_to_end_wins_and_packages(tmp_path, monkeypatch, capsys):
     assert "Status: won" in out
     assert "Best delta vs baseline: +1.000%" in out
     assert "[status] job=" in out and "best=+1.000%" in out and "left=∞" in out
+    # mutation: stamping the printed prefix with state.iteration labels iteration 1's events it=0
+    assert "it=1 hypothesis" in out and "it=0 hypothesis" not in out
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     assert f"Package: {run_dir / 'package'}" in out
     assert (run_dir / "package" / "scores.md").exists()
