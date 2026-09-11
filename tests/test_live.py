@@ -15,7 +15,9 @@ pytestmark = pytest.mark.live
 def test_baseline_compiles_and_scores():
     ch = os.environ.get("TALOS_LIVE_CHALLENGE", "knapsack")
     info = mainnet.fetch_challenge_info(ch)
-    name, adoption = mainnet.top_algorithm(ch)
+    top = mainnet.top_algorithm(ch)
+    assert top is not None, f"no adopted compiled algorithm for {ch}"
+    name, adoption = top
     files = mainnet.fetch_algorithm_files(ch, name)
     bench = ModalBench()
     c = bench.compile(ch, files)

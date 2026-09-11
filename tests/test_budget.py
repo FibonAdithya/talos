@@ -30,3 +30,9 @@ def test_all_none_is_invalid():
     with pytest.raises(ValueError):
         Budget(usd=None, hours=None, iterations=None, modal_usd=None).validate()
     Budget(usd=None, hours=2.0, iterations=None, modal_usd=None).validate()
+
+
+def test_modal_usd_alone_is_not_a_budget():
+    # mutation: counting modal_usd as a budget lets a run start with unbounded LLM spend
+    with pytest.raises(ValueError):
+        Budget(usd=None, hours=None, iterations=None, modal_usd=5.0).validate()

@@ -27,11 +27,12 @@ uv pip install --python .venv/bin/python -e '.[dev]'
 
 Run once. Asks for the provider kind, a model id (a sensible default is offered per
 provider), an API key for API providers (nothing for CLI providers, beyond checking the
-binary is on `PATH` and running one trivial call to confirm a logged-in session), and a
-Modal token id/secret (create one at modal.com/settings/tokens). Every credential is
-validated with one cheap call before anything is written. On success it writes
-`talos.config.json` and `.talos/secrets.json` (mode 0600, holds only the LLM key; CLI
-providers store no secret) and deploys the benchmark app to your Modal account.
+binary is on `PATH` and running one trivial call to confirm a logged-in session), a
+default mode (`single-shot` or `agentic`) for CLI providers, and a Modal token id/secret
+(create one at modal.com/settings/tokens). Every credential is validated with one cheap
+call before anything is written. On success it writes `talos.config.json` and
+`.talos/secrets.json` (mode 0600, holds only the LLM key; CLI providers store no secret)
+and deploys the benchmark app to your Modal account.
 
 ### `talos run`
 
@@ -73,12 +74,18 @@ Lists every job under `runs/`, one line each, with status, iteration, and spend.
 
 Each job gets `runs/<job_id>/`: `job.json` (immutable inputs), `state.json` (mutable
 progress, including the best candidate found), `timeline.jsonl` (one JSON event per
-line), `tacit.md` (the direction and anything learned), `iterations/<n>/` (each
-candidate's files and hypothesis), and a baseline cache. On exit, `runs/<job_id>/package/`
-holds: the best algorithm's files, `diff_vs_baseline.patch`, `scores.md` (per-nonce tables
-for baseline and candidate on training and held-out nonces), `hypotheses.md` (the full
-log with outcomes), `evidence_draft.md` (a partially filled-in TIG advance-evidence
-template), and `README.md` explaining how to submit — also zipped as `package.zip`.
+line), `tacit.md` (the direction and anything learned), and `iterations/<n>/` (each
+candidate's files and hypothesis). On exit, `runs/<job_id>/package/` holds: the best
+algorithm's files, `diff_vs_baseline.patch`, `scores.md` (per-nonce tables for baseline
+and candidate on training and held-out nonces), `hypotheses.md` (the full log with
+outcomes), `evidence_draft.md` (a partially filled-in TIG advance-evidence template), and
+`README.md` explaining how to submit — also zipped as `package.zip`.
+
+The measured baseline is cached separately from the run directory, keyed by challenge,
+monorepo ref, algorithm, nonce sets, fuel, and hardware class: real runs share
+`~/.talos/baselines/<challenge>/<key>.json` across jobs, while `--fake` runs (which use no
+real network or Modal) keep theirs under `runs/<job_id>/baseline_cache/<challenge>/<key>.json`
+instead.
 
 ## Budget
 

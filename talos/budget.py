@@ -12,7 +12,9 @@ class Budget:
     modal_usd: float | None
 
     def validate(self) -> None:
-        if all(v is None for v in (self.usd, self.hours, self.iterations, self.modal_usd)):
+        # spec §13: the run budget (usd/hours/iterations) must be given; the Modal cap is an
+        # additional always-on cap, not a substitute, so it does not count toward "at least one".
+        if all(v is None for v in (self.usd, self.hours, self.iterations)):
             raise ValueError("at least one budget dimension must be set")
         for name in ("usd", "hours", "iterations", "modal_usd"):
             v = getattr(self, name)
