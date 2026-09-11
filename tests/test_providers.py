@@ -1,11 +1,13 @@
+import io
 import json
 import types
+import urllib.error
 
-import httpx
+import httpx2
 import pytest
 
-from talos.providers import (ProviderAuthError, ProviderRateLimited, make_provider,
-                             validate_provider)
+from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
+                             make_provider, validate_provider)
 from talos.providers.fake import FakeProvider
 from talos.providers.openai_compat import OpenAICompat
 from talos.providers.pricing import estimate_cost
@@ -55,10 +57,43 @@ def test_openai_compat_maps_http_errors():
         raise HTTPError(401, "bad key")
     def post429(url, body, headers):
         raise HTTPError(429, "slow down")
+    def post503(url, body, headers):
+        raise HTTPError(503, "down for maintenance")
     with pytest.raises(ProviderAuthError):
         OpenAICompat("https://x/v1", "k", "m", post=post401).complete("s", "u")
     with pytest.raises(ProviderRateLimited):
         OpenAICompat("https://x/v1", "k", "m", post=post429).complete("s", "u")
+    # mutation: mapping 5xx to ProviderError makes one transient server error kill the run
+    with pytest.raises(ProviderRateLimited):
+        OpenAICompat("https://x/v1", "k", "m", post=post503).complete("s", "u")
+
+
+def test_post_json_handles_non_json_and_http_error(monkeypatch):
+    from talos.providers.openai_compat import HTTPError, _post_json
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"<html>oops</html>"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: FakeResp())
+    # mutation: an uncaught JSONDecodeError escapes the provider error hierarchy and crashes the loop
+    with pytest.raises(ProviderError):
+        _post_json("https://x/v1/chat/completions", {}, {})
+
+    def raise_503(req, timeout=None):
+        raise urllib.error.HTTPError("https://x/v1/chat/completions", 503, "down", {},
+                                     io.BytesIO(b"down"))
+
+    monkeypatch.setattr("urllib.request.urlopen", raise_503)
+    with pytest.raises(HTTPError) as ei:
+        _post_json("https://x/v1/chat/completions", {}, {})
+    assert ei.value.status == 503
 
 
 def test_claude_cli_parses_json_result_and_cost():
@@ -92,6 +127,34 @@ def test_codex_cli_reads_last_message_file(tmp_path):
     p = CodexCli(model="gpt-5-codex", run=run)
     c = p.complete("SYS", "USER")
     assert c.text == "edited code" and not p.metered
+
+
+def test_google_provider_header_key_and_usage():
+    from talos.providers import ProviderAuthError
+    from talos.providers.google import GoogleProvider
+    from talos.providers.openai_compat import HTTPError
+
+    seen = {}
+    def post(url, body, headers):
+        seen.update(url=url, body=body, headers=headers)
+        return {"candidates": [{"content": {"parts": [{"text": "hi "}, {"text": "there"}]}}],
+                "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 3}}
+    p = GoogleProvider(model="gemini-2.5-pro", api_key="secret-key", post=post)
+    c = p.complete("SYS", "USER")
+    assert seen["url"] == ("https://generativelanguage.googleapis.com/v1beta/models/"
+                           "gemini-2.5-pro:generateContent")
+    assert "key=" not in seen["url"]
+    assert seen["headers"]["x-goog-api-key"] == "secret-key"
+    assert seen["body"]["system_instruction"]["parts"][0]["text"] == "SYS"
+    assert seen["body"]["contents"][0]["parts"][0]["text"] == "USER"
+    assert c.text == "hi there"
+    assert c.usage.input_tokens == 7 and c.usage.output_tokens == 3
+
+    def post401(url, body, headers):
+        raise HTTPError(401, "bad key")
+    # mutation: putting the key in the URL leaks it into error messages and proxy logs
+    with pytest.raises(ProviderAuthError):
+        GoogleProvider(model="gemini-2.5-pro", api_key="secret-key", post=post401).complete("s", "u")
 
 
 def test_make_provider_kinds_and_validate():
@@ -139,11 +202,11 @@ def test_anthropic_provider_maps_errors_and_prices_usage():
     c = p.complete("s", "u")
     assert c.text == "done" and c.usage.cost_usd == pytest.approx(5.0) and p.metered
     # mutation: mapping RateLimitError to ProviderError makes the loop fail instead of wait
-    resp = httpx.Response(429, request=httpx.Request("POST", "https://x"))
+    resp = httpx2.Response(429, request=httpx2.Request("POST", "https://x"))
     err = anthropic.RateLimitError("slow", response=resp, body=None)
     with pytest.raises(ProviderRateLimited):
         AnthropicProvider("claude-opus-5", "k", client=client(err)).complete("s", "u")
-    resp = httpx.Response(401, request=httpx.Request("POST", "https://x"))
+    resp = httpx2.Response(401, request=httpx2.Request("POST", "https://x"))
     err = anthropic.AuthenticationError("bad", response=resp, body=None)
     with pytest.raises(ProviderAuthError):
         AnthropicProvider("claude-opus-5", "k", client=client(err)).complete("s", "u")

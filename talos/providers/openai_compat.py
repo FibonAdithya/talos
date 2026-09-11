@@ -24,17 +24,21 @@ def _post_json(url: str, body: dict, headers: dict) -> dict:
                                  headers={"Content-Type": "application/json", **headers})
     try:
         with urllib.request.urlopen(req, timeout=600) as r:
-            return json.load(r)
+            raw = r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         raise HTTPError(e.code, e.read().decode("utf-8", "replace")) from None
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise ProviderError(f"network error: {e}") from None
+        raise ProviderRateLimited(f"network error: {e}") from None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise ProviderError(f"non-JSON response from {url}: {raw[:200]}") from None
 
 
 def _map_http(e: HTTPError) -> ProviderError:
     if e.status in (401, 403, 402):
         return ProviderAuthError(str(e))
-    if e.status == 429:
+    if e.status == 429 or e.status >= 500:
         return ProviderRateLimited(str(e))
     return ProviderError(str(e))
 
