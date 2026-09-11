@@ -14,6 +14,8 @@ BASE = [R("t1", 0, 100), R("t1", 1, 100), R("t2", 0, 200), R("t2", 1, 200)]
 
 
 def test_track_and_bundle_delta():
+    # mutation: using min() instead of mean() for worst_rel_delta, or plain sum for
+    # mean_rel_delta, gives the wrong aggregate across t1's +0.10 and t2's 0.0
     cand = [R("t1", 0, 110), R("t1", 1, 110), R("t2", 0, 200), R("t2", 1, 200)]
     d = bundle_delta(BASE, cand)
     by = {t.track: t for t in d.tracks}
@@ -63,6 +65,7 @@ def test_beats_rejects_track_regression_and_errors():
 
 
 def test_zero_baseline_mean_raises():
+    # mutation: dropping the `bm <= 0` guard divides by zero computing rel_delta
     zero = [R("t1", 0, 0), R("t1", 1, 0)]
     with pytest.raises(ScoringError):
         bundle_delta(zero, [R("t1", 0, 5), R("t1", 1, 5)])

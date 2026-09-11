@@ -18,7 +18,9 @@ UA = "talos-tig"
 
 
 class MainnetError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def _get(url: str, accept: str) -> bytes:
@@ -27,9 +29,9 @@ def _get(url: str, accept: str) -> bytes:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
             return r.read()
     except urllib.error.HTTPError as e:
-        raise MainnetError(f"HTTP {e.code} fetching {url}") from None
+        raise MainnetError(f"HTTP {e.code} fetching {url}", status=e.code) from None
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise MainnetError(f"network error fetching {url}: {e}") from None
+        raise MainnetError(f"network error fetching {url}: {e}", status=None) from None
 
 
 def _get_json(url: str):
@@ -114,7 +116,9 @@ def fetch_algorithm_files(name: str, algorithm: str, get_text=_get_text,
     base_dir = f"tig-algorithms/src/{name}/{algorithm}"
     try:
         paths = _walk(base_dir, ref, get_json)
-    except MainnetError:
+    except MainnetError as e:
+        if e.status != 404:
+            raise
         single = f"tig-algorithms/src/{name}/{algorithm}.rs"
         return {"mod.rs": get_text(f"{GH_RAW}/{ref}/{single}")}
     files: dict[str, str] = {}

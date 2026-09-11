@@ -51,6 +51,7 @@ def test_challenge_info_reads_tracks_and_fuel_sorted():
 
 
 def test_challenge_info_unknown_name_raises():
+    # mutation: dropping the trailing raise after the loop returns None for an unknown name
     with pytest.raises(mainnet.MainnetError):
         mainnet.fetch_challenge_info("nope", get_json=fake_get_json)
 
@@ -62,6 +63,7 @@ def test_top_algorithm_skips_uncompiled_and_other_challenges():
 
 
 def test_top_algorithm_none_when_no_adoption():
+    # mutation: treating adoption 0 or a missing algo_name as a valid best returns a tuple, not None
     def gj(url):
         if "/get-algorithms?" in url:
             return {"codes": [], "binarys": []}
@@ -78,6 +80,7 @@ def test_fetch_algorithm_files_relative_paths():
 
 
 def test_fetch_template_url():
+    # mutation: fetching from `main` instead of MONOREPO_REF drifts the template
     seen = []
     def gt(url):
         seen.append(url)
@@ -85,3 +88,32 @@ def test_fetch_template_url():
     assert "solve_challenge" in mainnet.fetch_template("knapsack", get_text=gt)
     assert seen == ["https://raw.githubusercontent.com/tig-foundation/tig-monorepo/"
                     "84a5787f5b14a630bdf40f52bccf37887d3d8464/tig-algorithms/src/knapsack/template.rs"]
+
+
+def test_fetch_algorithm_files_404_falls_back_to_single_file():
+    # mutation: catching every MainnetError (not just status==404) would also pass this case,
+    # but pins that a 404 specifically is the single-file signal, matched against test_500 below
+    def gj(url):
+        if "/contents/" in url:
+            raise mainnet.MainnetError(f"HTTP 404 fetching {url}", status=404)
+        return fake_get_json(url)
+    seen = []
+    def gt(url):
+        seen.append(url)
+        return "// solo"
+    files = mainnet.fetch_algorithm_files("knapsack", "solo", get_text=gt, get_json=gj)
+    assert files == {"mod.rs": "// solo"}
+    assert seen == ["https://raw.githubusercontent.com/tig-foundation/tig-monorepo/"
+                    "knapsack/solo/tig-algorithms/src/knapsack/solo.rs"]
+
+
+def test_fetch_algorithm_files_500_reraises():
+    # mutation: the broad `except MainnetError` swallows the 500 and silently returns a
+    # single-file fallback result instead of aborting
+    def gj(url):
+        if "/contents/" in url:
+            raise mainnet.MainnetError(f"HTTP 500 fetching {url}", status=500)
+        return fake_get_json(url)
+    with pytest.raises(mainnet.MainnetError):
+        mainnet.fetch_algorithm_files("vehicle_routing", "fast_lane_v6",
+                                      get_text=fake_get_text, get_json=gj)

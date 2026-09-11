@@ -2,6 +2,7 @@ from talos.nonces import draw_nonce_sets, new_rand_hash, HOLDOUT_START
 
 
 def test_rand_hash_is_64_hex():
+    # mutation: token_hex(16) instead of token_hex(32) halves the length to 32 hex chars
     h = new_rand_hash()
     assert len(h) == 64 and int(h, 16) >= 0
     assert new_rand_hash() != h
