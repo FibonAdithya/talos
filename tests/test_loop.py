@@ -1,6 +1,9 @@
 import json
+import types
 
-from talos.budget import Budget, Spend
+import pytest
+
+from talos.budget import Budget, BudgetExhausted, Spend
 from talos.bench import FakeBench
 from talos.loop import Loop, Thresholds
 from talos.providers import ProviderAuthError, ProviderRateLimited
@@ -341,12 +344,73 @@ def test_confirm_still_honours_the_time_cap(tmp_path):
     assert st.best is not None and st.best.holdout is None  # refused, not waved through
 
 
-def test_rejected_edit_paths_are_reported(tmp_path):
+def test_rejected_edit_paths_fail_the_iteration(tmp_path):
+    # spec §9: an edit outside the algorithm files fails the iteration in both modes.
+    # mutation: applying the in-scope blocks after a rejected one lets an out-of-scope edit go
+    # unpunished — the response below would otherwise reach "won" on its second block.
     # mutation: dropping the edits_rejected event hides an LLM trying to write outside the
     # algorithm's own files
     stray = "<<<<<<< SEARCH Cargo.toml\nfoo\n=======\nbar\n>>>>>>> REPLACE\n" + edit(5)
-    loop, fp, fb, store = make(tmp_path, [hyp("a"), stray])
-    assert loop.run().status == "won"  # the in-scope block still applied
+    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), stray], budget=b)
+    st = loop.run()
+    assert st.status == "exhausted" and st.best is None
+    assert st.hypotheses[0]["outcome"] == "failed:edit"
+    assert "Cargo.toml" in st.hypotheses[0]["error"]
+    assert fb.compile_calls == 1  # baseline registration only: the candidate never reached compile
     events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
     rejected = [e for e in events if e["kind"] == "edits_rejected"]
     assert rejected and rejected[0]["paths"] == ["Cargo.toml"]
+
+
+def test_baseline_is_budget_checked_before_the_first_modal_call(tmp_path):
+    # mutation: an unchecked baseline spends the whole Modal budget before the first check —
+    # resolve_baseline makes one compile and two scoring runs of its own
+    b = Budget(usd=None, hours=None, iterations=20, modal_usd=0.0)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
+    loop.state.baseline = None
+    calls_before = fb.compile_calls
+    mainnet = types.SimpleNamespace(
+        top_algorithm=lambda ch: ("base", 1),
+        fetch_algorithm_files=lambda ch, name: BASE_FILES,
+        fetch_template=lambda ch: "pub fn solve_challenge(")
+    with pytest.raises(BudgetExhausted) as ei:
+        loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
+    assert ei.value.dimension == "modal_usd"
+    assert fb.compile_calls == calls_before  # nothing was compiled
+    assert not (tmp_path / "cache").exists()
+
+
+def test_baseline_modal_cost_is_charged_per_call(tmp_path):
+    # mutation: accounting for the baseline's Modal cost only after resolve_baseline returns
+    # lets a cold baseline run past the cap and charges it when it is too late to matter
+    b = Budget(usd=None, hours=None, iterations=20, modal_usd=0.015)  # one scored nonce = 0.01
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
+    loop.state.baseline = None
+    mainnet = types.SimpleNamespace(
+        top_algorithm=lambda ch: ("base", 1),
+        fetch_algorithm_files=lambda ch, name: BASE_FILES,
+        fetch_template=lambda ch: "pub fn solve_challenge(")
+    with pytest.raises(BudgetExhausted):
+        loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
+    # the compile and the training scoring run charged before the next call was refused
+    assert loop.state.spend.modal_usd > 0.0
+    assert json.loads((tmp_path / "state.json").read_text())["spend"]["modal_usd"] > 0.0
+
+
+def test_baseline_and_best_dirs_are_written(tmp_path):
+    # spec §5.4: runs/<job>/baseline/ and best/ hold the current sources on disk.
+    # mutation: never writing them leaves two directories the spec promises permanently empty
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)])
+    loop.state.baseline = None
+    mainnet = types.SimpleNamespace(
+        top_algorithm=lambda ch: ("base", 1),
+        fetch_algorithm_files=lambda ch, name: BASE_FILES,
+        fetch_template=lambda ch: "pub fn solve_challenge(")
+    loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
+    assert (tmp_path / "baseline" / "mod.rs").read_text() == BASE_FILES["mod.rs"]
+    results = json.loads((tmp_path / "baseline" / "results.json").read_text())
+    assert len(results["training"]) == 4 and len(results["holdout"]) == 4
+    st = loop.run()
+    assert st.status == "won"
+    assert "let k = 5;" in (tmp_path / "best" / "mod.rs").read_text()

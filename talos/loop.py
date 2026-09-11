@@ -38,6 +38,41 @@ class Interrupted(Exception):
     pass
 
 
+class _BudgetedBench:
+    """The bench, with the loop's budget check and cost accounting around every call.
+
+    resolve_baseline makes one compile and two scoring runs of its own, and on a cold cache
+    those are the most expensive Modal calls of the whole job. Handing it the raw bench let a
+    baseline run to completion with --budget-modal-usd 0, and charged its cost only after the
+    last call had already happened."""
+
+    def __init__(self, loop: "Loop"):
+        self._loop = loop
+        self._bench = loop.bench
+
+    def _metered(self, call):
+        loop = self._loop
+        loop._check_budget()
+        mark = self._bench.cost_mark()
+        try:
+            return call()
+        finally:
+            loop.state.spend.modal_usd += self._bench.cost_usd_since(mark)
+            loop._save()
+
+    def compile(self, challenge: str, files: dict[str, str]):
+        return self._metered(lambda: self._bench.compile(challenge, files))
+
+    def score(self, challenge: str, artifact_id: str, nonce_sets, fuel: int):
+        return self._metered(lambda: self._bench.score(challenge, artifact_id, nonce_sets, fuel))
+
+    def cost_mark(self) -> float:
+        return self._bench.cost_mark()
+
+    def cost_usd_since(self, mark: float) -> float:
+        return self._bench.cost_usd_since(mark)
+
+
 class Loop:
     def __init__(self, spec: JobSpec, state: JobState, store: JobStore, provider, bench,
                  template_rs: str, clock=time.time, sleep=time.sleep,
@@ -122,20 +157,35 @@ class Loop:
     # ── baseline ──────────────────────────────────────────────────────
 
     def measure_baseline(self, cache_dir, hardware_class: str, mainnet=None) -> None:
+        self._check_budget()  # a zero (or already spent) Modal cap must bite before the compile
         self.state.status = "measuring_baseline"
         self._save()
         kw = {"mainnet": mainnet} if mainnet else {}
-        mark = self.bench.cost_mark()
         rec, template = resolve_baseline(self.spec.challenge, self.spec.training,
-                                         self.spec.holdout, self.spec.fuel, self.bench,
+                                         self.spec.holdout, self.spec.fuel, _BudgetedBench(self),
                                          cache_dir, hardware_class,
                                          log=lambda m: self._event("baseline", message=m), **kw)
-        self.state.spend.modal_usd += self.bench.cost_usd_since(mark)
         self.state.baseline = rec
         self.template_rs = template
         self.state.status = "researching"
         self._save()
+        self._write_files(self.store.run_dir / "baseline", rec.files)
+        (self.store.run_dir / "baseline" / "results.json").write_text(json.dumps(
+            {"training": [r.to_dict() for r in rec.training],
+             "holdout": [r.to_dict() for r in rec.holdout]}, indent=1))
         self._event("baseline_ready", name=rec.name, adoption=rec.adoption)
+
+    @staticmethod
+    def _write_files(directory, files: dict[str, str]) -> None:
+        """spec §5.4: `baseline/` and `best/` in the run directory hold the current sources as
+        plain files, replaced whole so they never mix two candidates' files."""
+        if directory.exists():
+            shutil.rmtree(directory)
+        directory.mkdir(parents=True)
+        for name, text in files.items():
+            p = directory / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
 
     # ── context ───────────────────────────────────────────────────────
 
@@ -186,7 +236,11 @@ class Loop:
             repaired = apply_edit_response(outcome.files, self._llm(system, user).text)
             outcome = repaired
         if outcome.rejected:
+            # spec §9: an edit outside the algorithm files fails the iteration in BOTH modes.
+            # Applying the in-scope blocks of the same response and carrying on would let the
+            # out-of-scope block go unpunished and reward a response that tried it.
             self._event("edits_rejected", paths=outcome.rejected)
+            raise EditError(f"edit outside the algorithm files rejected: {sorted(outcome.rejected)}")
         if outcome.applied == 0:
             raise EditError("no edit block applied")
         return hypothesis, outcome.files
@@ -258,6 +312,7 @@ class Loop:
         improved = delta.mean_rel_delta > self._best_delta() or wins
         if improved:
             self.state.best = cand
+            self._write_files(self.store.run_dir / "best", cand.files)
             record["outcome"] = "improved"
         else:
             record["outcome"] = "failed:score"
