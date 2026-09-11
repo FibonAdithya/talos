@@ -293,6 +293,54 @@ def test_status_lists_every_run(tmp_path, monkeypatch, capsys):
     assert "20260102-000000-knapsack: failed it=2" in out
 
 
+def test_unpriced_model_refuses_a_dollar_only_budget(tmp_path, monkeypatch, capsys):
+    # mutation: a None cost silently disables the dollar cap. estimate_cost has no entry for
+    # gpt-5, so every Completion carries cost_usd=None, spend.llm_usd stays 0.00 and a
+    # --budget-usd-only job runs forever.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
+    save(tmp_path, Config(provider="openai", model="gpt-5", mode="single-shot", api_base=None),
+         None)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = []
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.append(spec) or 0)
+    base = ["run", "--challenge", "knapsack", "--direction", "go", "--yes"]
+    assert cli.main(base + ["--budget-usd", "5"]) == 2
+    err = capsys.readouterr().err
+    assert "gpt-5 has no price-table entry" in err
+    assert "--budget-hours or --budget-iterations" in err
+    assert not seen and not (tmp_path / "runs").exists()  # refused before anything was created
+    # another real cap present: the job runs, with the warning
+    assert cli.main(base + ["--budget-usd", "5", "--budget-iterations", "3"]) == 0
+    assert seen and "no price-table entry" in capsys.readouterr().err
+    # mutation: a priced model must NOT be warned about or refused
+    save(tmp_path, Config(provider="anthropic", model="claude-opus-5", mode="single-shot",
+                          api_base=None), None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    assert cli.main(base + ["--budget-usd", "5"]) == 0
+    assert "price-table" not in capsys.readouterr().err
+
+
+def test_status_line_says_unpriced_instead_of_zero_dollars(tmp_path):
+    # mutation: printing $0.00 for an unpriced model reports "we measured nothing spent" when
+    # the truth is "we cannot measure what is being spent"
+    from talos.budget import Budget, Spend
+    from talos.state import JobState
+
+    def line(provider, model):
+        spec = cli.JobSpec(job_id="j", challenge="knapsack", direction="d", provider=provider,
+                           model=model, mode="single-shot",
+                           budget=Budget(usd=5.0, hours=None, iterations=None, modal_usd=1.0),
+                           rand_hash="ab" * 32, tracks=["t"], training=[], holdout=[], fuel=1,
+                           created_at=0.0, monorepo_ref="r", challenge_id="c003")
+        return cli._status_line(spec, JobState.fresh(Spend(started_at=0.0)), 0.0)
+
+    assert "llm=unpriced" in line("openai", "gpt-5")
+    assert "llm=$0.00" in line("anthropic", "claude-opus-5")
+    assert "llm=$0.00" in line("claude-cli", "claude-opus-5")  # a CLI provider bills no tokens
+
+
 def test_run_refuses_agentic_codex_without_the_opt_in(tmp_path, monkeypatch, capsys):
     # mutation: leaving the refusal to attach_agentic tells the user only after the baseline has
     # been measured, i.e. after Modal has already been paid for

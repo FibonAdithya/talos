@@ -22,7 +22,9 @@ from talos.config import Config, ConfigError, ENV_KEYS, load, resolve_api_key, s
 from talos.mainnet import ChallengeInfo, MainnetError, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
+from talos.providers.pricing import estimate_cost
 from talos.state import JobSpec, JobState, JobStore
+from talos.types import Usage
 
 BASELINE_CACHE = Path.home() / ".talos" / "baselines"
 MODAL_APP_FILE = Path(__file__).resolve().parent.parent / "modal_app" / "talos_bench.py"
@@ -110,14 +112,22 @@ FAKE_MAINNET = types.SimpleNamespace(
     fetch_template=lambda ch: "pub fn solve_challenge(")
 
 
+def unpriced(provider: str, model: str) -> bool:
+    """True when the provider bills for tokens but Talos has no price for this model. Every
+    Completion then carries cost_usd=None, so llm_usd stays 0.00: it must be reported as
+    "unpriced", never as a measured $0.00, and --budget-usd cannot be enforced against it."""
+    return provider not in UNMETERED and estimate_cost(model, Usage(1, 1)) is None
+
+
 def _status_line(spec: JobSpec, state: JobState, now: float) -> str:
     best = f"{state.best.delta['mean_rel_delta']:+.3%}" if state.best else "n/a"
     if spec.budget.hours is None:
         left = "∞"
     else:
         left = f"{max(0.0, spec.budget.hours - (now - state.spend.started_at) / 3600):.1f}h"
+    llm = "unpriced" if unpriced(spec.provider, spec.model) else f"${state.spend.llm_usd:.2f}"
     return (f"[status] job={spec.job_id} it={state.iteration} best={best} "
-            f"llm=${state.spend.llm_usd:.2f} modal≈${state.spend.modal_usd:.2f} left={left}")
+            f"llm={llm} modal≈${state.spend.modal_usd:.2f} left={left}")
 
 
 def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> int:
@@ -191,7 +201,9 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         print(f"Best delta vs baseline: {final.best.delta['mean_rel_delta']:+.3%}")
     else:
         print("Best delta vs baseline: n/a (no candidate)")
-    print(f"LLM spend: ${final.spend.llm_usd:.2f}   Modal spend (estimated): ${final.spend.modal_usd:.2f}")
+    llm = (f"unpriced (no price-table entry for {spec.model})"
+           if unpriced(spec.provider, spec.model) else f"${final.spend.llm_usd:.2f}")
+    print(f"LLM spend: {llm}   Modal spend (estimated): ${final.spend.modal_usd:.2f}")
     print(f"Package: {pkg}")
     return 0 if final.status == "won" else 1
 
@@ -264,6 +276,15 @@ def cmd_run(args, ask) -> int:
         else:
             budget = replace(budget, modal_usd=float(ask("Modal budget in USD",
                                                          str(DEFAULT_MODAL_USD))))
+    # A dollar cap on an unpriced model is a cap that can never fire: the provider reports no
+    # cost, so llm_usd never rises. Refuse rather than run a job with no effective cap at all.
+    if unpriced(cfg.provider, cfg.model):
+        if budget.hours is None and budget.iterations is None:
+            print(f"model {cfg.model} has no price-table entry, so --budget-usd cannot be "
+                  f"enforced; add --budget-hours or --budget-iterations", file=sys.stderr)
+            return 2
+        print(f"warning: model {cfg.model} has no price-table entry; LLM spend is not measured "
+              f"and --budget-usd is not enforced for this run", file=sys.stderr)
     if args.fake:
         info = ChallengeInfo(id="c003", name=challenge, is_gpu=False, tracks=["n=1"], max_fuel=1)
     else:
