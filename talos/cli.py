@@ -19,7 +19,7 @@ from pathlib import Path
 from talos.budget import Budget, Spend
 from talos.challenges import CHALLENGES, MONOREPO_REF
 from talos.config import Config, ConfigError, ENV_KEYS, load, resolve_api_key, save
-from talos.mainnet import MainnetError, fetch_challenge_info
+from talos.mainnet import ChallengeInfo, MainnetError, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
 from talos.state import JobSpec, JobState, JobStore
@@ -198,11 +198,16 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
 
 def cmd_run(args, ask) -> int:
     root = Path.cwd()
-    try:
-        cfg = load(root)
-    except ConfigError as e:
-        print(str(e), file=sys.stderr)
-        return 2
+    # spec §11: --fake needs neither a config file nor network, so it must be resolved before
+    # `load(root)` is even attempted; a fresh clone with no talos.config.json still runs it.
+    if args.fake:
+        cfg = Config(provider="fake", model="fake", mode="single-shot", api_base=None)
+    else:
+        try:
+            cfg = load(root)
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 2
     if args.mode:
         if args.mode == "agentic" and cfg.provider not in CLI_PROVIDERS:
             print(f"--mode agentic needs a CLI provider ({' or '.join(CLI_PROVIDERS)}), "
@@ -254,11 +259,14 @@ def cmd_run(args, ask) -> int:
         else:
             budget = replace(budget, modal_usd=float(ask("Modal budget in USD",
                                                          str(DEFAULT_MODAL_USD))))
-    try:
-        info = fetch_challenge_info(challenge)
-    except MainnetError as e:
-        print(f"mainnet unreachable: {e}", file=sys.stderr)
-        return 1
+    if args.fake:
+        info = ChallengeInfo(id="c003", name=challenge, is_gpu=False, tracks=["n=1"], max_fuel=1)
+    else:
+        try:
+            info = fetch_challenge_info(challenge)
+        except MainnetError as e:
+            print(f"mainnet unreachable: {e}", file=sys.stderr)
+            return 1
     rand_hash = new_rand_hash()
     training, holdout = draw_nonce_sets(info.tracks, rand_hash)
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
@@ -311,6 +319,7 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--budget-modal-usd", type=float)
     r.add_argument("--resume")
     r.add_argument("--yes", action="store_true")
+    r.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)
     c = sub.add_parser("compile")
     c.add_argument("--challenge", required=True)
     c.add_argument("--dir", default="algorithm")

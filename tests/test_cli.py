@@ -168,6 +168,23 @@ def test_fake_run_end_to_end_wins_and_packages(tmp_path, monkeypatch, capsys):
     assert "let k = 2;" in best["files"]["mod.rs"]
 
 
+def test_fake_flag_needs_no_config_and_never_touches_mainnet(tmp_path, monkeypatch, capsys):
+    # mutation: reading the config or calling mainnet under --fake makes the flag useless on a
+    # fresh clone; a real clone has neither talos.config.json nor Modal/LLM credentials
+    monkeypatch.chdir(tmp_path)
+    assert not (tmp_path / "talos.config.json").exists()
+
+    def boom(name):
+        raise AssertionError("fetch_challenge_info must not be called under --fake")
+    monkeypatch.setattr(cli, "fetch_challenge_info", boom)
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "test",
+                   "--budget-iterations", "5", "--yes", "--fake"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Status: won" in out
+    assert not (tmp_path / "talos.config.json").exists()
+
+
 def test_resume_restarts_a_cancelled_job(tmp_path, monkeypatch, capsys):
     # mutation: resuming a cancelled job with a terminal status makes run() return immediately
     monkeypatch.chdir(tmp_path)
