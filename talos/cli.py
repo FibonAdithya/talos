@@ -17,7 +17,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from talos.budget import Budget, Spend
-from talos.challenges import CHALLENGES, MONOREPO_REF
+from talos.challenges import CHALLENGES, MONOREPO_REF, hardware_class
 from talos.config import Config, ConfigError, ENV_KEYS, load, resolve_api_key, save
 from talos.mainnet import ChallengeInfo, MainnetError, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
@@ -171,8 +171,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         bench = ModalBench()
         cache_dir, mainnet = BASELINE_CACHE, None
     from talos.loop import Loop
-    spec_cls = CHALLENGES[spec.challenge]
-    hardware = spec_cls.gpu or f"cpu{spec_cls.cpu}"
+    hardware = hardware_class(CHALLENGES[spec.challenge])
 
     def on_event(kind, data):
         line = f"[{time.strftime('%H:%M:%S')}] it={state.iteration} {kind} " + \

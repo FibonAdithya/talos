@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from pathlib import Path
 
 from talos import mainnet as _mainnet
@@ -24,6 +25,25 @@ def cache_key(challenge: str, monorepo_ref: str, name: str, training: list[Nonce
                "holdout": [(n.track, n.rand_hash, n.start, n.count) for n in holdout]}
     h.update(json.dumps(payload, sort_keys=True).encode())
     return h.hexdigest()[:24]
+
+
+def _require_scoreable(challenge: str, fuel: int, label: str, nonce_sets: list[NonceSet],
+                      results: list[NonceResult]) -> None:
+    """A baseline that scores nothing on a track cannot be compared against, let alone beaten:
+    every iteration would fail at scoring until the budget was gone. Fail here, once, naming the
+    error kinds, rather than once per iteration for the rest of the run."""
+    by_track: dict[str, list[NonceResult]] = {ns.track: [] for ns in nonce_sets}
+    for r in results:
+        by_track.setdefault(r.track, []).append(r)
+    for track, rows in sorted(by_track.items()):
+        ok = [r for r in rows if r.ok and r.quality is not None]
+        mean_quality = sum(r.quality for r in ok) / len(ok) if ok else 0.0
+        if not ok or mean_quality <= 0:
+            kinds = dict(Counter(r.error for r in rows))
+            raise BaselineError(
+                f"baseline for {challenge} at fuel {fuel} is unscoreable on {label} track "
+                f"{track!r}: {len(ok)}/{len(rows)} nonces scored, mean quality {mean_quality:g}, "
+                f"errors {kinds}")
 
 
 def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[NonceSet],
@@ -54,6 +74,8 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
     tr: list[NonceResult] = bench.score(challenge, c.artifact_id, training, fuel)
     log("baseline: scoring held-out nonces")
     ho: list[NonceResult] = bench.score(challenge, c.artifact_id, holdout, fuel)
+    _require_scoreable(challenge, fuel, "training", training, tr)
+    _require_scoreable(challenge, fuel, "held-out", holdout, ho)
     rec = BaselineRecord(name=name, adoption=adoption, artifact_id=c.artifact_id, files=files,
                          training=tr, holdout=ho)
     cache_file.parent.mkdir(parents=True, exist_ok=True)

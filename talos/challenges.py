@@ -37,6 +37,13 @@ def _gpu(name: str, cid: str) -> ChallengeSpec:
     return ChallengeSpec(name=name, id=cid, is_gpu=True, gpu="L40S")
 
 
+def hardware_class(spec: ChallengeSpec) -> str:
+    """Part of the baseline cache key. A measurement is only reusable on the same hardware, and
+    memory belongs in the key as much as cores do: changing memory_mib alone changes the timings
+    (and the price per second) a cached baseline was measured under."""
+    return f"gpu-{spec.gpu}" if spec.is_gpu else f"cpu{spec.cpu}-mem{spec.memory_mib}"
+
+
 CHALLENGES: dict[str, ChallengeSpec] = {
     s.name: s
     for s in (
