@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from talos.baseline import resolve_baseline
@@ -42,15 +42,18 @@ class Loop:
     def __init__(self, spec: JobSpec, state: JobState, store: JobStore, provider, bench,
                  template_rs: str, clock=time.time, sleep=time.sleep,
                  on_event: Callable[[str, dict], None] | None = None,
-                 thresholds: Thresholds = Thresholds()):
+                 thresholds: Thresholds | None = None):
         self.spec, self.state, self.store = spec, state, store
         self.provider, self.bench = provider, bench
         self.template_rs = template_rs
         self.clock, self.sleep = clock, sleep
         self.on_event = on_event or (lambda kind, data: None)
-        self.t = thresholds
+        self.t = thresholds or Thresholds()
         self.rule = CHALLENGES[spec.challenge].beat
         self._stop = False
+        # The iteration an event belongs to. state.iteration only catches up when the iteration
+        # finishes, so events raised mid-iteration would otherwise carry the previous number.
+        self._n = state.iteration
         self.propose_and_edit = self.single_shot_propose_and_edit
 
     # ── plumbing ──────────────────────────────────────────────────────
@@ -59,14 +62,20 @@ class Loop:
         self._stop = True
 
     def _event(self, kind: str, **data) -> None:
-        self.store.event(kind, iteration=self.state.iteration, **data)
+        self.store.event(kind, iteration=self._n, **data)
         self.on_event(kind, data)
 
     def _save(self) -> None:
         self.store.save(self.state)
 
-    def _check_budget(self) -> None:
-        dim = exhausted(self.spec.budget, self.state.spend, self.clock())
+    def _check_budget(self, count_iterations: bool = True) -> None:
+        """count_iterations=False exempts a held-out confirmation from the iterations cap: the
+        candidate has already been scored and made best, and aborting the confirmation would
+        strand the job at "confirming" with a proven win it can never record. Every spend
+        dimension (usd, hours, modal_usd) still applies."""
+        budget = self.spec.budget if count_iterations else replace(self.spec.budget,
+                                                                   iterations=None)
+        dim = exhausted(budget, self.state.spend, self.clock())
         if dim:
             raise BudgetExhausted(dim)
         if self._stop:
@@ -85,6 +94,7 @@ class Loop:
                     raise ProviderError(f"gave up after {waits} rate-limit waits: {e}")
                 self._event("rate_limited", wait_s=self.t.rate_limit_wait_s)
                 self.sleep(self.t.rate_limit_wait_s)
+                self._check_budget()  # a stop or an hours cap must land during a rate-limit storm
         if c.usage.cost_usd:
             self.state.spend.llm_usd += c.usage.cost_usd
         self._save()
@@ -98,8 +108,8 @@ class Loop:
         self._save()
         return r
 
-    def _bench_score(self, artifact_id, nonce_sets):
-        self._check_budget()
+    def _bench_score(self, artifact_id, nonce_sets, count_iterations: bool = True):
+        self._check_budget(count_iterations)
         mark = self.bench.cost_mark()
         r = self.bench.score(self.spec.challenge, artifact_id, nonce_sets, self.spec.fuel)
         self.state.spend.modal_usd += self.bench.cost_usd_since(mark)
@@ -172,6 +182,8 @@ class Loop:
             system, user = edit_repair_prompts(ctx, outcome.files, format_misses(outcome.misses))
             repaired = apply_edit_response(outcome.files, self._llm(system, user).text)
             outcome = repaired
+        if outcome.rejected:
+            self._event("edits_rejected", paths=outcome.rejected)
         if outcome.applied == 0:
             raise EditError("no edit block applied")
         return hypothesis, outcome.files
@@ -180,6 +192,7 @@ class Loop:
 
     def iterate(self) -> None:
         n = self.state.iteration + 1
+        self._n = n
         it_dir = self.store.iteration_dir(n)
         ctx = self._context()
         anchor = self.state.best.iteration if self.state.best else 0
@@ -204,9 +217,12 @@ class Loop:
             self._event("compile_failed", output=comp.output[-2000:])
             system, user = compile_fix_prompts(ctx, files, comp.output)
             try:
-                files = apply_edit_response(files, self._llm(system, user).text).files
+                fixed = apply_edit_response(files, self._llm(system, user).text)
             except EditError:
                 break
+            if fixed.applied == 0:
+                break  # byte-identical files; recompiling them would only repeat the same error
+            files = fixed.files
             comp = self._bench_compile(files)
         if not comp.ok:
             record.update(outcome="failed:compile")
@@ -232,40 +248,61 @@ class Loop:
             record.update(outcome="failed:runtime", error_rate=delta.error_rate)
             self._finish_iteration(n, record, improved=False)
             return
-        improved = (delta.mean_rel_delta > self._best_delta()
-                    or self.state.best is None and delta.mean_rel_delta > 0)
+        # spec §7.7: a candidate that beats the baseline on training becomes the best, whether or
+        # not the held-out set goes on to confirm it. Confirming a candidate that is not best would
+        # report "won" with different code in state.best.
+        wins = beats(self.state.baseline.training, results, self.rule)
+        improved = delta.mean_rel_delta > self._best_delta() or wins
         if improved:
             self.state.best = cand
             record["outcome"] = "improved"
         else:
             record["outcome"] = "failed:score"
-
-        if beats(self.state.baseline.training, results, self.rule):
-            self._confirm(cand)
+        # The record and the iteration bump are persisted BEFORE the held-out run, so a kill during
+        # confirmation resumes into _confirm instead of discarding the winning iteration.
         self._finish_iteration(n, record, improved=improved)
+        if wins:
+            self._confirm(cand)
 
     def _confirm(self, cand: Candidate) -> None:
         self.state.status = "confirming"
         self._save()
         self._event("confirming")
-        ho = self._bench_score(cand.artifact_id, self.spec.holdout)
+        ho = self._bench_score(cand.artifact_id, self.spec.holdout, count_iterations=False)
         cand.holdout = ho
-        if beats(self.state.baseline.holdout, ho, self.rule):
+        try:
+            won = beats(self.state.baseline.holdout, ho, self.rule)
+            holdout_delta = bundle_delta(self.state.baseline.holdout, ho).to_dict()
+        except ScoringError as e:
+            # An unscoreable held-out run is not a win; it must not leave the job at "confirming".
+            self.state.false_positives.append(cand.iteration)
+            self.state.status = "researching"
+            self._save()
+            self._event("false_positive", error=str(e))
+            return
+        if won:
             self.state.confirmed.append(cand.iteration)
             self.state.status = "won"
             self.state.stop_reason = "beat baseline on training and held-out nonces"
-            self._event("won", holdout=bundle_delta(self.state.baseline.holdout, ho).to_dict())
+            self._mark_won(cand.iteration)
+            self._event("won", holdout=holdout_delta)
         else:
             self.state.false_positives.append(cand.iteration)
             self.state.status = "researching"
-            self._event("false_positive",
-                        holdout=bundle_delta(self.state.baseline.holdout, ho).to_dict())
+            self._event("false_positive", holdout=holdout_delta)
         self._save()
+
+    def _mark_won(self, iteration: int) -> None:
+        """The record for this iteration was appended by _finish_iteration just before the
+        held-out run, so it is the last one — but check rather than assume."""
+        if self.state.hypotheses and self.state.hypotheses[-1].get("iteration") == iteration:
+            self.state.hypotheses[-1]["outcome"] = "won"
 
     def _finish_iteration(self, n: int, record: dict, improved: bool) -> None:
         self.state.iteration = n
         self.state.spend.iterations += 1
         self.state.hypotheses.append(record)
+        self._n = n
         if improved:
             self.state.runs_since_improvement = 0
         else:
@@ -284,9 +321,12 @@ class Loop:
             return
         system, user = distill_prompts(self._context(), failed)
         try:
-            lesson = parse_distillation(self._llm(system, user).text)
+            text = self._llm(system, user).text
+        except ProviderAuthError:
+            raise  # spec §9: a dead key or a billing failure stops the run at once
         except ProviderError:
             return
+        lesson = parse_distillation(text)
         if lesson:
             self.state.tacit = (self.state.tacit.rstrip() + f"\n- LLM: {lesson}\n").lstrip()
             (self.store.run_dir / "tacit.md").write_text(self.state.tacit)
@@ -303,12 +343,16 @@ class Loop:
             self._event("discarded_incomplete", discarded=n)
 
     def run(self) -> JobState:
-        self._discard_incomplete_iteration()
         if self.state.status in TERMINAL:
-            return self.state
-        self.state.status = "researching"
-        self._save()
+            return self.state  # before the discard: a finished job keeps its winning directory
+        self._discard_incomplete_iteration()
         try:
+            if (self.state.status == "confirming" and self.state.best is not None
+                    and self.state.best.holdout is None):
+                self._confirm(self.state.best)  # a confirmation killed mid-flight; finish it
+            else:
+                self.state.status = "researching"
+                self._save()
             while self.state.status not in TERMINAL:
                 self._check_budget()
                 self.iterate()

@@ -1,8 +1,11 @@
+import json
+
 from talos.budget import Budget, Spend
 from talos.bench import FakeBench
 from talos.loop import Loop, Thresholds
+from talos.providers import ProviderAuthError, ProviderRateLimited
 from talos.providers.fake import FakeProvider
-from talos.state import BaselineRecord, JobSpec, JobState, JobStore
+from talos.state import BaselineRecord, Candidate, JobSpec, JobState, JobStore
 from talos.types import NonceResult, NonceSet
 
 HASH = "ab" * 32
@@ -19,9 +22,9 @@ def spec(budget=None):
                    monorepo_ref="r", challenge_id="c003")
 
 
-def baseline(q=100):
+def baseline(q=100, holdout_n=4):
     tr = [NonceResult("t", n, True, q, 1) for n in range(4)]
-    ho = [NonceResult("t", 1_000_000 + n, True, q, 1) for n in range(4)]
+    ho = [NonceResult("t", 1_000_000 + n, True, q, 1) for n in range(holdout_n)]
     return BaselineRecord(name="base", adoption=1, artifact_id="base-art", files=BASE_FILES,
                           training=tr, holdout=ho)
 
@@ -43,12 +46,12 @@ def quality_from_files(challenge, files, ns):
     return [100 + k - 1 for _ in ns.nonces()]  # k=1 -> 100 (baseline parity)
 
 
-def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=None):
+def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=None, holdout_n=4):
     store = JobStore(tmp_path)
     sp = spec(budget)
     store.write_spec(sp)
     st = JobState.fresh(Spend(started_at=0.0))
-    st.baseline = baseline()
+    st.baseline = baseline(holdout_n=holdout_n)
     st.status = "researching"
     st.best = None
     fb = FakeBench(scores)
@@ -66,6 +69,14 @@ def test_win_requires_training_then_holdout_beat(tmp_path):
     assert st.status == "won" and st.best.iteration == 1
     assert st.best.holdout is not None and st.confirmed == [1]
     assert fb.score_calls == 1 + 1  # training, then held-out
+    # mutation: stamping events with state.iteration labels iteration 1's events as iteration 0
+    raw = (tmp_path / "timeline.jsonl").read_text()
+    events = [json.loads(ln) for ln in raw.splitlines()]
+    mid = [e for e in events if e["kind"] in ("hypothesis", "scored", "confirming", "won")]
+    assert mid and all(e["iteration"] == 1 for e in mid)
+    # spec §7.10: the rand_hash reaches neither the timeline nor a prompt
+    assert HASH not in raw
+    assert all(HASH not in system and HASH not in user for system, user in fp.calls)
 
 
 def test_false_positive_returns_to_research(tmp_path):
@@ -88,8 +99,12 @@ def test_false_positive_returns_to_research(tmp_path):
 
 def test_compile_fix_rounds_then_skip(tmp_path):
     # mutation: unlimited fix rounds never terminates on a stubborn error
-    bad = "<<<<<<< SEARCH mod.rs\nlet k = 1;\n=======\nlet k = BUG;\n>>>>>>> REPLACE\n"
-    script = [hyp("a"), bad, bad, bad, bad, hyp("b"), edit(5)]
+    def swap(frm, to):
+        return f"<<<<<<< SEARCH mod.rs\nlet k = {frm};\n=======\nlet k = {to};\n>>>>>>> REPLACE\n"
+
+    # each fix APPLIES (so the loop would keep going) but still does not build
+    script = [hyp("a"), swap(1, "BUG"), swap("BUG", "BUG2"), swap("BUG2", "BUG3"),
+              swap("BUG3", "BUG4"), hyp("b"), edit(5)]
 
     def compile_ok(files):
         return "BUG" not in files["mod.rs"]
@@ -146,6 +161,12 @@ def test_stagnation_recall_distill_reset(tmp_path):
     users = [u for _, u in fp.calls]
     assert any("do not repeat" in u for u in users)          # recall block appeared
     assert any("strategy_tag MUST be" in u for u in users)   # reset forced a tag
+    # mutation: distilling on `>=` instead of `==` fires a distill call every stagnant iteration,
+    # which eats the scripted hypothesis of the next iteration and derails it into failed:edit.
+    # The call count alone does NOT catch this (each extra distill is offset by the provider call
+    # a derailed iteration no longer makes), so pin the outcomes too.
+    assert len(fp.calls) == 6 * 2 + 1  # 6 hypothesis + 6 edit + exactly one distill
+    assert [h["outcome"] for h in st.hypotheses] == ["failed:score"] * 6
 
 
 def test_resume_discards_incomplete_iteration(tmp_path):
@@ -162,6 +183,12 @@ def test_resume_discards_incomplete_iteration(tmp_path):
     assert st.status == "won" and st.best.iteration == 4
     assert not store.iteration_dir(4).joinpath("hypothesis.json").read_text() == "{}"
     assert not store.iteration_dir(4).joinpath("stale.rs").exists()  # the dir was discarded whole
+    # mutation: discarding before the TERMINAL early return deletes a finished job's winning
+    # iteration directory (state.iteration lags by one when the kill lands mid-confirmation)
+    loop2.state.iteration = 0
+    store.iteration_dir(1).joinpath("mod.rs").write_text("winner")
+    assert loop2.run().status == "won"
+    assert store.iteration_dir(1).joinpath("mod.rs").read_text() == "winner"
 
 
 def test_request_stop_cancels_at_safe_point(tmp_path):
@@ -171,3 +198,155 @@ def test_request_stop_cancels_at_safe_point(tmp_path):
     loop.request_stop()
     st = loop.run()
     assert st.status == "cancelled" and len(fp.calls) == 0
+
+
+def test_win_with_lower_delta_than_a_false_positive_best(tmp_path):
+    # mutation: confirming a candidate without making it the best reports won with the wrong code
+    # in state.best
+    def scores(challenge, files, ns):
+        import re
+        k = int(re.search(r"let k = (\d+);", files["mod.rs"]).group(1))
+        if ns.start >= 1_000_000:
+            return [100 + (2 if k == 3 else 0) for _ in ns.nonces()]  # only k=3 holds up
+        return [100 + k - 1 for _ in ns.nonces()]
+
+    # k=5 wins training (+4%) but not held-out; k=3 wins less on training (+2%) yet confirms
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5), hyp("b"), edit(3, frm=5)], scores)
+    st = loop.run()
+    assert st.status == "won" and st.best.iteration == 2
+    assert "let k = 3;" in st.best.files["mod.rs"]
+    assert st.hypotheses[1]["outcome"] == "won"
+    assert st.confirmed == [2] and st.false_positives == [1]
+
+
+def test_distill_auth_error_stops_the_run(tmp_path):
+    # mutation: swallowing ProviderAuthError in _distill lets a dead key keep the loop running
+    seen = {"n": 0}
+
+    def script(system, user):
+        if "distill one reusable lesson" in system:
+            raise ProviderAuthError("key expired")
+        seen["n"] += 1
+        return hyp(f"h{seen['n']}") if seen["n"] % 2 else edit(1)
+
+    loop, fp, fb, store = make(tmp_path, script)  # 3 non-improving iterations reach the distill
+    st = loop.run()
+    assert st.status == "failed"
+    assert st.stop_reason.startswith("provider auth")
+
+
+def test_resume_finishes_a_pending_confirmation(tmp_path):
+    # mutation: forcing status back to researching on resume drops a pending held-out confirmation
+    store = JobStore(tmp_path)
+    store.write_spec(spec())
+    fb = FakeBench(quality_from_files)
+    files = {"mod.rs": "fn solve() { let k = 5; }\n"}
+    art = fb.compile("knapsack", files).artifact_id
+    st = JobState.fresh(Spend(started_at=0.0))
+    st.baseline = baseline()
+    st.status = "confirming"          # killed between the training score and the held-out run
+    st.iteration = 1
+    st.spend.iterations = 1
+    st.best = Candidate(iteration=1, files=files, artifact_id=art,
+                        training=[NonceResult("t", n, True, 104, 1) for n in range(4)],
+                        delta={"tracks": [], "mean_rel_delta": 0.04, "worst_rel_delta": 0.04,
+                               "error_rate": 0.0},
+                        hypothesis={"title": "a", "description": "d",
+                                    "strategy_tag": "local_search"})
+    st.hypotheses = [{"iteration": 1, "against": 0, "title": "a", "description": "d",
+                      "strategy_tag": "local_search", "outcome": "improved"}]
+    store.save(st)
+    fp = FakeProvider([])  # an empty script raises if the loop asks for a completion
+    loop = Loop(store.read_spec(), store.load(), store, fp, fb, template_rs="x",
+                clock=lambda: 0.0, sleep=lambda s: None)
+    result = loop.run()
+    assert result.status == "won" and result.confirmed == [1]
+    assert result.hypotheses[0]["outcome"] == "won"
+    assert fb.score_calls == 1  # the held-out run only; training is not repeated
+    assert fp.calls == []       # no new hypothesis was proposed
+
+
+def test_holdout_scoring_error_is_a_false_positive(tmp_path):
+    # mutation: letting ScoringError escape _confirm strands the job at "confirming"
+    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    # the baseline holds 3 held-out nonces but the run scores 4 -> bundle_delta cannot pair them
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b, holdout_n=3)
+    st = loop.run()
+    assert st.false_positives == [1] and st.confirmed == []
+    assert st.status == "exhausted" and st.stop_reason == "iterations"
+
+
+def test_compile_fix_stops_when_repair_applies_nothing(tmp_path):
+    # mutation: recompiling after a repair that matched nothing burns a bench call per round on
+    # byte-identical files
+    broken = "<<<<<<< SEARCH mod.rs\nlet k = 1;\n=======\nlet k = BUG;\n>>>>>>> REPLACE\n"
+    never_matches = "<<<<<<< SEARCH mod.rs\nlet zzz = 1;\n=======\nlet zzz = 2;\n>>>>>>> REPLACE\n"
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), broken, never_matches, hyp("b"), edit(5)])
+
+    def compile_ok(files):
+        return "BUG" not in files["mod.rs"]
+
+    fb._compile_ok = compile_ok
+    st = loop.run()
+    assert st.status == "won"
+    assert st.hypotheses[0]["outcome"] == "failed:compile"
+    assert fb.compile_calls == 1 + 1 + 1  # baseline reg + the broken edit + the winning edit
+
+
+def test_recall_starts_exactly_at_threshold(tmp_path):
+    # mutation: `> recall` instead of `>= recall` delays the recall block by a whole iteration
+    script = []
+    for i in range(3):
+        script += [hyp(f"h{i}"), edit(1)]
+    b = Budget(usd=None, hours=None, iterations=3, modal_usd=None)
+    loop, fp, fb, store = make(tmp_path, script, budget=b,
+                               thresholds=Thresholds(recall=2, distill=99, reset=99))
+    loop.run()
+    users = [u for _, u in fp.calls]
+    assert "do not repeat" not in users[2]  # 2nd hypothesis: runs_since_improvement == 1
+    assert "do not repeat" in users[4]      # 3rd hypothesis: runs_since_improvement == 2
+
+
+def test_rate_limit_wait_rechecks_the_budget(tmp_path):
+    # mutation: not re-checking the budget after a rate-limit sleep ignores a stop request (or an
+    # hours cap) for the whole retry storm
+    seen = {"n": 0}
+
+    def script(system, user):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            raise ProviderRateLimited("429")
+        return hyp("a")
+
+    loop, fp, fb, store = make(tmp_path, script)
+
+    def stop_while_sleeping(seconds):
+        loop.request_stop()
+
+    loop.sleep = stop_while_sleeping
+    st = loop.run()
+    assert st.status == "cancelled"
+    assert seen["n"] == 1  # the retry after the sleep never happened
+
+
+def test_confirm_still_honours_the_time_cap(tmp_path):
+    # the held-out confirmation is exempt from the ITERATIONS cap only (its iteration is already
+    # counted); every spend dimension still bites.
+    # mutation: exempting confirmation from every budget dimension lets it run past a hard cap
+    b = Budget(usd=None, hours=1.0, iterations=None, modal_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
+    loop.clock = lambda: 7200.0 if fb.score_calls >= 1 else 0.0  # cap passes after training
+    st = loop.run()
+    assert st.status == "exhausted" and st.stop_reason == "hours"
+    assert st.best is not None and st.best.holdout is None  # refused, not waved through
+
+
+def test_rejected_edit_paths_are_reported(tmp_path):
+    # mutation: dropping the edits_rejected event hides an LLM trying to write outside the
+    # algorithm's own files
+    stray = "<<<<<<< SEARCH Cargo.toml\nfoo\n=======\nbar\n>>>>>>> REPLACE\n" + edit(5)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), stray])
+    assert loop.run().status == "won"  # the in-scope block still applied
+    events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
+    rejected = [e for e in events if e["kind"] == "edits_rejected"]
+    assert rejected and rejected[0]["paths"] == ["Cargo.toml"]
