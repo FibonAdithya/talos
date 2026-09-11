@@ -10,6 +10,8 @@ def blk(path, s, r):
 
 
 def test_applies_blocks_to_known_files():
+    # mutation: `_in_scope` returning `block.file not in files` would reject a
+    # block naming a real algorithm file, leaving it unapplied
     out = apply_edit_response(FILES, blk("mod.rs", "fn a() {}", "fn a() { 1 }"))
     assert out.applied == 1 and not out.misses and not out.rejected
     assert out.files["mod.rs"].startswith("fn a() { 1 }")
@@ -30,5 +32,7 @@ def test_no_blocks_is_an_error():
 
 
 def test_miss_reported_not_guessed():
+    # mutation: swallowing misses (reporting applied=len(kept)) would hide that
+    # the block never touched the file
     out = apply_edit_response(FILES, blk("mod.rs", "fn zzz() {}", "fn zzz() { 1 }"))
     assert out.applied == 0 and len(out.misses) == 1 and out.misses[0].reason == "not_found"

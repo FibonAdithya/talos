@@ -25,7 +25,8 @@ def test_hours_uses_clock_not_wall():
 
 
 def test_all_none_is_invalid():
-    # a job with no cap at all must be refused at wizard time
+    # mutation: an `all(...)` check reading `or` instead of `and`, or a missing
+    # call to validate(), would let a job with no cap at all reach the wizard
     with pytest.raises(ValueError):
         Budget(usd=None, hours=None, iterations=None, modal_usd=None).validate()
     Budget(usd=None, hours=2.0, iterations=None, modal_usd=None).validate()

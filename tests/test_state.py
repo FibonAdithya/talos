@@ -36,6 +36,8 @@ def test_state_roundtrip_atomic(tmp_path):
 
 
 def test_timeline_appends_json_lines(tmp_path):
+    # mutation: opening the timeline file in "w" mode instead of "a" would
+    # truncate on every event, losing all but the last
     store = JobStore(tmp_path)
     store.event("hypothesis", iteration=1, title="x")
     store.event("score", iteration=1, delta=0.1)
@@ -45,4 +47,6 @@ def test_timeline_appends_json_lines(tmp_path):
 
 
 def test_terminal_set():
+    # mutation: dropping "won" or "exhausted" from TERMINAL would let a
+    # finished job keep being polled as if still researching
     assert TERMINAL == {"won", "exhausted", "failed", "cancelled"}
