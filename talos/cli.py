@@ -1,20 +1,24 @@
 """`talos setup | run | compile | status`. Wizard prompts go through `ask` so tests can script
-them; `rich` renders the live status line."""
+them; after every finished iteration a plain one-line status is printed to stdout with the job id,
+iteration, best delta, LLM and Modal spend and the wall-clock time left."""
 from __future__ import annotations
 
 import argparse
 import getpass
 import json
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
+import types
+from dataclasses import replace
 from pathlib import Path
 
 from talos.budget import Budget, Spend
 from talos.challenges import CHALLENGES, MONOREPO_REF
-from talos.config import Config, ConfigError, load, resolve_api_key, save
+from talos.config import Config, ConfigError, ENV_KEYS, load, resolve_api_key, save
 from talos.mainnet import MainnetError, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
@@ -22,6 +26,9 @@ from talos.state import JobSpec, JobState, JobStore
 
 BASELINE_CACHE = Path.home() / ".talos" / "baselines"
 MODAL_APP_FILE = Path(__file__).resolve().parent.parent / "modal_app" / "talos_bench.py"
+CLI_PROVIDERS = ("claude-cli", "codex-cli")
+UNMETERED = CLI_PROVIDERS + ("fake",)
+DEFAULT_MODAL_USD = 20.0
 
 
 def default_ask(prompt: str, default: str | None = None, secret: bool = False) -> str:
@@ -56,7 +63,7 @@ def cmd_setup(args, ask) -> int:
     if kind in ("anthropic", "openai", "google", "openrouter", "custom"):
         api_key = ask("API key", secret=True)
     mode = "single-shot"
-    if kind in ("claude-cli", "codex-cli"):
+    if kind in CLI_PROVIDERS:
         mode = ask("Mode (single-shot or agentic)", "single-shot")
     token_id = ask("Modal token id (create at modal.com/settings/tokens)")
     token_secret = ask("Modal token secret", secret=True)
@@ -82,16 +89,73 @@ def _budget_from_args(args) -> Budget:
     return b
 
 
+# ── the fake end-to-end run (provider "fake"): no Modal, no network ───────────
+
+def _fake_scores(challenge: str, files: dict[str, str], ns):
+    k = int(re.search(r"let k = (\d+);", files["mod.rs"]).group(1))
+    return [100 + k - 1 for _ in ns.nonces()]  # k=1 is baseline parity
+
+
+def _fake_script(system: str, user: str) -> str:
+    if '"strategy_tag" (one of' in system:
+        return ('{"title": "bump k", "description": "raise k by one", '
+                '"strategy_tag": "local_search"}')
+    k = int(re.search(r"let k = (\d+);", user).group(1))
+    return f"<<<<<<< SEARCH mod.rs\nlet k = {k};\n=======\nlet k = {k + 1};\n>>>>>>> REPLACE\n"
+
+
+FAKE_MAINNET = types.SimpleNamespace(
+    top_algorithm=lambda ch: ("fake_base", 1),
+    fetch_algorithm_files=lambda ch, name: {"mod.rs": "fn solve() { let k = 1; }\n"},
+    fetch_template=lambda ch: "pub fn solve_challenge(")
+
+
+def _status_line(spec: JobSpec, state: JobState, now: float) -> str:
+    best = f"{state.best.delta['mean_rel_delta']:+.3%}" if state.best else "n/a"
+    if spec.budget.hours is None:
+        left = "∞"
+    else:
+        left = f"{max(0.0, spec.budget.hours - (now - state.spend.started_at) / 3600):.1f}h"
+    return (f"[status] job={spec.job_id} it={state.iteration} best={best} "
+            f"llm=${state.spend.llm_usd:.2f} modal≈${state.spend.modal_usd:.2f} left={left}")
+
+
 def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> int:
-    from talos.bench import ModalBench
-    from talos.loop import Loop
+    # spec §7.1: refuse before anything is spent when the credential is missing.
+    if cfg.provider not in UNMETERED and resolve_api_key(cfg) is None:
+        env = ENV_KEYS.get(cfg.provider, "TALOS_CUSTOM_API_KEY")
+        print(f"no API key for provider {cfg.provider}: run `talos setup` or set {env}",
+              file=sys.stderr)
+        return 2
     from talos.package import build_package
-    from talos.agentic import attach_agentic
-    provider = make_provider(cfg.provider, cfg.model, api_key=resolve_api_key(cfg), api_base=cfg.api_base)
-    bench = ModalBench()
     state = store.load() if resume else JobState.fresh(Spend(started_at=time.time()))
-    if not resume:
+    if resume:
+        if state.status in ("won", "exhausted"):
+            print(f"job {spec.job_id} already {state.status}; nothing to resume")
+            print(f"Package: {build_package(spec, state, store)}")
+            return 1
+        if state.status in ("cancelled", "failed", "paused"):
+            previous = state.status
+            state.status, state.stop_reason = "researching", None
+            store.save(state)
+            store.event("resumed", previous_status=previous)
+    else:
         store.save(state)
+
+    from talos.agentic import attach_agentic
+    fake = cfg.provider == "fake"
+    if fake:
+        from talos.bench import FakeBench
+        from talos.providers.fake import FakeProvider
+        provider, bench = FakeProvider(_fake_script), FakeBench(_fake_scores)
+        cache_dir, mainnet = store.run_dir / "baseline_cache", FAKE_MAINNET
+    else:
+        from talos.bench import ModalBench
+        provider = make_provider(cfg.provider, cfg.model, api_key=resolve_api_key(cfg),
+                                 api_base=cfg.api_base)
+        bench = ModalBench()
+        cache_dir, mainnet = BASELINE_CACHE, None
+    from talos.loop import Loop
     spec_cls = CHALLENGES[spec.challenge]
     hardware = spec_cls.gpu or f"cpu{spec_cls.cpu}"
 
@@ -99,14 +163,18 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         line = f"[{time.strftime('%H:%M:%S')}] it={state.iteration} {kind} " + \
                " ".join(f"{k}={str(v)[:60]}" for k, v in data.items())
         print(line, flush=True)
+        if kind == "iteration_done":
+            print(_status_line(spec, state, time.time()), flush=True)
 
     loop = Loop(spec, state, store, provider, bench, template_rs="", on_event=on_event)
     if cfg.mode == "agentic":
         attach_agentic(loop, cfg.provider, cfg.model)
-    signal.signal(signal.SIGINT, lambda *_: loop.request_stop())
+    previous_sigint = signal.signal(signal.SIGINT, lambda *_: loop.request_stop())
     try:
         if state.baseline is None:
-            loop.measure_baseline(BASELINE_CACHE, hardware)
+            loop.measure_baseline(cache_dir, hardware, mainnet=mainnet)
+        elif mainnet is not None:
+            loop.template_rs = mainnet.fetch_template(spec.challenge)
         else:
             from talos.mainnet import fetch_template
             loop.template_rs = fetch_template(spec.challenge)
@@ -115,8 +183,14 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         state.status, state.stop_reason = "failed", str(e)
         store.save(state)
         final = state
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
     pkg = build_package(spec, final, store)
     print(f"\nStatus: {final.status} ({final.stop_reason})")
+    if final.best is not None:
+        print(f"Best delta vs baseline: {final.best.delta['mean_rel_delta']:+.3%}")
+    else:
+        print("Best delta vs baseline: n/a (no candidate)")
     print(f"LLM spend: ${final.spend.llm_usd:.2f}   Modal spend (estimated): ${final.spend.modal_usd:.2f}")
     print(f"Package: {pkg}")
     return 0 if final.status == "won" else 1
@@ -129,19 +203,36 @@ def cmd_run(args, ask) -> int:
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
+    if args.mode:
+        if args.mode == "agentic" and cfg.provider not in CLI_PROVIDERS:
+            print(f"--mode agentic needs a CLI provider ({' or '.join(CLI_PROVIDERS)}), "
+                  f"not {cfg.provider!r}", file=sys.stderr)
+            return 2
+        cfg = replace(cfg, mode=args.mode)
     if args.resume:
-        store = JobStore(root / "runs" / args.resume)
+        run_dir = root / "runs" / args.resume
+        if not (run_dir / "job.json").exists():
+            print(f"no job to resume at {run_dir}", file=sys.stderr)
+            return 2
+        store = JobStore(run_dir)
         return execute_job(store.read_spec(), store, cfg, resume=True)
     challenge = args.challenge or ask(f"Challenge ({', '.join(CHALLENGES)})", "vehicle_routing")
     if challenge not in CHALLENGES:
         print(f"unknown challenge {challenge!r}", file=sys.stderr)
         return 2
+    if args.direction and args.direction_file:
+        print("pass either --direction or --direction-file, not both", file=sys.stderr)
+        return 2
     direction = args.direction
     if args.direction_file:
-        direction = Path(args.direction_file).read_text()
+        df = Path(args.direction_file)
+        if not df.exists():
+            print(f"direction file not found: {df}", file=sys.stderr)
+            return 2
+        direction = df.read_text()
     if not direction:
         direction = ask("Direction for the agent (what to explore)")
-    metered = cfg.provider not in ("claude-cli", "codex-cli")
+    metered = cfg.provider not in CLI_PROVIDERS
     if not args.yes and args.budget_usd is None and args.budget_hours is None \
             and args.budget_iterations is None:
         if metered:
@@ -154,6 +245,15 @@ def cmd_run(args, ask) -> int:
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
+    # spec §5.2: Modal spend is always capped. The default is applied only after the budget has
+    # been validated, so it can never stand in for the LLM/time/iteration cap the run needs.
+    if budget.modal_usd is None:
+        if args.yes:
+            budget = replace(budget, modal_usd=DEFAULT_MODAL_USD)
+            print(f"No --budget-modal-usd given; capping Modal spend at ${DEFAULT_MODAL_USD:.2f}.")
+        else:
+            budget = replace(budget, modal_usd=float(ask("Modal budget in USD",
+                                                         str(DEFAULT_MODAL_USD))))
     try:
         info = fetch_challenge_info(challenge)
     except MainnetError as e:
@@ -161,7 +261,11 @@ def cmd_run(args, ask) -> int:
         return 1
     rand_hash = new_rand_hash()
     training, holdout = draw_nonce_sets(info.tracks, rand_hash)
-    job_id = time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
+    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
+    job_id, n = stamp, 1
+    while (root / "runs" / job_id / "job.json").exists():  # two runs in the same second
+        n += 1
+        job_id = f"{stamp}-{n}"
     spec = JobSpec(job_id=job_id, challenge=challenge, direction=direction, provider=cfg.provider,
                    model=cfg.model, mode=cfg.mode, budget=budget, rand_hash=rand_hash,
                    tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
@@ -200,6 +304,7 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--challenge")
     r.add_argument("--direction")
     r.add_argument("--direction-file")
+    r.add_argument("--mode", choices=["single-shot", "agentic"])
     r.add_argument("--budget-usd", type=float)
     r.add_argument("--budget-hours", type=float)
     r.add_argument("--budget-iterations", type=int)
