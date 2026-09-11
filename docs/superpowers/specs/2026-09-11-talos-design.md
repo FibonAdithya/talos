@@ -71,12 +71,14 @@ Run once. Interactive, terminal only.
 2. Model id, with a sensible default per provider.
 3. For API kinds: the key. For CLI kinds: nothing; Talos checks the binary is on `PATH`
    and runs one trivial headless call to confirm a logged-in session.
-4. Modal token id and secret, with a link to where to create them.
+4. Modal token id and secret, with a link to where to create them. These are handed to
+   `modal token set`, which stores them in the Modal CLI's own config; Talos then runs
+   `modal deploy` for its bench app into the user's account.
 5. Validation: one cheap call per credential. A failing credential is reported and the
    wizard re-prompts. Nothing is written until every credential validates.
 
 Writes `talos.config.json` (provider, model, mode, defaults) and `.talos/secrets.json`
-(mode 0600, gitignored). CLI providers store no secret at all.
+(mode 0600, gitignored) holding only the LLM key. CLI providers store no secret at all.
 
 ### 5.2 `talos run`
 
@@ -179,22 +181,39 @@ challenges, one fixed GPU type for `hypergraph`, `neuralnet_optimizer` and `vect
 The class is recorded on every result so a baseline is never compared against a candidate
 run on a different class.
 
-A nonce set is `(seed, first_nonce, count)`. The seed is 32 random bytes drawn once per
-job and stored in `job.json`. It is never placed in any prompt, log line or file the
-agent can read.
+**Tracks and fuel.** Mainnet's `get-challenges` reports, per challenge, the
+`active_tracks` map (for example `n_nodes=600` through `n_nodes=1000` for vehicle
+routing) and `max_fuel_budget`. A job benchmarks every active track at job start, and
+fuel is that challenge's `max_fuel_budget`. Both are frozen into `job.json` so a track
+change on mainnet mid-job cannot shift the bar.
+
+A nonce set is `(track, rand_hash, first_nonce, count)`, one per track. `rand_hash` is
+32 random bytes, hex-encoded, drawn once per job and stored in `job.json`; the training
+set starts at nonce 0 and the held-out set at nonce 1,000,000 so the two are disjoint
+under the same hash. The hash is never placed in any prompt, log line or file the agent
+can read.
+
+**Image.** The dev image `ghcr.io/tig-foundation/tig-monorepo/<challenge>/dev:0.0.7`
+is public (verified with an anonymous manifest pull) and ships `tig-runtime`,
+`tig-verifier`, `build_algorithm` and `test_algorithm` on `PATH`, but expects the
+monorepo source in the working directory. The Modal image therefore clones the monorepo
+at a commit pinned in Talos's challenge table on top of the dev image.
 
 ### 7.5 Scoring rule (`talos/scoring.py`)
 
 Lifted from tig-pentesting's `bundle_scoring.py`. Given baseline and candidate
 `NonceResult` lists over the same nonces:
 
-- Per nonce, the candidate wins if it produced a valid solution of strictly better
-  quality, or equal quality in strictly less fuel; ties are ties; any candidate error is
-  a loss.
-- The bundle delta is the mean signed per-nonce quality difference normalised by the
-  baseline quality, with each candidate error counted as the worst observed loss.
-- `beats(baseline, candidate, margin)` is true when the delta exceeds the challenge's
-  margin and the candidate's error rate is below the challenge's error ceiling.
+- Quality is the verifier's integer `quality`, higher is better on every challenge (this
+  is what `min_active_quality` on mainnet thresholds).
+- Per track, an errored nonce is scored as the worst quality observed for that track
+  across baseline and candidate, floored at zero. The track delta is
+  `(mean candidate quality - mean baseline quality) / mean baseline quality`.
+- The bundle delta is the mean of the track deltas. The worst track delta and the
+  candidate's error rate across all nonces are carried alongside it.
+- `beats(baseline, candidate, rule)` is true when the bundle delta is at least the
+  challenge's `margin`, no track delta is below `-track_tolerance`, and the error rate
+  is at most `error_ceiling`.
 
 Margins and error ceilings live in one table per challenge, versioned with Talos, never in
 prompts.
@@ -360,7 +379,10 @@ Prometheus is GPLv3. Talos will carry the same licence.
 | Setting | Default |
 |---|---|
 | Training nonces / held-out nonces | 32 / 32 |
-| Fuel | the challenge's mainnet fuel setting at job start |
+| Fuel | the challenge's mainnet `max_fuel_budget` at job start |
+| Beat rule | margin 0.005, track tolerance 0.0, error ceiling 0.05 |
+| Modal hardware | CPU challenges: 4 vCPU, 8 GiB; GPU challenges: one L40S |
+| Per-nonce timeout | 600 s |
 | Compile fix rounds | 3 |
 | Stagnation thresholds: recall / distill / reset | 2 / 3 / 5 |
 | Agentic call timeout | 1800 s |
