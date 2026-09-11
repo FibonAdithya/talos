@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from talos.prompts import PromptContext, STRATEGY_TAGS, _rust_rules
@@ -15,6 +16,20 @@ from talos.prompts import PromptContext, STRATEGY_TAGS, _rust_rules
 
 class AgenticError(ValueError):
     """A ValueError so Loop.iterate records it as a failed iteration instead of crashing the run."""
+
+
+# codex ignores .claude/settings.json, and its own `--sandbox workspace-write` restricts writes
+# only: the agent can execute arbitrary commands on this machine and read any file it can reach.
+# claude-cli enforces the allow/deny list in sandbox_settings; codex cannot, so it is opt-in.
+CODEX_AGENTIC_ENV = "TALOS_ALLOW_CODEX_AGENTIC"
+CODEX_AGENTIC_REFUSAL = (
+    "codex agentic mode runs agent-authored commands on this machine and cannot restrict reads; "
+    f"set {CODEX_AGENTIC_ENV}=1 to accept that")
+
+
+def codex_agentic_refused(provider_kind: str, mode: str) -> bool:
+    return (mode == "agentic" and provider_kind == "codex-cli"
+            and os.environ.get(CODEX_AGENTIC_ENV) != "1")
 
 
 def sandbox_settings(worktree: Path) -> dict:
@@ -64,10 +79,13 @@ Tacit knowledge so far is in `tacit.md`. The solver contract is in `CHALLENGE.md
 """
 
 
-def prepare_worktree(run_dir: Path, ctx: PromptContext) -> Path:
-    wt = Path(run_dir) / "agentic"
-    if wt.exists():
-        shutil.rmtree(wt)
+def prepare_worktree(ctx: PromptContext, parent: Path | None = None) -> Path:
+    """A fresh temporary directory, deliberately NOT under runs/<job>/: the agent gets a shell in
+    here (codex) or a sandboxed Read scope rooted here (claude), and a worktree inside the run
+    directory would put job.json -- the only file holding the job's rand_hash -- one `..` away.
+    The caller owns the returned path and must remove it (attach_agentic does, one iteration
+    later, so a failed iteration can still be inspected)."""
+    wt = Path(tempfile.mkdtemp(prefix="talos-agentic-", dir=parent))
     (wt / "algorithm").mkdir(parents=True)
     (wt / ".talos").mkdir()
     (wt / ".talos" / "hypothesis.json").write_text("{}\n")  # agent must Edit, Write is denied
@@ -121,9 +139,12 @@ def read_back(worktree: Path, ctx: PromptContext) -> tuple[dict, dict[str, str]]
 # on `_scrubbed_env` notes it deliberately lets proxy vars pass through so the claude/codex login
 # session still works on networks that require an outbound proxy. No provider keys, no Modal
 # tokens, no anything else.
+# CLAUDE_CONFIG_DIR / CODEX_HOME are where each CLI keeps its logged-in session; dropping them
+# makes the child look logged out on any machine that relocates them away from $HOME.
 _AGENT_ENV_ALLOWLIST = frozenset({
     "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "CLAUDE_CONFIG_DIR", "CODEX_HOME",
 })
 
 _TRANSCRIPT_CAP = 200_000
@@ -162,8 +183,8 @@ def _run_codex(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
 
 
 def _copy_transcript(wt: Path, loop) -> None:
-    """prepare_worktree wipes the agentic worktree on the next iteration (shutil.rmtree), so a
-    failed iteration's stdout/stderr must be copied into the iteration dir now or it is lost.
+    """The agentic worktree is removed at the start of the next iteration, so a failed
+    iteration's stdout/stderr must be copied into the iteration dir now or it is lost.
     loop._n is only set on a real Loop mid-iterate; the test's SimpleNamespace stub has none."""
     n = getattr(loop, "_n", None)
     if n is None:
@@ -180,9 +201,15 @@ def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
     runner = {"claude-cli": _run_claude, "codex-cli": _run_codex}.get(provider_kind)
     if runner is None:
         raise AgenticError(f"agentic mode needs claude-cli or codex-cli, not {provider_kind}")
+    if codex_agentic_refused(provider_kind, "agentic"):
+        raise AgenticError(CODEX_AGENTIC_REFUSAL)
 
     def propose_and_edit(ctx: PromptContext) -> tuple[dict, dict[str, str]]:
-        wt = prepare_worktree(loop.store.run_dir, ctx)
+        previous = getattr(loop, "_agentic_wt", None)
+        if previous is not None:
+            shutil.rmtree(previous, ignore_errors=True)
+        wt = prepare_worktree(ctx)
+        loop._agentic_wt = wt
         prompt = ("Read CLAUDE.md (or AGENTS.md), then make one improvement to the solver under "
                   "algorithm/, check it with `talos compile`, and write .talos/hypothesis.json.")
         if ctx.failed_hypotheses:

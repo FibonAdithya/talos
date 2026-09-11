@@ -293,6 +293,24 @@ def test_status_lists_every_run(tmp_path, monkeypatch, capsys):
     assert "20260102-000000-knapsack: failed it=2" in out
 
 
+def test_run_refuses_agentic_codex_without_the_opt_in(tmp_path, monkeypatch, capsys):
+    # mutation: leaving the refusal to attach_agentic tells the user only after the baseline has
+    # been measured, i.e. after Modal has already been paid for
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TALOS_ALLOW_CODEX_AGENTIC", raising=False)
+    save(tmp_path, Config(provider="codex-cli", model="gpt-5-codex", mode="agentic",
+                          api_base=None), None)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    monkeypatch.setattr(cli, "execute_job", lambda spec, store, cfg, resume: 0)
+    argv = ["run", "--challenge", "knapsack", "--direction", "go", "--budget-iterations", "1",
+            "--yes"]
+    assert cli.main(argv) == 2
+    assert "TALOS_ALLOW_CODEX_AGENTIC=1" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()  # refused before the job dir was created
+    monkeypatch.setenv("TALOS_ALLOW_CODEX_AGENTIC", "1")
+    assert cli.main(argv) == 0  # the opt-in lets it through
+
+
 def test_deploy_bench_failure_never_quotes_the_token_secret():
     # mutation: echoing argv into the error leaks the Modal secret
     def run(cmd, **kw):

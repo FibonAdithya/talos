@@ -60,6 +60,26 @@ There is also a hidden `--fake` flag: `talos run --challenge knapsack --directio
 provider and benchmark — no config file, no network, no Modal, no LLM credential. It
 exists to demo and smoke-test the CLI on a machine with none of the above configured.
 
+### Agentic mode
+
+`--mode agentic` (CLI providers only) hands each iteration to a headless `claude` or `codex`
+session in a throwaway worktree outside `runs/`, instead of asking an API for one edit.
+
+With `claude-cli`, Talos writes a `.claude/settings.json` that the CLI enforces: reads, `Glob`
+and `Grep` are allowed only over `algorithm/**`, `CHALLENGE.md`, `tacit.md`, `AGENTS.md` and
+`.talos/hypothesis.json`; the only writes allowed are `Edit` on the algorithm files and on the
+hypothesis file; the only command allowed is `talos compile`; `WebFetch`, `WebSearch`, `Write`
+and the usual network/shell escapes are denied; and `defaultMode` is `dontAsk`, so any tool not
+on the allow list is refused outright rather than prompted for. There is no network access at
+the tool level. The child process gets an environment allowlist rather than your environment:
+no LLM keys, no Modal tokens.
+
+`codex-cli` is opt-in. Codex ignores `.claude/settings.json`, and its own `--sandbox
+workspace-write` restricts writes only — under it the agent can execute arbitrary
+agent-authored commands on your machine and read any file you can read. Talos therefore refuses
+to start an agentic codex run unless you set `TALOS_ALLOW_CODEX_AGENTIC=1`. In both modes an
+edit outside the algorithm files fails the iteration.
+
 ### `talos compile`
 
 `talos compile --challenge <name> --dir <path>` (default `--dir algorithm`) uploads the

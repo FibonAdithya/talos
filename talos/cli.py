@@ -214,6 +214,11 @@ def cmd_run(args, ask) -> int:
                   f"not {cfg.provider!r}", file=sys.stderr)
             return 2
         cfg = replace(cfg, mode=args.mode)
+    # spec §10: say so before a single dollar is spent, not at the first iteration.
+    from talos.agentic import CODEX_AGENTIC_REFUSAL, codex_agentic_refused
+    if codex_agentic_refused(cfg.provider, cfg.mode):
+        print(CODEX_AGENTIC_REFUSAL, file=sys.stderr)
+        return 2
     if args.resume:
         run_dir = root / "runs" / args.resume
         if not (run_dir / "job.json").exists():
