@@ -1,0 +1,16 @@
+# Talos secrets and run state
+.talos/
+runs/
+talos.config.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Editors and agents
+.claude/settings.local.json
+.superpowers/
