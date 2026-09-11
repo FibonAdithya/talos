@@ -23,13 +23,26 @@ def _algo_root(monorepo: Path, challenge: str) -> Path:
     return monorepo / "tig-algorithms" / "src" / challenge
 
 
+def _check_rel(target: Path, rel: str) -> None:
+    """Reject anything that is not a plain relative file path strictly inside `target`.
+    An LLM-authored file map is untrusted input: `""`, `"."`, `"/etc/evil.rs"` and
+    `"sub/../../evil.rs"` all have to fail here rather than at write_text."""
+    bad = f"file path escapes algorithm dir: {rel!r}"
+    if not rel or rel == "." or Path(rel).is_absolute():
+        raise ValueError(bad)
+    if any(seg in ("", ".", "..") for seg in rel.split("/")):
+        raise ValueError(bad)
+    root = target.resolve()
+    p = (target / rel).resolve()
+    if p == root or not str(p).startswith(str(root) + "/"):
+        raise ValueError(bad)
+
+
 def stage_algorithm(monorepo: Path, challenge: str, files: dict[str, str], name: str) -> None:
     root = _algo_root(monorepo, challenge)
     target = root / name
     for rel in files:
-        p = (target / rel).resolve()
-        if not str(p).startswith(str(target.resolve()) + "/") and p != target.resolve():
-            raise ValueError(f"file path escapes algorithm dir: {rel}")
+        _check_rel(target, rel)
     target.mkdir(parents=True, exist_ok=True)
     for rel, text in files.items():
         p = target / rel
@@ -100,22 +113,27 @@ def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Pat
         out_file = Path(td) / f"{nonce}.json"
         cmd = ["tig-runtime", settings, rand_hash, str(nonce), str(so),
                "--fuel", str(fuel), "--output", td] + gpu_args
-        t0 = time.time()
+        t0 = time.monotonic()
         timed_out = False
         try:
             r1 = run(cmd, capture_output=True, text=True, timeout=timeout_s)
             rt_rc = r1.returncode
         except subprocess.TimeoutExpired:
             timed_out, rt_rc = True, -1
-        runtime_ms = int((time.time() - t0) * 1000)
+        runtime_ms = int((time.monotonic() - t0) * 1000)
         quality = None
         ver_rc = 1
         if not timed_out and out_file.exists():
-            r2 = run(["tig-verifier", settings, rand_hash, str(nonce), str(out_file)] + gpu_args,
-                     capture_output=True, text=True, timeout=timeout_s)
-            ver_rc = r2.returncode
-            m = _QUALITY_RE.search(r2.stdout or "")
-            quality = int(m.group(1)) if m else None
+            # A verifier timeout must not raise: TimeoutExpired's str carries the whole argv,
+            # rand_hash included, and it would surface in a client-side error message.
+            try:
+                r2 = run(["tig-verifier", settings, rand_hash, str(nonce), str(out_file)] + gpu_args,
+                         capture_output=True, text=True, timeout=timeout_s)
+                ver_rc = r2.returncode
+                m = _QUALITY_RE.search(r2.stdout or "")
+                quality = int(m.group(1)) if m else None
+            except subprocess.TimeoutExpired:
+                timed_out = True
     ok, err = classify(rt_rc, ver_rc, quality, timed_out)
     return {"track": track, "nonce": nonce, "ok": ok, "quality": quality if ok else None,
             "runtime_ms": runtime_ms, "error": err}

@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -31,11 +32,15 @@ def test_stage_writes_files_and_registers_module_once(tmp_path):
     assert (mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs").read_text() == "// c003_a001\n"
 
 
-def test_stage_rejects_path_escape(tmp_path):
+@pytest.mark.parametrize("rel", ["../evil.rs", "", ".", "sub/../../evil.rs", "/etc/evil.rs"])
+def test_stage_rejects_path_escape(tmp_path, rel):
     mono = make_monorepo(tmp_path)
-    # mutation: dropping the containment check lets "../evil.rs" overwrite monorepo sources
+    # mutation: a containment check that only compares resolved prefixes lets "", "." and
+    # "sub/../../evil.rs" through, and they then raise IsADirectoryError deep inside the
+    # container instead of reporting a failed compile
     with pytest.raises(ValueError):
-        inside.stage_algorithm(mono, "knapsack", {"../evil.rs": "x"}, "talos_cand")
+        inside.stage_algorithm(mono, "knapsack", {rel: "x"}, "talos_cand")
+    assert not list(tmp_path.rglob("evil.rs"))
 
 
 def test_build_invokes_build_algorithm_and_reports(tmp_path):
@@ -118,3 +123,16 @@ def test_run_nonce_classifies_no_solution(tmp_path):
     # mutation: reporting ok on a non-zero verifier rc would let junk solutions score
     row = inside.run_nonce("c003", "n=1", "ab" * 32, 1, Path("/x.so"), 10, 600, None, run, tmp_path)
     assert not row["ok"] and row["error"] == "no_solution" and row["quality"] is None
+
+
+def test_run_nonce_handles_a_verifier_timeout(tmp_path):
+    def run(cmd, **kw):
+        if cmd[0] == "tig-runtime":
+            (Path(cmd[cmd.index("--output") + 1]) / f"{cmd[3]}.json").write_text("{}")
+            return Result(0, "", "")
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    # mutation: an unhandled verifier timeout raises through Modal and puts the argv
+    # (with rand_hash) in the client error
+    row = inside.run_nonce("c003", "n=1", "ab" * 32, 1, Path("/x.so"), 10, 600, None, run, tmp_path)
+    assert row["error"] == "timeout" and not row["ok"] and row["quality"] is None
