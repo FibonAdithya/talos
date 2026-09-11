@@ -18,7 +18,9 @@
 - Dev image: `ghcr.io/tig-foundation/tig-monorepo/<challenge>/dev:0.0.7`. Monorepo pinned at commit `84a5787f5b14a630bdf40f52bccf37887d3d8464`.
 - Defaults (spec §13): training 32 nonces per track, held-out 32 per track starting at nonce 1,000,000; compile fix rounds 3; stagnation recall/distill/reset = 2/3/5; agentic timeout 1800 s; Modal retry window 15 min; beat rule margin 0.005, track tolerance 0.0, error ceiling 0.05; CPU 4 vCPU / 8 GiB, GPU one L40S; per-nonce timeout 600 s; budget has no default.
 - Secrets: `.talos/secrets.json` mode 0600, holds only `api_key`. Modal credentials go through `modal token set`.
-- `make check` = `ruff check . && pytest -q -m "not live"`. Every task ends with it green.
+- `make check` = `ruff check . && pytest -q -m "not live"`. Every task ends with it green. The lint set is pinned in `pyproject.toml` (`[tool.ruff.lint] select = ["E4", "E7", "E9", "F"]`) because ruff 0.16 defaults to a much wider set (isort, BLE, B008) that this code does not target.
+- Environment: `python3 -m venv` is broken on the dev machine (no `ensurepip`, no system `pip`); `uv` is on PATH. Create the venv with `uv venv --python 3.10 .venv` and install with `uv pip install --python .venv/bin/python -e '.[dev]'`. Never use `.venv/bin/pip`.
+- CLI subprocesses (`claude`, `codex`, `tig-runtime`, `tig-verifier`, `build_algorithm`) are invoked by bare name; `subprocess.run` resolves PATH and raises `FileNotFoundError` when absent. Never `shutil.which()` them into argv — tests assert on argv[0].
 - Commit after every task with a message in the form `<area>: <what>`; stage explicit paths only.
 - Tests state the mutation they catch in a comment on the test.
 
@@ -101,6 +103,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 ```
 
 `Makefile`:
@@ -141,7 +146,7 @@ def test_nonce_result_rejects_unknown_error():
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest tests/test_types.py -v`
+Run: `uv venv --python 3.10 .venv && uv pip install --python .venv/bin/python -e '.[dev]' && .venv/bin/pytest tests/test_types.py -v`
 Expected: FAIL with `ModuleNotFoundError: talos.types`
 
 - [ ] **Step 4: Write types.py**
@@ -1302,6 +1307,8 @@ git commit -m "state: job spec with redaction, atomic state, timeline"
 import json
 from pathlib import Path
 
+import pytest
+
 from modal_app import inside
 
 
@@ -1310,6 +1317,11 @@ def make_monorepo(tmp_path: Path) -> Path:
     (mono / "tig-algorithms" / "src" / "knapsack").mkdir(parents=True)
     (mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs").write_text("// c003_a001\n")
     return mono
+
+
+class Result:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
 def test_stage_writes_files_and_registers_module_once(tmp_path):
@@ -1327,56 +1339,86 @@ def test_stage_writes_files_and_registers_module_once(tmp_path):
 
 def test_stage_rejects_path_escape(tmp_path):
     mono = make_monorepo(tmp_path)
-    import pytest
     with pytest.raises(ValueError):
         inside.stage_algorithm(mono, "knapsack", {"../evil.rs": "x"}, "talos_cand")
 
 
 def test_build_invokes_build_algorithm_and_reports(tmp_path):
     calls = []
+
     def run(cmd, **kw):
         calls.append((cmd, kw.get("cwd")))
-        class R: returncode = 0; stdout = "ok"; stderr = ""
-        return R()
+        return Result(0, "ok", "")
+
     ok, out = inside.build(tmp_path, "knapsack", "talos_cand", run)
     assert ok and calls[0][0] == ["build_algorithm", "talos_cand"] and calls[0][1] == tmp_path
 
 
 def test_classify():
+    # exit codes from tig-runtime/src/main.rs and tig-verifier/src/main.rs at MONOREPO_REF
     # mutation: keying ok off runtime rc instead of verifier rc + quality
     assert inside.classify(87, 0, 500, False) == (True, None)        # out of fuel but solved
     assert inside.classify(87, 1, None, False) == (False, "out_of_fuel")
-    assert inside.classify(0, 1, None, False) == (False, "no_solution")
-    assert inside.classify(0, 2, None, False) == (False, "invalid")
-    assert inside.classify(-11, 1, None, False) == (False, "panic")
+    assert inside.classify(84, 1, None, False) == (False, "no_solution")  # "Runtime Error" exit
+    assert inside.classify(0, 1, None, False) == (False, "invalid")       # verifier rejected it
+    assert inside.classify(-11, 1, None, False) == (False, "panic")       # killed by a signal
+    assert inside.classify(101, 1, None, False) == (False, "panic")       # rust panic exit code
     assert inside.classify(0, 0, None, True) == (False, "timeout")
     assert inside.classify(0, 0, 7, False) == (True, None)
 
 
 def test_run_nonce_builds_commands_and_parses_quality(tmp_path):
     seen = []
+
     def run(cmd, **kw):
         seen.append(cmd)
-        class R: returncode = 0; stderr = ""
-        R.stdout = "quality: 4242\n" if cmd[0] == "tig-verifier" else ""
         if cmd[0] == "tig-runtime":
-            Path(cmd[cmd.index("--output") + 1]).write_text("{}")
-        return R()
+            # tig-runtime's --output names a FOLDER and it writes <nonce>.json inside it.
+            # mutation: passing a file path there makes tig-runtime mkdir a folder of that name
+            out_dir = Path(cmd[cmd.index("--output") + 1])
+            assert out_dir.is_dir(), "--output must name an existing folder"
+            (out_dir / f"{cmd[3]}.json").write_text('{"solution": "e30="}')
+            return Result(0, "", "")
+        return Result(0, "quality: 4242\n", "")
+
     row = inside.run_nonce("c003", "n=1", "ab" * 32, 7, Path("/lib/x.so"), 10, 600, None, run, tmp_path)
     assert row["ok"] and row["quality"] == 4242 and row["nonce"] == 7 and row["track"] == "n=1"
     rt, ver = seen
     settings = json.loads(rt[1])
     assert settings == {"algorithm_id": "", "challenge_id": "c003", "track_id": "n=1",
                         "block_id": "", "player_id": ""}
-    assert rt[2] == "ab" * 32 and rt[3] == "7" and "--fuel" in rt and rt[rt.index("--fuel") + 1] == "10"
-    assert ver[:2] == ["tig-verifier", "verify_solution"] and ver[4] == "7"
+    assert rt[2] == "ab" * 32 and rt[3] == "7" and rt[4] == "/lib/x.so"
+    assert "--fuel" in rt and rt[rt.index("--fuel") + 1] == "10"
+    # tig-verifier takes positional SETTINGS RAND_HASH NONCE SOLUTION_FILE and has no subcommand
+    # mutation: inserting a "verify_solution" argv[1] makes clap reject every call
+    assert ver[:4] == ["tig-verifier", rt[1], "ab" * 32, "7"] and ver[4].endswith("/7.json")
+    assert len(ver) == 5
     assert "--ptx" not in rt  # CPU challenge
+
+
+def test_run_nonce_gpu_passes_ptx_and_gpu_to_both_binaries(tmp_path):
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd)
+        if cmd[0] == "tig-runtime":
+            (Path(cmd[cmd.index("--output") + 1]) / f"{cmd[3]}.json").write_text("{}")
+        return Result(0, "quality: 1\n", "")
+
+    inside.run_nonce("c005", "k=1", "ab" * 32, 3, Path("/a.so"), 10, 600, Path("/a.ptx"), run, tmp_path)
+    rt, ver = seen
+    for cmd in (rt, ver):  # mutation: dropping --gpu from the verifier call breaks GPU challenges
+        assert cmd[cmd.index("--ptx") + 1] == "/a.ptx" and cmd[cmd.index("--gpu") + 1] == "0"
 
 
 def test_run_nonce_classifies_no_solution(tmp_path):
     def run(cmd, **kw):
-        class R: returncode = 0 if cmd[0] == "tig-runtime" else 1; stdout = ""; stderr = "no solution"
-        return R()
+        if cmd[0] == "tig-runtime":
+            # tig-runtime writes an empty solution and exits 84 when the algorithm returns Err
+            (Path(cmd[cmd.index("--output") + 1]) / f"{cmd[3]}.json").write_text('{"solution": ""}')
+            return Result(84, "", "Runtime Error: no solution")
+        return Result(1, "", "Verification error: Invalid solution")
+
     row = inside.run_nonce("c003", "n=1", "ab" * 32, 1, Path("/x.so"), 10, 600, None, run, tmp_path)
     assert not row["ok"] and row["error"] == "no_solution" and row["quality"] is None
 ```
@@ -1401,7 +1443,10 @@ from pathlib import Path
 
 ALGO_NAME = "talos_cand"
 _QUALITY_RE = re.compile(r"quality:\s*(-?\d+)")
-OUT_OF_FUEL_RC = 87
+# Exit codes, from tig-runtime/src/main.rs at MONOREPO_REF.
+RUNTIME_ERROR_RC = 84  # compute_solution returned Err: the algorithm gave up / no solution
+OUT_OF_FUEL_RC = 87    # the algorithm library exits 87 when fuel runs out
+RUST_PANIC_RC = 101    # a Rust panic that unwinds to main
 
 
 def _algo_root(monorepo: Path, challenge: str) -> Path:
@@ -1454,29 +1499,37 @@ def artifact_paths(monorepo: Path, challenge: str, name: str) -> tuple[Path, Pat
 
 def classify(runtime_rc: int, verifier_rc: int, quality: int | None,
              timed_out: bool) -> tuple[bool, str | None]:
+    """A run that saved a solution before running out of fuel still counts if it verifies.
+    tig-verifier exits 1 for every rejection, so the runtime exit code carries the reason."""
     if timed_out:
         return False, "timeout"
     if verifier_rc == 0 and quality is not None:
         return True, None
-    if runtime_rc < 0:
-        return False, "panic"
     if runtime_rc == OUT_OF_FUEL_RC:
         return False, "out_of_fuel"
-    if verifier_rc == 1:
+    if runtime_rc < 0 or runtime_rc == RUST_PANIC_RC:
+        return False, "panic"
+    if runtime_rc == RUNTIME_ERROR_RC:
         return False, "no_solution"
+    if runtime_rc != 0:
+        return False, "panic"
     return False, "invalid"
 
 
 def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Path, fuel: int,
               timeout_s: int, ptx: Path | None, run=subprocess.run,
               workdir: Path | None = None) -> dict:
+    """Mirrors scripts/test_algorithm in the monorepo:
+    `tig-runtime SETTINGS RAND_HASH NONCE SO --fuel F --output DIR [--ptx P --gpu 0]` writes
+    DIR/<nonce>.json, then `tig-verifier SETTINGS RAND_HASH NONCE DIR/<nonce>.json [--ptx P --gpu 0]`
+    prints `quality: N` and exits 0 on a valid solution."""
     settings = json.dumps({"algorithm_id": "", "challenge_id": challenge_id, "track_id": track,
                            "block_id": "", "player_id": ""}, separators=(",", ":"))
     gpu_args = ["--ptx", str(ptx), "--gpu", "0"] if ptx else []
     with tempfile.TemporaryDirectory(dir=workdir) as td:
         out_file = Path(td) / f"{nonce}.json"
         cmd = ["tig-runtime", settings, rand_hash, str(nonce), str(so),
-               "--fuel", str(fuel), "--output", str(out_file)] + gpu_args
+               "--fuel", str(fuel), "--output", td] + gpu_args
         t0 = time.time()
         timed_out = False
         try:
@@ -1488,8 +1541,8 @@ def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Pat
         quality = None
         ver_rc = 1
         if not timed_out and out_file.exists():
-            r2 = run(["tig-verifier", "verify_solution", settings, rand_hash, str(nonce),
-                      str(out_file)] + gpu_args, capture_output=True, text=True, timeout=timeout_s)
+            r2 = run(["tig-verifier", settings, rand_hash, str(nonce), str(out_file)] + gpu_args,
+                     capture_output=True, text=True, timeout=timeout_s)
             ver_rc = r2.returncode
             m = _QUALITY_RE.search(r2.stdout or "")
             quality = int(m.group(1)) if m else None
@@ -1512,7 +1565,6 @@ content hash of the submitted files."""
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
 from pathlib import Path
 
@@ -1546,7 +1598,10 @@ def _image(name: str) -> modal.Image:
 def content_hash(files: dict[str, str]) -> str:
     h = hashlib.sha256()
     for k in sorted(files):
-        h.update(k.encode()); h.update(b"\0"); h.update(files[k].encode()); h.update(b"\0")
+        h.update(k.encode())
+        h.update(b"\0")
+        h.update(files[k].encode())
+        h.update(b"\0")
     return h.hexdigest()[:32]
 
 
@@ -1686,7 +1741,9 @@ class ModalBench:
     def _fn(self, name: str):
         import modal
         try:
-            return modal.Function.from_name(self.app_name, name)
+            fn = modal.Function.from_name(self.app_name, name)
+            fn.hydrate()  # from_name is lazy; hydrate forces the lookup so "not deployed" fails here
+            return fn
         except Exception as e:  # noqa: BLE001 - any lookup failure means not deployed
             raise BenchUnavailable(f"Modal function {name} not found in app {self.app_name}: "
                                    f"{e}. Run `talos setup` to deploy.") from None
@@ -1800,7 +1857,9 @@ git commit -m "bench: modal app in the TIG dev image, pure container logic, clie
 `tests/test_providers.py`:
 ```python
 import json
+import types
 
+import httpx
 import pytest
 
 from talos.providers import (ProviderAuthError, ProviderRateLimited, make_provider,
@@ -1858,6 +1917,7 @@ def test_openai_compat_maps_http_errors():
 
 def test_claude_cli_parses_json_result_and_cost():
     def run(cmd, input=None, **kw):
+        # mutation: shutil.which() in argv[0] makes this machine-dependent
         assert cmd[:2] == ["claude", "-p"] and "--output-format" in cmd and "json" in cmd
         assert "--system-prompt" in cmd and input == "USER"
         class R:
@@ -1873,10 +1933,15 @@ def test_claude_cli_parses_json_result_and_cost():
 
 def test_codex_cli_reads_last_message_file(tmp_path):
     def run(cmd, **kw):
+        # mutation: shutil.which() in argv[0] makes this machine-dependent
         assert cmd[:2] == ["codex", "exec"] and "-m" in cmd
         out = cmd[cmd.index("-o") + 1]
         open(out, "w").write("edited code")
-        class R: returncode = 0; stdout = ""; stderr = ""
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
         return R()
     p = CodexCli(model="gpt-5-codex", run=run)
     c = p.complete("SYS", "USER")
@@ -1888,6 +1953,52 @@ def test_make_provider_kinds_and_validate():
     assert isinstance(fp, FakeProvider) and validate_provider(fp) is None
     with pytest.raises(ValueError):
         make_provider("nope", "m")
+
+
+def test_anthropic_provider_maps_errors_and_prices_usage():
+    import anthropic
+
+    from talos.providers.anthropic_provider import AnthropicProvider
+
+    class Block:
+        type = "text"
+        text = "done"
+
+    class Msg:
+        stop_reason = "end_turn"
+        content = [Block()]
+        usage = types.SimpleNamespace(input_tokens=1_000_000, output_tokens=0)
+
+    class Stream:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def __enter__(self):
+            if self.exc:
+                raise self.exc
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_final_message(self):
+            return Msg()
+
+    def client(exc=None):
+        return types.SimpleNamespace(messages=types.SimpleNamespace(stream=lambda **kw: Stream(exc)))
+
+    p = AnthropicProvider(model="claude-opus-5", api_key="k", client=client())
+    c = p.complete("s", "u")
+    assert c.text == "done" and c.usage.cost_usd == pytest.approx(5.0) and p.metered
+    # mutation: mapping RateLimitError to ProviderError makes the loop fail instead of wait
+    resp = httpx.Response(429, request=httpx.Request("POST", "https://x"))
+    err = anthropic.RateLimitError("slow", response=resp, body=None)
+    with pytest.raises(ProviderRateLimited):
+        AnthropicProvider("claude-opus-5", "k", client=client(err)).complete("s", "u")
+    resp = httpx.Response(401, request=httpx.Request("POST", "https://x"))
+    err = anthropic.AuthenticationError("bad", response=resp, body=None)
+    with pytest.raises(ProviderAuthError):
+        AnthropicProvider("claude-opus-5", "k", client=client(err)).complete("s", "u")
 ```
 
 - [ ] **Step 2: Run to verify failure** → module not found.
@@ -2167,9 +2278,9 @@ class GoogleProvider:
     def complete(self, system: str, user: str) -> Completion:
         body = {"system_instruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}]}
-        url = f"{BASE}/{self.model}:generateContent?key={self.api_key}"
+        url = f"{BASE}/{self.model}:generateContent"
         try:
-            resp = self._post(url, body, {})
+            resp = self._post(url, body, {"x-goog-api-key": self.api_key})  # never in the URL
         except HTTPError as e:
             raise _map_http(e) from None
         try:
@@ -2189,7 +2300,6 @@ class GoogleProvider:
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 
 from talos.providers import ProviderAuthError, ProviderError
@@ -2206,8 +2316,7 @@ class ClaudeCli:
         self.timeout_s = timeout_s
 
     def complete(self, system: str, user: str) -> Completion:
-        exe = shutil.which("claude") or "claude"
-        cmd = [exe, "-p", "--output-format", "json", "--model", self.model,
+        cmd = ["claude", "-p", "--output-format", "json", "--model", self.model,
                "--system-prompt", system]
         try:
             r = self._run(cmd, input=user, capture_output=True, text=True, timeout=self.timeout_s)
@@ -2235,7 +2344,6 @@ class ClaudeCli:
 into the prompt because codex exec has no system flag."""
 from __future__ import annotations
 
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -2254,11 +2362,10 @@ class CodexCli:
         self.timeout_s = timeout_s
 
     def complete(self, system: str, user: str) -> Completion:
-        exe = shutil.which("codex") or "codex"
         prompt = f"{system}\n\n---\n\n{user}"
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "last.md"
-            cmd = [exe, "exec", "-m", self.model, "--skip-git-repo-check", "-o", str(out), prompt]
+            cmd = ["codex", "exec", "-m", self.model, "--skip-git-repo-check", "-o", str(out), prompt]
             try:
                 r = self._run(cmd, capture_output=True, text=True, timeout=self.timeout_s, cwd=td)
             except FileNotFoundError:
@@ -2280,8 +2387,6 @@ class CodexCli:
 """Scripted provider for tests and the fake end-to-end run."""
 from __future__ import annotations
 
-from typing import Callable
-
 from talos.types import Completion, Usage
 
 
@@ -2297,7 +2402,7 @@ class FakeProvider:
 
     def complete(self, system: str, user: str) -> Completion:
         self.calls.append((system, user))
-        if isinstance(self._script, Callable):
+        if callable(self._script):
             text = self._script(system, user)
         else:
             text = self._script[min(self._i, len(self._script) - 1)]
@@ -2307,7 +2412,7 @@ class FakeProvider:
 
 - [ ] **Step 10: Add the dependency, run, commit**
 
-In `pyproject.toml` change `dependencies = ["modal>=1.5,<2", "rich>=13"]` to `dependencies = ["modal>=1.5,<2", "rich>=13", "anthropic>=1,<2"]`, then `.venv/bin/pip install -e '.[dev]'`.
+In `pyproject.toml` change `dependencies = ["modal>=1.5,<2", "rich>=13"]` to `dependencies = ["modal>=1.5,<2", "rich>=13", "anthropic>=1,<2"]`, then `uv pip install --python .venv/bin/python -e '.[dev]'`.
 
 Run: `make check PYTHON=.venv/bin/python` → pass.
 
@@ -2372,8 +2477,12 @@ def test_failed_hypotheses_and_forced_tag_appear_when_given():
 
 
 def test_edit_prompt_shows_files_and_format():
-    system, user = edit_prompts(ctx(), {"title": "T", "description": "D", "strategy_tag": "local_search"})
-    assert "<<<<<<< SEARCH" in system and "mod.rs" in user and "fn x(){}" in user and "D" in user
+    hyp = {"title": "Bitset tabu", "description": "Use a bitset for the tabu list",
+           "strategy_tag": "local_search"}
+    system, user = edit_prompts(ctx(), hyp)
+    # mutation: dropping the description from the user prompt leaves the coder without the idea
+    assert "<<<<<<< SEARCH" in system and "mod.rs" in user and "fn x(){}" in user
+    assert "Use a bitset for the tabu list" in user
 
 
 def test_parse_hypothesis_tolerates_prose_and_validates_tag():
@@ -2388,8 +2497,8 @@ def test_parse_hypothesis_tolerates_prose_and_validates_tag():
 
 
 def test_distill_roundtrip():
-    system, user = distill_prompts(ctx(), [{"title": "x", "outcome": "failed:score"}])
-    assert "x" in user
+    system, user = distill_prompts(ctx(), [{"title": "Bigger tabu tenure", "outcome": "failed:score"}])
+    assert "Bigger tabu tenure" in user  # mutation: dropping the failure list from the prompt
     assert parse_distillation("LESSON: Prefer cheap moves early.") == "Prefer cheap moves early."
     assert parse_distillation("nothing useful") is None
 ```
@@ -2565,7 +2674,6 @@ git commit -m "prompts: hypothesis, edit, fix, repair, distill builders and pars
 
 `tests/test_baseline.py`:
 ```python
-import json
 import types
 
 import pytest
@@ -2714,8 +2822,6 @@ git commit -m "baseline: resolve mainnet top algorithm, measure once, cache"
 
 `tests/test_loop.py`:
 ```python
-import pytest
-
 from talos.budget import Budget, Spend
 from talos.bench import FakeBench
 from talos.loop import Loop, Thresholds
@@ -2748,8 +2854,10 @@ def hyp(title, tag="local_search"):
     return f'{{"title": "{title}", "description": "d", "strategy_tag": "{tag}"}}'
 
 
-def edit(k):
-    return f"<<<<<<< SEARCH mod.rs\nlet k = 1;\n=======\nlet k = {k};\n>>>>>>> REPLACE\n"
+def edit(k, frm=1):
+    """An edit block turning `let k = {frm};` into `let k = {k};`. The SEARCH text must match the
+    files the loop is currently editing (the best so far), not always the baseline."""
+    return f"<<<<<<< SEARCH mod.rs\nlet k = {frm};\n=======\nlet k = {k};\n>>>>>>> REPLACE\n"
 
 
 def quality_from_files(challenge, files, ns):
@@ -2793,7 +2901,8 @@ def test_false_positive_returns_to_research(tmp_path):
             return [100 for _ in ns.nonces()]  # held-out never improves
         return [100 + k - 1 for _ in ns.nonces()]
     b = Budget(usd=None, hours=None, iterations=2, modal_usd=None)
-    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5), hyp("b"), edit(6)], scores, b)
+    # iteration 2 edits the iteration-1 best (k=5), so its SEARCH text is `let k = 5;`
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5), hyp("b"), edit(6, frm=5)], scores, b)
     st = loop.run()
     assert st.status == "exhausted" and st.stop_reason == "iterations"
     assert st.false_positives == [1, 2] and st.best.iteration == 2
@@ -2803,9 +2912,12 @@ def test_compile_fix_rounds_then_skip(tmp_path):
     # mutation: unlimited fix rounds never terminates on a stubborn error
     bad = "<<<<<<< SEARCH mod.rs\nlet k = 1;\n=======\nlet k = BUG;\n>>>>>>> REPLACE\n"
     script = [hyp("a"), bad, bad, bad, bad, hyp("b"), edit(5)]
-    fb_ok = lambda files: "BUG" not in files["mod.rs"]
+
+    def compile_ok(files):
+        return "BUG" not in files["mod.rs"]
+
     loop, fp, fb, store = make(tmp_path, script)
-    fb._compile_ok = fb_ok
+    fb._compile_ok = compile_ok
     st = loop.run()
     assert st.status == "won"
     assert st.hypotheses[0]["outcome"] == "failed:compile"
@@ -2817,7 +2929,25 @@ def test_budget_stops_before_llm_call(tmp_path):
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(2), hyp("b"), edit(3)], budget=b)
     st = loop.run()
     assert st.status == "exhausted" and st.stop_reason == "usd"
-    assert len(fp.calls) == 2  # hypothesis + edit, then the next hypothesis is refused
+    assert len(fp.calls) == 2  # hypothesis + edit, then the compile's budget check refuses
+    assert fb.compile_calls == 1  # only the baseline registration in make(); no candidate compile
+
+
+def test_over_error_ceiling_is_failed_runtime(tmp_path):
+    # spec §9: a candidate over the error ceiling is logged failed:runtime and never becomes best
+    # mutation: dropping the ceiling check lets a half-crashing candidate become the best
+    def scores(challenge, files, ns):
+        import re
+        k = int(re.search(r"let k = (\d+);", files["mod.rs"]).group(1))
+        if k == 1:
+            return [100 for _ in ns.nonces()]
+        return [None if n % 2 else 100 + k for n in ns.nonces()]  # half the nonces error out
+
+    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(9)], scores, b)
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] == "failed:runtime" and st.best is None
+    assert st.status == "exhausted"
 
 
 def test_stagnation_recall_distill_reset(tmp_path):
@@ -3089,6 +3219,10 @@ class Loop:
                          training=results, delta=delta.to_dict(), hypothesis=hypothesis)
         self._event("scored", mean_rel_delta=delta.mean_rel_delta,
                     worst_rel_delta=delta.worst_rel_delta, error_rate=delta.error_rate)
+        if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a runtime failure
+            record.update(outcome="failed:runtime", error_rate=delta.error_rate)
+            self._finish_iteration(n, record, improved=False)
+            return
         improved = delta.mean_rel_delta > self._best_delta() or self.state.best is None and delta.mean_rel_delta > 0
         if improved:
             self.state.best = cand
@@ -3128,8 +3262,7 @@ class Loop:
         self._save()
         self._event("iteration_done", outcome=record["outcome"],
                     runs_since_improvement=self.state.runs_since_improvement)
-        if (not improved and self.state.runs_since_improvement == self.t.distill
-                and self.t.distill >= 3):
+        if not improved and self.state.runs_since_improvement == self.t.distill:
             self._distill()
         if not improved and self.state.runs_since_improvement >= self.t.reset:
             self._event("reset", forced_tag=self._forced_tag())
@@ -3430,10 +3563,7 @@ git commit -m "package: files, diff, per-nonce tables, hypothesis log, evidence 
 `tests/test_cli.py`:
 ```python
 import json
-import os
 import stat
-
-import pytest
 
 from talos import cli
 from talos.config import Config, load, resolve_api_key, save
@@ -3555,7 +3685,8 @@ class Config:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d.pop("config_path"); d.pop("secrets_path")
+        d.pop("config_path")
+        d.pop("secrets_path")
         return d
 
 
@@ -3600,7 +3731,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
-import os
 import shutil
 import signal
 import subprocess
@@ -3793,12 +3923,18 @@ def main(argv=None, ask=default_ask) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup")
     r = sub.add_parser("run")
-    r.add_argument("--challenge"); r.add_argument("--direction"); r.add_argument("--direction-file")
-    r.add_argument("--budget-usd", type=float); r.add_argument("--budget-hours", type=float)
-    r.add_argument("--budget-iterations", type=int); r.add_argument("--budget-modal-usd", type=float)
-    r.add_argument("--resume"); r.add_argument("--yes", action="store_true")
+    r.add_argument("--challenge")
+    r.add_argument("--direction")
+    r.add_argument("--direction-file")
+    r.add_argument("--budget-usd", type=float)
+    r.add_argument("--budget-hours", type=float)
+    r.add_argument("--budget-iterations", type=int)
+    r.add_argument("--budget-modal-usd", type=float)
+    r.add_argument("--resume")
+    r.add_argument("--yes", action="store_true")
     c = sub.add_parser("compile")
-    c.add_argument("--challenge", required=True); c.add_argument("--dir", default="algorithm")
+    c.add_argument("--challenge", required=True)
+    c.add_argument("--dir", default="algorithm")
     sub.add_parser("status")
     args = p.parse_args(argv)
     return {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status}[args.cmd](args, ask)
@@ -3842,11 +3978,18 @@ git commit -m "cli: setup and run wizards, compile, status, modal deploy"
 `tests/test_agentic.py`:
 ```python
 import json
+import os
+import subprocess
+import sys
+import types
+from pathlib import Path
 
 import pytest
 
-from talos.agentic import AgenticError, claude_md, prepare_worktree, read_back, sandbox_settings
+from talos.agentic import (AgenticError, attach_agentic, claude_md, prepare_worktree, read_back,
+                           sandbox_settings)
 from talos.prompts import PromptContext
+from talos.state import JobStore
 
 
 def ctx():
@@ -3869,11 +4012,12 @@ def test_sandbox_denies_network_and_scopes_edits(tmp_path):
     # mutation: adding "Edit(**)" or "Bash(*)" to deny breaks agentic mode entirely
     s = sandbox_settings(tmp_path)
     allow, deny = s["permissions"]["allow"], s["permissions"]["deny"]
-    assert "Bash(talos compile*)" in allow
+    # Claude Code's documented prefix form is `Bash(cmd:*)`; a bare `*` is not a prefix match
+    assert "Bash(talos compile:*)" in allow
     assert "Edit(algorithm/**)" in allow and "Edit(.talos/hypothesis.json)" in allow
     assert "WebFetch" in deny and "WebSearch" in deny and "Write(**)" in deny
-    assert {"Bash(curl*)", "Bash(wget*)", "Bash(git*)", "Bash(ssh*)", "Bash(python*)"} <= set(deny)
-    assert "Edit(**)" not in deny and "Bash(*)" not in deny
+    assert {"Bash(curl:*)", "Bash(wget:*)", "Bash(git:*)", "Bash(ssh:*)", "Bash(python:*)"} <= set(deny)
+    assert "Edit(**)" not in deny and "Bash(*)" not in deny and "Bash(*:*)" not in deny
     assert s["permissions"]["defaultMode"] == "dontAsk"  # unlisted tools are refused, not prompted
 
 
@@ -3893,6 +4037,29 @@ def test_read_back_requires_hypothesis_and_returns_files(tmp_path):
 def test_claude_md_mentions_compile_and_hypothesis():
     text = claude_md(ctx())
     assert "talos compile" in text and ".talos/hypothesis.json" in text and "knapsack" in text
+
+
+def test_agentic_error_is_a_failed_iteration_not_a_crash():
+    # mutation: a RuntimeError base escapes Loop.iterate's except clause and kills the whole run
+    assert issubclass(AgenticError, ValueError)
+
+
+def test_attach_agentic_timeout_is_agentic_error_and_talos_is_on_path(tmp_path):
+    seen = {}
+
+    def run(cmd, **kw):
+        seen.update(cmd=cmd, env=kw.get("env"), cwd=kw.get("cwd"))
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    loop = types.SimpleNamespace(store=JobStore(tmp_path), propose_and_edit=None,
+                                 _check_budget=lambda: None, _event=lambda *a, **k: None)
+    attach_agentic(loop, "claude-cli", "m", timeout_s=1, run=run)
+    with pytest.raises(AgenticError):  # mutation: letting TimeoutExpired escape crashes the loop
+        loop.propose_and_edit(ctx())
+    assert seen["cmd"][0] == "claude"  # mutation: shutil.which() makes argv[0] machine-dependent
+    assert "--permission-mode" in seen["cmd"] and seen["cwd"] == tmp_path / "agentic"
+    # mutation: dropping the PATH prepend means `talos compile` is not found inside the sandbox
+    assert seen["env"]["PATH"].split(os.pathsep)[0] == str(Path(sys.executable).parent)
 ```
 
 - [ ] **Step 2: Run to verify failure** → `ImportError` on the stub.
@@ -3906,15 +4073,17 @@ The loop reads the files back and owns compile, score and publish as in single-s
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from talos.prompts import PromptContext, STRATEGY_TAGS, _rust_rules
 
 
-class AgenticError(RuntimeError):
-    pass
+class AgenticError(ValueError):
+    """A ValueError so Loop.iterate records it as a failed iteration instead of crashing the run."""
 
 
 def sandbox_settings(worktree: Path) -> dict:
@@ -3923,9 +4092,9 @@ def sandbox_settings(worktree: Path) -> dict:
     return {"permissions": {
         "allow": ["Read(algorithm/**)", "Read(CHALLENGE.md)", "Read(tacit.md)", "Read(AGENTS.md)",
                   "Read(.talos/hypothesis.json)", "Edit(algorithm/**)",
-                  "Edit(.talos/hypothesis.json)", "Bash(talos compile*)"],
-        "deny": ["WebFetch", "WebSearch", "Write(**)", "Bash(curl*)", "Bash(wget*)", "Bash(git*)",
-                 "Bash(ssh*)", "Bash(python*)", "Bash(pip*)", "Bash(nc*)", "Bash(rm*)"],
+                  "Edit(.talos/hypothesis.json)", "Bash(talos compile:*)"],
+        "deny": ["WebFetch", "WebSearch", "Write(**)", "Bash(curl:*)", "Bash(wget:*)", "Bash(git:*)",
+                 "Bash(ssh:*)", "Bash(python:*)", "Bash(pip:*)", "Bash(nc:*)", "Bash(rm:*)"],
         "defaultMode": "dontAsk"}}
 
 
@@ -3993,25 +4162,35 @@ def read_back(worktree: Path, ctx: PromptContext) -> tuple[dict, dict[str, str]]
     return hypothesis, files
 
 
-def _run_claude(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
-    exe = shutil.which("claude") or "claude"
-    r = run([exe, "-p", "--model", model, "--settings", str(wt / ".claude" / "settings.json"),
-             "--permission-mode", "dontAsk", prompt],
-            cwd=wt, capture_output=True, text=True, timeout=timeout_s)
+def _agent_env() -> dict[str, str]:
+    """The agent runs `talos compile`; make sure the interpreter that runs Talos is first on PATH so
+    the console script resolves even when the venv is not activated in the agent's shell."""
+    env = dict(os.environ)
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _run_agent(cmd: list[str], wt: Path, timeout_s: int, run) -> None:
+    try:
+        r = run(cmd, cwd=wt, capture_output=True, text=True, timeout=timeout_s, env=_agent_env())
+    except FileNotFoundError:
+        raise AgenticError(f"{cmd[0]} CLI not found on PATH") from None
+    except subprocess.TimeoutExpired:
+        raise AgenticError(f"{cmd[0]} timed out after {timeout_s}s") from None
     (wt / ".talos" / "agent_stdout.txt").write_text(r.stdout or "")
     (wt / ".talos" / "agent_stderr.txt").write_text(r.stderr or "")
     if r.returncode != 0:
-        raise AgenticError(f"claude exited {r.returncode}: {(r.stderr or '')[-500:]}")
+        raise AgenticError(f"{cmd[0]} exited {r.returncode}: {(r.stderr or '')[-500:]}")
+
+
+def _run_claude(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
+    _run_agent(["claude", "-p", "--model", model, "--settings", str(wt / ".claude" / "settings.json"),
+                "--permission-mode", "dontAsk", prompt], wt, timeout_s, run)
 
 
 def _run_codex(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
-    exe = shutil.which("codex") or "codex"
-    r = run([exe, "exec", "-m", model, "--sandbox", "workspace-write", "--skip-git-repo-check",
-             prompt], cwd=wt, capture_output=True, text=True, timeout=timeout_s)
-    (wt / ".talos" / "agent_stdout.txt").write_text(r.stdout or "")
-    (wt / ".talos" / "agent_stderr.txt").write_text(r.stderr or "")
-    if r.returncode != 0:
-        raise AgenticError(f"codex exited {r.returncode}: {(r.stderr or '')[-500:]}")
+    _run_agent(["codex", "exec", "-m", model, "--sandbox", "workspace-write",
+                "--skip-git-repo-check", prompt], wt, timeout_s, run)
 
 
 def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
@@ -4031,7 +4210,6 @@ def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
             prompt += f"\nYou have stagnated: use strategy_tag \"{ctx.forced_tag}\"."
         loop._check_budget()
         runner(wt, model, prompt, timeout_s, run)
-        loop.state.spend.iterations += 0  # iterations are counted by the loop itself
         hypothesis, files = read_back(wt, ctx)
         loop._event("hypothesis", **hypothesis)
         return hypothesis, files
@@ -4039,7 +4217,7 @@ def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
     loop.propose_and_edit = propose_and_edit
 ```
 
-Note for the executor: the `claude` CLI flag names (`--settings`, `--permission-mode dontAsk`) and codex's `--sandbox workspace-write` must be checked against `claude --help` and `codex exec --help` on the machine; adjust the argv if a flag has moved, and keep the test on `sandbox_settings` as the contract. If `dontAsk` is not an accepted permission mode on the installed version, fall back to `acceptEdits` in both the settings and the argv and note it in the commit.
+Verified on the dev machine during the plan audit (2026-09-11): `claude --help` lists `--settings <file-or-json>`, `--permission-mode` with choices `acceptEdits, auto, bypassPermissions, manual, dontAsk, plan`, `--system-prompt`, `--output-format`; `codex exec --help` lists `-m/--model`, `-s/--sandbox`, `--skip-git-repo-check`, `-o/--output-last-message`. Permission rules use Claude Code's documented prefix form `Bash(cmd:*)`. Codex ignores `.claude/settings.json`; its `workspace-write` sandbox denies network but allows other commands — the read-back scope check is what enforces "algorithm files only" there.
 
 - [ ] **Step 4: Run, commit**
 
@@ -4100,7 +4278,12 @@ Expected: PASS and a printed dict with two `ok: True` results. Record the printe
 
 - [ ] **Step 3: Fake end-to-end run**
 
-Add to `talos/cli.py` a hidden flag `--fake` on `run` that swaps in `FakeProvider` and `FakeBench` (quality rises by one per iteration) and skips mainnet by using a canned `ChallengeInfo`. Then run:
+Add to `talos/cli.py` a hidden flag `--fake` on `run` (`r.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)`). Keep the `execute_job(spec, store, cfg, resume)` signature unchanged (Task 13's test monkeypatches it with exactly those four parameters); route the fakes through `cfg.provider == "fake"` instead:
+
+- In `cmd_run`, when `args.fake`: set `cfg = Config(provider="fake", model="fake", mode="single-shot", api_base=None)` and use a canned `ChallengeInfo(id="c003", name=challenge, is_gpu=False, tracks=["n=1"], max_fuel=1)` instead of calling `fetch_challenge_info`.
+- In `execute_job`, when `cfg.provider == "fake"`: `bench = FakeBench(scores)` where `scores` parses `let k = (\d+);` from `mod.rs` and returns `100 + k - 1` per nonce (like `tests/test_loop.py`); `provider = FakeProvider(script)` where `script(system, user)` returns a hypothesis JSON when `"strategy_tag" (one of` is in `system`, else an edit block bumping `k` by one (parse the current `k` from `user`); and `loop.measure_baseline(BASELINE_CACHE / "fake", hardware, mainnet=types.SimpleNamespace(top_algorithm=lambda ch: ("fake_base", 1), fetch_algorithm_files=lambda ch, name: {"mod.rs": "fn solve() { let k = 1; }\n"}, fetch_template=lambda ch: "pub fn solve_challenge("))`. With margin 0.005, `k=2` gives +1% and wins on training and held-out at iteration 1.
+
+Then run:
 
 ```bash
 .venv/bin/talos run --challenge knapsack --direction "test" --budget-iterations 5 --yes --fake
@@ -4127,5 +4310,7 @@ git commit -m "release: live smoke test, fake end-to-end run, README"
 **Spec coverage.** §5.1 setup wizard: Task 13. §5.2 run wizard, flags, resume, Ctrl-C: Tasks 11 and 13. §5.3 `talos compile`: Task 13. §5.4 run directory: Task 6. §7.1 config: Task 13. §7.2 providers: Task 8. §7.3 baseline and cache: Task 10. §7.4 bench, image, hardware, tracks, fuel: Tasks 2 and 7. §7.5 scoring: Task 3. §7.6 loop, stagnation, agentic swap: Tasks 11 and 14. §7.7 stop rule and states: Tasks 6 and 11. §7.8 budget: Tasks 5 and 11. §7.9 package: Task 12. §7.10 resume: Task 11. §9 error handling: compile fix rounds and edit scope in Tasks 4 and 11, Modal retry and `paused` in Tasks 7 and 11, provider error classes in Task 8, seed hygiene in Tasks 6, 9 and 12. §10 security: 0600 secrets in Task 13, sandbox in Task 14. §11 testing: fakes in Tasks 7 and 8, live smoke in Task 15, wizard tests in Task 13.
 
 **Gaps acknowledged.** The spec's "reject edits outside algorithm files in agentic mode" is enforced by reading back only the known file names (Task 14) rather than by the CLI sandbox alone. Modal per-second prices in `talos/bench.py` are ESTIMATE (unverified) and must be labelled as such in the CLI output, which Task 13 does with "(estimated)". OpenAI and Google prices are absent from the pricing table on purpose; those models report "unpriced" until the executor adds current rates.
+
+**Audit notes (2026-09-11), flagged and deliberately left.** (1) `cache_key` in Task 10 includes each nonce set's `rand_hash`, which is drawn fresh per job, so the spec §7.3 claim that "a second job on the same challenge skips measurement" does not hold; the cache only helps a resumed job, and a resumed job already carries its baseline in `state.json`. Making the cache cross-job would need a per-challenge deterministic hash, which weakens the seed-hygiene story; left for the user to decide. (2) Task 13's setup wizard returns non-zero on a rejected credential instead of re-prompting (spec §5.1); the wizard tests pin this. (3) A kill during held-out confirmation leaves `state.best` pointing at an iteration whose directory is then discarded and re-run under the same number on resume; harmless for scoring, untidy in `hypotheses.md`. (4) `fetch_algorithm_files` returns every file in the algorithm's directory (README.md included); they are staged and editable, and `talos compile` only uploads `.rs`/`.cu`.
 
 **Type consistency.** `Bench.score` returns `list[NonceResult]` everywhere; `FakeBench.scores` callback signature `(challenge, files, nonce_set)` is the same in Tasks 7, 10 and 11. `Candidate.delta` is a dict from `BundleDelta.to_dict()`, read as `delta["mean_rel_delta"]` in Task 11. `Loop.propose_and_edit` returns `(hypothesis_dict, files_dict)` in both Task 11 and Task 14. `JobStore.iteration_dir(n)` is used in Tasks 6, 11. `exhausted()` returns the dimension string used as `stop_reason` in Task 11 and asserted in tests.
