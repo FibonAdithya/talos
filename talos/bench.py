@@ -5,15 +5,19 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from talos.challenges import CHALLENGES
+from talos.challenges import CHALLENGES, BeatRule
+from talos.scoring import holdout_decision
 from talos.types import CompileResult, NonceResult, NonceSet
 
 # Rough Modal list prices, $/second, used only for budget accounting (marked estimated).
 CPU_USD_PER_CORE_SECOND = 0.0000131
 MEM_USD_PER_GIB_SECOND = 0.00000222
 GPU_USD_PER_SECOND = {"L40S": 0.000542}
+
+HOLDOUT_REASONS = ("won", "not_won", "forced", "not_compiled", "timeout")
 
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -28,10 +32,50 @@ class BenchUnavailable(Exception):
     pass
 
 
+@dataclass
+class EvalRequest:
+    challenge: str
+    files: dict[str, str]
+    training: list[NonceSet]
+    holdout: list[NonceSet]
+    fuel: int
+    baseline_training: list[NonceResult] | None  # None = score held-out unconditionally
+    rule: BeatRule
+
+
+@dataclass
+class EvalResult:
+    compile: CompileResult
+    training: list[NonceResult]          # empty when compile.ok is False
+    holdout: list[NonceResult] | None    # None when not scored
+    holdout_reason: str
+
+    def __post_init__(self) -> None:
+        if self.holdout_reason not in HOLDOUT_REASONS:
+            raise ValueError(f"unknown holdout reason {self.holdout_reason!r}")
+
+
+class BenchCancelled(Exception):
+    """The user asked for a stop while a job was in flight; the job has been cancelled."""
+
+
+class PendingJobStore:
+    """Where a backend records the job it has in flight, so a resumed run can reattach. The
+    loop hands the bench closures over JobState.pending_job; `memory()` is for callers without
+    a job, such as `talos compile`."""
+
+    def __init__(self, get: Callable[[], dict | None], set: Callable[[dict | None], None]):
+        self.get, self.set = get, set
+
+    @classmethod
+    def memory(cls) -> "PendingJobStore":
+        box: dict = {"v": None}
+        return cls(lambda: box["v"], lambda d: box.__setitem__("v", d))
+
+
 class Bench(Protocol):
-    def compile(self, challenge: str, files: dict[str, str]) -> CompileResult: ...
-    def score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
-              fuel: int) -> list[NonceResult]: ...
+    def evaluate(self, request: EvalRequest) -> EvalResult: ...
+    def request_stop(self) -> None: ...
     def cost_mark(self) -> float: ...
     def cost_usd_since(self, mark: float) -> float: ...
 
@@ -95,13 +139,13 @@ class ModalBench:
                 self._sleep(delay)
                 delay = min(delay * 2, 60)
 
-    def compile(self, challenge: str, files: dict[str, str]) -> CompileResult:
+    def _compile(self, challenge: str, files: dict[str, str]) -> CompileResult:
         t0 = self._clock()
         out = self._with_retry(lambda: self._fn(f"compile_{challenge}").remote(files))
         self._cost += _seconds_cost(challenge, self._clock() - t0)
         return CompileResult(ok=out["ok"], artifact_id=out.get("artifact_id"), output=out["output"])
 
-    def score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
+    def _score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
               fuel: int) -> list[NonceResult]:
         args = [(artifact_id, ns.track, ns.rand_hash, n, fuel) for ns in nonce_sets
                 for n in ns.nonces()]
@@ -110,6 +154,22 @@ class ModalBench:
         results = [NonceResult.from_dict(r) for r in rows]
         self._cost += sum(_seconds_cost(challenge, r.runtime_ms / 1000) for r in results)
         return results
+
+    def evaluate(self, request: EvalRequest) -> EvalResult:
+        c = self._compile(request.challenge, request.files)
+        if not c.ok:
+            return EvalResult(c, [], None, "not_compiled")
+        tr = (self._score(request.challenge, c.artifact_id, request.training, request.fuel)
+              if request.training else [])
+        go, reason = holdout_decision(request.baseline_training, tr, request.rule)
+        ho = None
+        if go:
+            ho = (self._score(request.challenge, c.artifact_id, request.holdout, request.fuel)
+                  if request.holdout else [])
+        return EvalResult(c, tr, ho, reason)
+
+    def request_stop(self) -> None:
+        pass  # Modal calls are short; the loop's own stop check lands between them
 
     def cost_mark(self) -> float:
         return self._cost
@@ -127,25 +187,29 @@ class FakeBench:
         self._scores = scores
         self._compile_ok = compile_ok
         self._usd_per_nonce = usd_per_nonce
-        self._files: dict[str, dict[str, str]] = {}
         self._cost = 0.0
-        self.compile_calls = 0
-        self.score_calls = 0
+        self.calls: list[EvalRequest] = []
+        self.holdout_runs = 0
 
-    def compile(self, challenge: str, files: dict[str, str]) -> CompileResult:
-        self.compile_calls += 1
-        if not self._compile_ok(files):
-            return CompileResult(ok=False, artifact_id=None, output="error[E0308]: mismatched types")
-        art = hashlib.sha256(repr(sorted(files.items())).encode()).hexdigest()[:16]
-        self._files[art] = dict(files)
-        return CompileResult(ok=True, artifact_id=art, output="ok")
+    def evaluate(self, request: EvalRequest) -> EvalResult:
+        self.calls.append(request)
+        if not self._compile_ok(request.files):
+            return EvalResult(CompileResult(ok=False, artifact_id=None,
+                                            output="error[E0308]: mismatched types"),
+                              [], None, "not_compiled")
+        art = hashlib.sha256(repr(sorted(request.files.items())).encode()).hexdigest()[:16]
+        tr = self._score(request.challenge, request.files, request.training)
+        go, reason = holdout_decision(request.baseline_training, tr, request.rule)
+        ho = None
+        if go:
+            self.holdout_runs += 1
+            ho = self._score(request.challenge, request.files, request.holdout)
+        return EvalResult(CompileResult(ok=True, artifact_id=art, output="ok"), tr, ho, reason)
 
-    def score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
-              fuel: int) -> list[NonceResult]:
-        self.score_calls += 1
+    def _score(self, challenge, files, nonce_sets) -> list[NonceResult]:
         out: list[NonceResult] = []
         for ns in nonce_sets:
-            qs = self._scores(challenge, self._files[artifact_id], ns)
+            qs = self._scores(challenge, files, ns)
             if len(qs) != ns.count:
                 raise ValueError(f"scores callback returned {len(qs)} qualities "
                                  f"for {ns.count} nonces on track {ns.track}")
@@ -156,6 +220,9 @@ class FakeBench:
                 else:
                     out.append(NonceResult(ns.track, n, True, q, 1, None))
         return out
+
+    def request_stop(self) -> None:
+        pass
 
     def cost_mark(self) -> float:
         return self._cost
