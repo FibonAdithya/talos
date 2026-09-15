@@ -82,7 +82,8 @@ conditional, so every loop test exercises the new shape.
 bookkeeping it does today. `_confirm(cand)` no longer calls the bench; it takes
 the result's `holdout` list. `_BudgetedBench` wraps `evaluate` only.
 `resolve_baseline` makes one `evaluate` call with `baseline_training=None` and
-requires `holdout` to be present.
+requires `holdout` to be present. `talos compile` calls `evaluate` with empty
+nonce sets; on C3 a compile-only check is therefore one job.
 
 The resume path for a run killed while `confirming` is kept and generalised:
 see §5.
@@ -137,7 +138,9 @@ All subprocess calls go through an injected `run` (as `deploy_bench` does now)
 and time through an injected clock and sleep, so the client is unit-tested
 with canned stdout.
 
-1. `c3 deploy --json` from the job directory; parse `job_id` from stdout.
+1. `c3 deploy --json` from the job directory. Stdout may start with a
+   `Warning:` line before the JSON object (seen on the CPU profile); the job
+   id is the object's `id` field.
 2. Write `pending_job` to state (§5) before anything else happens.
 3. Poll `c3 squeue --json` every 20 s until the status is not one of
    `PENDING`, `SCHEDULING`, `RUNNING`. Record the first time `RUNNING` was
@@ -146,8 +149,9 @@ with canned stdout.
    cancelled with `c3 cancel <id>` and reported as `BenchUnavailable`
    ("no C3 capacity for <profile> in 30 min"). The loop pauses the run as it
    does for a Modal outage.
-5. `c3 pull <id> --json` into the job directory; read `results.json` and
-   `build.log` from the pulled artifacts.
+5. `c3 pull <id> --json` with the job directory as cwd; files land under
+   `<job_dir>/<id>/artifacts/` (MEASURED from the spike's pull). Read
+   `results.json` and `build.log` from there.
 
 ### 3.4 Failure mapping
 
@@ -225,32 +229,30 @@ never carry the rand hash or the runtime command line.
 
 ## 5. State, resume, cancel
 
-The `Bench` protocol gains one method:
+`JobState` gains `pending_job: dict | None`. The loop writes it before every
+bench call with `purpose` (`"baseline"` or the iteration number), and for an
+iteration the `hypothesis` dict and the `files` being evaluated, which are
+otherwise only persisted after scoring. The bench receives a
+`PendingJobStore`, a pair of get/set closures over that same field, and
+`C3Bench` adds `backend`, `job_id`, `job_dir` and `request_hash` to it right
+after `c3 deploy` returns. The loop clears the record when the iteration is
+recorded. `ModalBench` never touches the store.
 
-```
-    def reattach(self, pending: dict) -> EvalResult | None: ...
-```
+On resume, if `pending_job` names an iteration, the loop skips the LLM step,
+rebuilds the request from the stored files, and calls `evaluate` again.
+`C3Bench.evaluate` compares the request's hash with the stored one and, on a
+match, polls the recorded job id instead of submitting; on a mismatch it
+submits a new job. For Modal the same resume re-runs compile and scoring for
+the stored files without spending a new hypothesis. A stale `"baseline"`
+record left after the baseline was recorded is dropped. The old "confirmation
+killed mid-flight" path is subsumed: with one call per iteration a run can
+only be mid-flight with a pending job.
 
-`JobState` gains `pending_job: dict | None`: `backend`, `job_id`, `purpose`
-(`"baseline"` or an iteration number), `job_dir`, and for an iteration the
-`hypothesis` dict, which is otherwise only persisted after scoring. `C3Bench`
-writes it through a callback the loop injects, right after `c3 deploy`
-returns, and clears it after `pull` succeeds. `ModalBench` never sets it and
-its `reattach` returns None.
-
-On resume, if `pending_job` is set, the loop calls `bench.reattach(pending)`
-before generating any hypothesis. `C3Bench.reattach` rebuilds the request from
-the job directory's `payload.json`, polls the recorded job id instead of
-submitting, and returns the result. The loop then feeds that result through
-the same baseline or iteration bookkeeping as a fresh call, using the files
-from the payload and the hypothesis from the record. A None return means the
-backend cannot reattach; the loop clears `pending_job` and redoes the step,
-which for Modal is what happens today. The existing "confirmation killed
-mid-flight" path is subsumed: with one call per iteration, a run can only be
-mid-flight with a pending job.
-
-Cancelling a run with a pending C3 job cancels the job with `c3 cancel`, since
-a running job bills. Modal has no pending job and needs nothing.
+Cancelling a run (`Ctrl-C`) calls `request_stop` on both the loop and the
+bench. `C3Bench` notices at its next poll, cancels the job with `c3 cancel`
+since a running job bills, clears the pending record, and raises
+`BenchCancelled`, which the loop records as `cancelled`. Modal has nothing to
+cancel.
 
 The baseline cache key includes the hardware class; the C3 backend's class
 string is `c3-<profile>`, so a baseline measured on C3 is never reused on
@@ -315,19 +317,19 @@ Unit, on any machine:
 - `test_bench.py`: `ModalBench.evaluate` with a fake function table: compile
   failure short-circuits; held-out scored on a win, on forced, not otherwise;
   cost accrues per call. Existing rand-hash redaction tests kept.
-- `test_c3_bench.py`: generated `.c3` text for a fixed request; time-limit
+- `test_c3_jobdir.py`: generated `.c3` text for a fixed request; time-limit
   formula at the boundaries (1 nonce, cap); deploy/squeue/pull sequence with
   canned JSON; each row of the §3.4 table; pending timeout cancels and raises;
   retry window anchored at first failure; cost from RUNNING to terminal only;
-  `reattach` skips deploy; rand hash absent from every generated file except
+  a pending record with a matching request hash skips deploy; rand hash absent from every generated file except
   `payload.json` and from every exception message.
 - `test_c3_job.py`: fake `run`; compile failure writes compile-only results
   and exits 0; partial `results.json` after each nonce; conditional held-out
   for won / not won / forced; `started` flags; log lines never contain the
   rand hash.
-- `test_loop.py`: all existing tests moved to `FakeBench.evaluate`; resume
-  with `pending_job` reattaches instead of resubmitting; cancel calls the
-  bench's cancel hook.
+- `test_c3_job.py` is listed above; `test_loop.py`: all existing tests moved
+  to `FakeBench.evaluate`; a resume with `pending_job` re-evaluates the stored
+  files without a new hypothesis; `BenchCancelled` ends the run as cancelled.
 - `test_cli.py`: setup with backend c3 skips Modal prompts, fails on expired
   session, warns on low balance; config without `backend` loads as modal; run
   refuses a missing image tag with the mirror instruction.
