@@ -1,14 +1,29 @@
 """Static per-challenge facts. Everything a job needs that is not read from mainnet."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 MONOREPO_REF = "84a5787f5b14a630bdf40f52bccf37887d3d8464"
 DEV_IMAGE_TAG = "0.0.7"
 
+IMAGE_NAMESPACE = "fibonadithya"  # the maintainers' Docker Hub namespace; users never mirror
+C3_CPU_PROFILE = "cpu-d3-4vcpu-16gb"  # 4 vCPU / 16 GB, matches the 4-core Modal spec
+C3_GPU_HARDWARE = "l40"               # class; closest to Modal's L40S
+C3_CPU_WORKERS = 4
+
 
 def dev_image(name: str) -> str:
     return f"ghcr.io/tig-foundation/tig-monorepo/{name}/dev:{DEV_IMAGE_TAG}"
+
+
+def image_namespace() -> str:
+    """Read at call time so TALOS_IMAGE_NAMESPACE can point a maintainer at a test mirror."""
+    return os.environ.get("TALOS_IMAGE_NAMESPACE") or IMAGE_NAMESPACE
+
+
+def c3_image(name: str) -> str:
+    return f"docker.io/{image_namespace()}/tig-{name}-dev:{DEV_IMAGE_TAG}"
 
 
 @dataclass(frozen=True)
@@ -42,6 +57,19 @@ def hardware_class(spec: ChallengeSpec) -> str:
     memory belongs in the key as much as cores do: changing memory_mib alone changes the timings
     (and the price per second) a cached baseline was measured under."""
     return f"gpu-{spec.gpu}" if spec.is_gpu else f"cpu{spec.cpu}-mem{spec.memory_mib}"
+
+
+def c3_profile(spec: ChallengeSpec) -> str:
+    return C3_GPU_HARDWARE if spec.is_gpu else C3_CPU_PROFILE
+
+
+def c3_workers(spec: ChallengeSpec) -> int:
+    return 1 if spec.is_gpu else C3_CPU_WORKERS
+
+
+def c3_hardware_class(spec: ChallengeSpec) -> str:
+    """Baseline cache key component. Prefixed so a C3 baseline never matches a Modal one."""
+    return f"c3-{c3_profile(spec)}"
 
 
 CHALLENGES: dict[str, ChallengeSpec] = {
