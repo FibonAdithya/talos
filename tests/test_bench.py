@@ -50,7 +50,10 @@ def test_fake_bench_scores_training_and_tracks_cost():
 def test_fake_bench_scores_holdout_on_a_win_and_when_forced():
     fb = FakeBench(lambda ch, files, ns: [110 for _ in ns.nonces()])
     won = fb.evaluate(req(baseline=base(100)))
-    assert won.holdout_reason == "won" and [x.nonce for x in won.holdout] == [1_000_000, 1_000_001, 1_000_002]
+    # mutation: scoring held-out only on "won" and never on "forced" (or the reverse) leaves
+    # the baseline job with no held-out results
+    assert (won.holdout_reason == "won"
+            and [x.nonce for x in won.holdout] == [1_000_000, 1_000_001, 1_000_002])
     forced = fb.evaluate(req(baseline=None))
     assert forced.holdout_reason == "forced" and len(forced.holdout) == 3
     assert fb.holdout_runs == 2
@@ -60,11 +63,13 @@ def test_fake_bench_none_means_error():
     fb = FakeBench(lambda ch, files, ns: [None, 5, 5])
     r = fb.evaluate(req(baseline=base(1)))
     # mutation: mapping a None quality to ok=True would feed phantom solutions to scoring
-    assert not r.training[0].ok and r.training[0].error == "no_solution" and r.training[1].quality == 5
+    assert (not r.training[0].ok and r.training[0].error == "no_solution"
+            and r.training[1].quality == 5)
 
 
 def test_fake_bench_compile_failure_scores_nothing():
-    fb = FakeBench(lambda ch, files, ns: [1, 1, 1], compile_ok=lambda files: "BUG" not in files["mod.rs"])
+    fb = FakeBench(lambda ch, files, ns: [1, 1, 1],
+                   compile_ok=lambda files: "BUG" not in files["mod.rs"])
     r = fb.evaluate(req(files={"mod.rs": "BUG"}))
     # mutation: ignoring compile_ok makes every compile-failure path in the loop untestable;
     # scoring a failed compile would hand the loop qualities for code that never built
