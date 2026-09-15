@@ -62,7 +62,7 @@ progress.
    every cache key.** `MONOREPO_REF` and `DEV_IMAGE_TAG` in
    `talos/challenges.py` enter the Modal artifact hash
    (`modal_app/talos_bench.py::content_hash`) and the baseline cache key. The
-   exit codes in `modal_app/inside.py` were read from `tig-runtime` at that
+   exit codes in `talos/inside.py` were read from `tig-runtime` at that
    commit. Bumping either pin silently changes what every cached baseline
    meant, and the Modal app must be redeployed (`talos setup`) before any run.
 4. **An edit outside the algorithm files fails the whole iteration; its
@@ -143,7 +143,7 @@ nobody.
 | How a candidate is compared to the baseline | `talos/scoring.py::bundle_delta`, `talos/scoring.py::beats` |
 | What a job persists, and the run directory layout | `talos/state.py::JobStore`, `README.md#where-results-land` |
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |
-| Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `modal_app/inside.py` |
+| Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `talos/inside.py` |
 | Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
 | LLM providers and prices | `talos/providers/__init__.py`, `talos/providers/pricing.py::PRICES` |
 | Agentic mode: sandbox and scope check | `talos/agentic.py::sandbox_settings`, `talos/agentic.py::read_back` |

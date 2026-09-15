@@ -4,19 +4,18 @@ monorepo checkout at /app. Artifacts live on the `talos-artifacts` Volume keyed 
 content hash of the submitted files."""
 from __future__ import annotations
 
-import hashlib
 import shutil
 from pathlib import Path
 
 import modal
 
-from modal_app import inside
+from talos import inside
 from talos.challenges import CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, dev_image
+from talos.inside import NONCE_TIMEOUT_S
 
 APP_NAME = "talos-bench"
 ARTIFACTS = "/artifacts"
 MONOREPO = Path("/app")
-NONCE_TIMEOUT_S = 600
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name("talos-artifacts", create_if_missing=True)
@@ -36,20 +35,7 @@ def _image(name: str) -> modal.Image:
 
 
 def content_hash(files: dict[str, str]) -> str:
-    """Artifact cache key. The monorepo pin and the dev image tag are part of it: the same
-    sources built against a different monorepo are a different .so, and the Volume outlives
-    a pin bump."""
-    h = hashlib.sha256()
-    h.update(MONOREPO_REF.encode())
-    h.update(b"\0")
-    h.update(DEV_IMAGE_TAG.encode())
-    h.update(b"\0")
-    for k in sorted(files):
-        h.update(k.encode())
-        h.update(b"\0")
-        h.update(files[k].encode())
-        h.update(b"\0")
-    return h.hexdigest()[:32]
+    return inside.content_hash(files, MONOREPO_REF, DEV_IMAGE_TAG)
 
 
 def _compile_impl(name: str, files: dict[str, str]) -> dict:

@@ -4,6 +4,7 @@ where `build_algorithm`, `tig-runtime` and `tig-verifier` are on PATH and the mo
 checkout is the working directory."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -142,3 +143,22 @@ def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Pat
     ok, err = classify(rt_rc, ver_rc, quality, timed_out)
     return {"track": track, "nonce": nonce, "ok": ok, "quality": quality if ok else None,
             "runtime_ms": runtime_ms, "error": err}
+
+
+NONCE_TIMEOUT_S = 600
+
+
+def content_hash(files: dict[str, str], monorepo_ref: str, dev_image_tag: str) -> str:
+    """Artifact cache key. The monorepo pin and the dev image tag are part of it: the same
+    sources built against a different monorepo are a different .so."""
+    h = hashlib.sha256()
+    h.update(monorepo_ref.encode())
+    h.update(b"\0")
+    h.update(dev_image_tag.encode())
+    h.update(b"\0")
+    for k in sorted(files):
+        h.update(k.encode())
+        h.update(b"\0")
+        h.update(files[k].encode())
+        h.update(b"\0")
+    return h.hexdigest()[:32]
