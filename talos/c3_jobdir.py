@@ -10,7 +10,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from talos.bench import EvalRequest
-from talos.challenges import CHALLENGES, MONOREPO_REF, c3_image, c3_profile, c3_workers
+from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_image, c3_profile,
+                              c3_workers)
 from talos.inside import NONCE_TIMEOUT_S
 
 BUILD_ALLOWANCE_S = 1200
@@ -51,7 +52,8 @@ def payload(request: EvalRequest) -> dict:
             "baseline_training": ([r.to_dict() for r in request.baseline_training]
                                   if request.baseline_training is not None else None),
             "rule": asdict(request.rule), "monorepo_ref": MONOREPO_REF,
-            "workers": c3_workers(spec), "nonce_timeout_s": NONCE_TIMEOUT_S}
+            "workers": c3_workers(spec), "nonce_timeout_s": NONCE_TIMEOUT_S,
+            "dev_image_tag": DEV_IMAGE_TAG}
 
 
 def request_hash(request: EvalRequest) -> str:
