@@ -414,3 +414,102 @@ def test_baseline_and_best_dirs_are_written(tmp_path):
     st = loop.run()
     assert st.status == "won"
     assert "let k = 5;" in (tmp_path / "best" / "mod.rs").read_text()
+
+
+NEVER_MATCHES = "<<<<<<< SEARCH mod.rs\nlet zzz = 1;\n=======\nlet zzz = 2;\n>>>>>>> REPLACE\n"
+STRAY = "<<<<<<< SEARCH Cargo.toml\nfoo\n=======\nbar\n>>>>>>> REPLACE\n"
+
+
+def test_repair_round_keeps_the_blocks_already_applied(tmp_path):
+    # One good block and one miss: the good block is applied, the miss goes to a repair round,
+    # and the repair misses again. search_replace's contract is "repair, then skip whatever still
+    # doesn't match", so the iteration must go on with the block that DID apply.
+    # mutation: replacing the outcome with the repair round's own outcome resets `applied` to 0
+    # and fails the iteration as "no edit block applied" although one block was applied
+    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5) + NEVER_MATCHES, NEVER_MATCHES],
+                               budget=b)
+    st = loop.run()
+    assert st.status == "won" and "let k = 5;" in st.best.files["mod.rs"]
+    assert len(fp.calls) == 3  # hypothesis, edit, exactly one repair round
+
+
+def test_rejected_path_survives_a_repair_round(tmp_path):
+    # spec §9: the out-of-scope block in the FIRST response must still fail the iteration when a
+    # miss in the same response sends the loop through a repair round.
+    # mutation: taking `rejected` from the repair round's outcome alone forgets the stray block
+    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), STRAY + edit(5) + NEVER_MATCHES, NEVER_MATCHES],
+                               budget=b)
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] == "failed:edit"
+    assert "Cargo.toml" in st.hypotheses[0]["error"]
+    assert fb.compile_calls == 1  # baseline registration only
+
+
+def test_compile_fix_rejects_out_of_scope_edits(tmp_path):
+    # spec §9 applies to the compile-fix response too: a fix that touches a file outside the
+    # algorithm fails the iteration instead of having its in-scope blocks applied.
+    # mutation: ignoring `rejected` in the compile-fix loop lets the fix below reach "won"
+    def swap(frm, to):
+        return f"<<<<<<< SEARCH mod.rs\nlet k = {frm};\n=======\nlet k = {to};\n>>>>>>> REPLACE\n"
+
+    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), swap(1, "BUG"), STRAY + swap("BUG", 5)],
+                               budget=b)
+    fb._compile_ok = lambda files: "BUG" not in files["mod.rs"]
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] == "failed:edit"
+    assert "Cargo.toml" in st.hypotheses[0]["error"]
+    assert fb.compile_calls == 1 + 1  # baseline registration + the broken edit; the fix never built
+    events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
+    assert [e["paths"] for e in events if e["kind"] == "edits_rejected"] == [["Cargo.toml"]]
+
+
+def _pending_confirmation(tmp_path, status, training_quality=104):
+    store = JobStore(tmp_path)
+    store.write_spec(spec(Budget(usd=None, hours=None, iterations=1, modal_usd=None)))
+    fb = FakeBench(quality_from_files)
+    files = {"mod.rs": "fn solve() { let k = 5; }\n"}
+    art = fb.compile("knapsack", files).artifact_id
+    st = JobState.fresh(Spend(started_at=0.0))
+    st.baseline = baseline()
+    st.status = status
+    st.iteration = 1
+    st.spend.iterations = 1
+    st.best = Candidate(iteration=1, files=files, artifact_id=art,
+                        training=[NonceResult("t", n, True, training_quality, 1) for n in range(4)],
+                        delta={"tracks": [], "mean_rel_delta": training_quality / 100 - 1,
+                               "worst_rel_delta": 0.0, "error_rate": 0.0},
+                        hypothesis={"title": "a", "description": "d",
+                                    "strategy_tag": "local_search"})
+    st.hypotheses = [{"iteration": 1, "against": 0, "title": "a", "description": "d",
+                      "strategy_tag": "local_search", "outcome": "improved"}]
+    store.save(st)
+    return store, fb
+
+
+def test_run_confirms_a_training_winner_after_the_status_was_reset(tmp_path):
+    # A stop request or a bench outage landing during the held-out run leaves the job
+    # "cancelled"/"paused", and the CLI resets that to "researching" on resume. The training
+    # winner still has no held-out result, so the confirmation must run before anything else.
+    # mutation: keying the resumed confirmation on status == "confirming" alone skips it, and
+    # the loop proposes a fresh hypothesis instead — the winner is never held-out scored
+    store, fb = _pending_confirmation(tmp_path, "researching")
+    fp = FakeProvider([])  # an empty script raises if the loop asks for a completion
+    loop = Loop(store.read_spec(), store.load(), store, fp, fb, template_rs="x",
+                clock=lambda: 0.0, sleep=lambda s: None)
+    result = loop.run()
+    assert result.status == "won" and result.confirmed == [1]
+    assert fb.score_calls == 1 and fp.calls == []
+
+
+def test_run_does_not_confirm_a_best_that_never_won_on_training(tmp_path):
+    # mutation: confirming every best with an empty holdout spends a held-out run on a candidate
+    # that only improved on the baseline without beating it
+    store, fb = _pending_confirmation(tmp_path, "researching", training_quality=100)
+    fp = FakeProvider([])
+    loop = Loop(store.read_spec(), store.load(), store, fp, fb, template_rs="x",
+                clock=lambda: 0.0, sleep=lambda s: None)
+    result = loop.run()  # the iterations cap (1) is already spent: exhausted at once
+    assert result.status == "exhausted" and fb.score_calls == 0 and result.confirmed == []

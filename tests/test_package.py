@@ -109,3 +109,23 @@ def test_readme_distinguishes_false_positive_from_untested(tmp_path):
     assert "false positive" in fp_text
     assert "never scored" in untested_text
     assert "false positive" not in untested_text
+
+
+def test_readme_does_not_deny_a_training_win_that_was_never_confirmed(tmp_path):
+    # A run can stop (budget, Ctrl-C) between the training win and the held-out run. The README
+    # must say the candidate beat the baseline on training and was never confirmed, not that it
+    # "did not beat the baseline on training".
+    # mutation: collapsing every unconfirmed candidate into "did not beat the baseline" misreports
+    # a measured training win to the submitter
+    spec_w, st_w, store_w = make(tmp_path / "winner", status="exhausted")
+    st_w.best.holdout = None  # +10.5% on training, confirmation never ran
+    winner_text = (build_package(spec_w, st_w, store_w) / "README.md").read_text()
+    assert "beat the baseline on the training nonces" in winner_text
+    assert "never" in winner_text and "did not beat the baseline on training" not in winner_text
+
+    spec_l, st_l, store_l = make(tmp_path / "loser", status="exhausted")
+    st_l.best.holdout = None
+    st_l.best.training = [NonceResult("t", 0, True, 100, 1), NonceResult("t", 1, True, 100, 1)]
+    loser_text = (build_package(spec_l, st_l, store_l) / "README.md").read_text()
+    assert "did not beat the baseline on training" in loser_text
+    assert "beat the baseline on the training nonces" not in loser_text

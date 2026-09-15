@@ -12,7 +12,7 @@ from talos.baseline import resolve_baseline
 from talos.bench import BenchUnavailable
 from talos.budget import BudgetExhausted, exhausted
 from talos.challenges import CHALLENGES
-from talos.edits import EditError, apply_edit_response
+from talos.edits import EditError, EditOutcome, apply_edit_response
 from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts, distill_prompts,
                            edit_prompts, edit_repair_prompts, hypothesis_prompts,
                            parse_distillation, parse_hypothesis)
@@ -233,8 +233,16 @@ class Loop:
             if not outcome.misses:
                 break
             system, user = edit_repair_prompts(ctx, outcome.files, format_misses(outcome.misses))
-            repaired = apply_edit_response(outcome.files, self._llm(system, user).text)
-            outcome = repaired
+            try:
+                repaired = apply_edit_response(outcome.files, self._llm(system, user).text)
+            except EditError:
+                break  # a repair reply with no blocks: keep what was applied, skip the misses
+            # Accumulate, never replace: the repair round re-emits only the failed blocks, so its
+            # own `applied` says nothing about the first response's blocks, and its `rejected`
+            # would forget an out-of-scope block that the first response carried.
+            outcome = EditOutcome(files=repaired.files, applied=outcome.applied + repaired.applied,
+                                  misses=repaired.misses,
+                                  rejected=outcome.rejected + repaired.rejected)
         if outcome.rejected:
             # spec §9: an edit outside the algorithm files fails the iteration in BOTH modes.
             # Applying the in-scope blocks of the same response and carrying on would let the
@@ -277,6 +285,13 @@ class Loop:
                 fixed = apply_edit_response(files, self._llm(system, user).text)
             except EditError:
                 break
+            if fixed.rejected:
+                # spec §9 holds for the fix response too: never apply its in-scope blocks either.
+                self._event("edits_rejected", paths=fixed.rejected)
+                record.update(outcome="failed:edit", error="edit outside the algorithm files "
+                              f"rejected: {sorted(fixed.rejected)}")
+                self._finish_iteration(n, record, improved=False)
+                return
             if fixed.applied == 0:
                 break  # byte-identical files; recompiling them would only repeat the same error
             files = fixed.files
@@ -405,12 +420,15 @@ class Loop:
             return self.state  # before the discard: a finished job keeps its winning directory
         self._discard_incomplete_iteration()
         try:
-            if (self.state.status == "confirming" and self.state.best is not None
-                    and self.state.best.holdout is None):
-                self._confirm(self.state.best)  # a confirmation killed mid-flight; finish it
-            else:
-                self.state.status = "researching"
-                self._save()
+            self.state.status = "researching"
+            self._save()
+            best = self.state.best
+            if (best is not None and best.holdout is None
+                    and beats(self.state.baseline.training, best.training, self.rule)):
+                # A confirmation killed mid-flight (a stop, a bench outage, a hard kill): finish
+                # it first. Keyed on the candidate, not on status == "confirming", because the CLI
+                # resets a cancelled/paused job to "researching" before it gets here.
+                self._confirm(best)
             while self.state.status not in TERMINAL:
                 self._check_budget()
                 self.iterate()

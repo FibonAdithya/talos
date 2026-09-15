@@ -6,7 +6,8 @@ import shutil
 from importlib import resources
 from pathlib import Path
 
-from talos.scoring import ScoringError, bundle_delta
+from talos.challenges import CHALLENGES
+from talos.scoring import ScoringError, beats, bundle_delta
 from talos.state import JobSpec, JobState, JobStore
 from talos.types import NonceResult
 
@@ -76,6 +77,13 @@ def _readme_no_candidate(spec: JobSpec, state: JobState) -> str:
             "There is nothing to submit from this job.\n")
 
 
+def _won_training(spec: JobSpec, state: JobState) -> bool:
+    try:
+        return beats(state.baseline.training, state.best.training, CHALLENGES[spec.challenge].beat)
+    except (ScoringError, KeyError):
+        return False
+
+
 def _readme(spec: JobSpec, state: JobState) -> str:
     confirmed = state.best.iteration in state.confirmed
     false_positive = state.best.iteration in state.false_positives
@@ -88,9 +96,13 @@ def _readme(spec: JobSpec, state: JobState) -> str:
     elif false_positive:
         head += ("This candidate beat the baseline on the training nonces but NOT on the "
                  "held-out nonces (a false positive); see scores.md.\n\n")
+    elif _won_training(spec, state):
+        head += ("This candidate beat the baseline on the training nonces but was never scored "
+                 "on the held-out nonces: the run stopped before the confirmation. Treat it as "
+                 "unconfirmed. See scores.md.\n\n")
     else:
         head += ("This candidate was never scored on the held-out nonces; it did not beat the "
-                 "baseline on training.\n\n")
+                 "baseline on training by the required margin.\n\n")
     head += ("## Submitting\n\n1. Copy the algorithm files into "
              f"`tig-algorithms/src/{spec.challenge}/<your_name>/` in a monorepo checkout.\n"
              "2. Add the copyright header the TIG Inbound Game License requires.\n"
