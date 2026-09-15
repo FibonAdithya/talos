@@ -43,12 +43,14 @@ class FakeC3:
     """Scripted `c3` CLI. `statuses` is the sequence squeue reports; `results` is what pull
     writes (None = no results.json); `deploy_rc` non-zero fails the deploy."""
 
-    def __init__(self, statuses, results=None, deploy_rc=0, job_id="job_1", squeue_fail=0):
+    def __init__(self, statuses, results=None, deploy_rc=0, job_id="job_1", squeue_fail=0,
+                 pull_fail=0):
         self.statuses = list(statuses)
         self.results = results
         self.deploy_rc = deploy_rc
         self.job_id = job_id
         self.squeue_fail = squeue_fail
+        self.pull_fail = pull_fail
         self.calls = []
 
     def __call__(self, cmd, **kw):
@@ -66,13 +68,19 @@ class FakeC3:
                 st = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
                 out = json.dumps([{"job_id": self.job_id, "status": st}])
         elif cmd[1] == "pull":
-            d = Path(kw["cwd"]) / self.job_id / "artifacts"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "build.log").write_text("built")
-            if self.results is not None:
-                (d / "results.json").write_text(json.dumps(self.results))
-            out = json.dumps({"jobs": [{"job_id": self.job_id, "directory": str(d.parent),
-                                        "files": [], "downloaded_count": 1}]})
+            if self.pull_fail:
+                self.pull_fail -= 1
+                rc, out = 1, "pull error"
+            else:
+                d = Path(kw["cwd"]) / self.job_id / "artifacts"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "build.log").write_text("built")
+                if self.results is not None:
+                    text = (self.results if isinstance(self.results, str)
+                           else json.dumps(self.results))
+                    (d / "results.json").write_text(text)
+                out = json.dumps({"jobs": [{"job_id": self.job_id, "directory": str(d.parent),
+                                            "files": [], "downloaded_count": 1}]})
         elif cmd[1] == "cancel":
             out = "cancelled"
         import types
@@ -139,6 +147,9 @@ def test_timed_out_during_holdout_marks_holdout_reason_timeout(tmp_path):
     b, _ = bench(tmp_path, c3)
     r = b.evaluate(req(n=2))
     assert r.holdout is not None and all(x.error == "timeout" for x in r.holdout)
+    # the reason stays what the job wrote ("won"); turning an all-timeout held-out set into
+    # a non-win is the loop's confirmation step, not this client's job
+    assert r.holdout_reason == "won"
     doc2 = results_doc(n=2, holdout=False)
     doc2["holdout_reason"] = "won"  # decided, never started
     doc2["started"]["holdout"] = False
@@ -158,15 +169,86 @@ def test_failed_job_without_results_is_resubmitted_once_then_unavailable(tmp_pat
     assert len(deploys) == 2
 
 
-def test_pending_too_long_cancels_and_pauses(tmp_path):
-    c3 = FakeC3(["PENDING"], results_doc())
-    b, clock = bench(tmp_path, c3)
+def test_timed_out_without_results_is_not_resubmitted(tmp_path):
+    c3 = FakeC3(["RUNNING", "TIMED_OUT"], results=None)
+    b, _ = bench(tmp_path, c3)
     with pytest.raises(BenchUnavailable) as ei:
         b.evaluate(req())
-    assert "capacity" in str(ei.value)
+    assert "timed out" in str(ei.value)
+    deploys = [c for (c, _) in c3.calls if c[1] == "deploy"]
+    # mutation: resubmitting on a job that burned its whole time budget doubles the most
+    # expensive failure mode instead of surfacing it
+    assert len(deploys) == 1
+
+
+def test_unknown_status_is_a_poll_failure_bounded_by_the_limit(tmp_path):
+    c3 = FakeC3(["SUSPENDED"], results_doc())
+    b, _ = bench(tmp_path, c3)
+    with pytest.raises(BenchUnavailable) as ei:
+        b.evaluate(req())
+    # mutation: leaving ACTIVE unused and falling through on any unrecognised status polls
+    # for ever instead of bounding it like any other CLI failure
+    assert "SUSPENDED" in str(ei.value)
+
+
+def test_pull_failure_is_retried_once_against_the_same_job(tmp_path):
+    c3 = FakeC3(["RUNNING", "SUCCEEDED"], results_doc(), pull_fail=1)
+    b, _ = bench(tmp_path, c3)
+    r = b.evaluate(req())
+    assert r.compile.ok
+    pulls = [c for (c, _) in c3.calls if c[1] == "pull"]
+    # mutation: leaving the pull call outside a try means a transient pull failure raises
+    # straight through evaluate instead of being retried against the same job id
+    assert len(pulls) == 2 and all(p[2] == "job_1" for p in pulls)
+
+
+def test_unknown_error_kind_in_results_becomes_unavailable_not_a_crash(tmp_path):
+    doc = results_doc()
+    doc["training"][0]["error"] = "oom"  # NonceResult validates ERROR_KINDS; this is not one
+    c3 = FakeC3(["RUNNING", "SUCCEEDED"], doc)
+    b, _ = bench(tmp_path, c3)
+    with pytest.raises(BenchUnavailable) as ei:
+        b.evaluate(req())
+    # mutation: leaving _result_from outside a try lets a malformed results.json crash
+    # evaluate with a raw ValueError instead of pausing the run
+    assert HASH not in str(ei.value)
+
+
+def test_non_json_results_becomes_unavailable_not_a_crash(tmp_path):
+    c3 = FakeC3(["RUNNING", "SUCCEEDED"], results="not valid json {")
+    b, _ = bench(tmp_path, c3)
+    with pytest.raises(BenchUnavailable) as ei:
+        b.evaluate(req())
+    # mutation: leaving json.loads outside a try lets a truncated results.json crash evaluate
+    # with a raw JSONDecodeError instead of pausing the run
+    assert HASH not in str(ei.value)
+
+
+def test_request_stop_before_evaluate_raises_cancelled_without_deploying(tmp_path):
+    c3 = FakeC3(["RUNNING"], results_doc())
+    b, _ = bench(tmp_path, c3)
+    b.request_stop()
+    with pytest.raises(BenchCancelled):
+        b.evaluate(req())
+    # mutation: checking _stop only inside _wait deploys a fresh job before noticing the stop,
+    # then immediately cancels the job it just paid to submit
+    assert not any(c[1] == "deploy" for (c, _) in c3.calls)
+
+
+def test_pending_too_long_cancels_and_pauses(tmp_path):
+    c3 = FakeC3(["PENDING"], results_doc())
+    pending = PendingJobStore.memory()
+    b, clock = bench(tmp_path, c3, pending=pending)
+    with pytest.raises(BenchUnavailable) as ei:
+        b.evaluate(req())
+    # mutation: dropping the profile from the message loses the "which hardware is scarce"
+    # signal a human reading the pause needs
+    assert "capacity" in str(ei.value) and "cpu-d3-4vcpu-16gb" in str(ei.value)
     # mutation: forgetting the cancel leaves a job that will start and bill while nobody waits
     assert any(c[1] == "cancel" for (c, _) in c3.calls)
     assert clock.t >= 1800
+    # mutation: leaving the pending record makes the next resume reattach to a cancelled job
+    assert pending.get() is None
 
 
 def test_request_stop_cancels_the_job_and_raises_cancelled(tmp_path):

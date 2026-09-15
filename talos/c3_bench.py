@@ -86,9 +86,12 @@ class C3Bench:
                 return str(row.get("status", "UNKNOWN")).upper()
         raise C3CommandError(f"job {job_id} not listed by squeue")
 
-    def _wait(self, job_id: str) -> tuple[str, float | None, float]:
-        """Returns (status, first_running_time, terminal_time). Poll failures are tolerated up
-        to poll_failures_max in a row; a stop request cancels the job."""
+    def _wait(self, job_id: str, profile: str) -> tuple[str, float | None, float]:
+        """Returns (status, first_running_time, terminal_time). Poll failures — a CLI error, an
+        unparseable document, or a status outside ACTIVE/TERMINAL — are tolerated up to
+        poll_failures_max in a row; a stop request cancels the job."""
+        # The pending timeout restarts here on every reattach: the original submission time
+        # is not stored in the pending record, only the job id and request hash.
         submitted = self._clock()
         first_running = None
         failures = 0
@@ -99,14 +102,18 @@ class C3Bench:
                 raise BenchCancelled(job_id)
             try:
                 status = self._status(job_id)
-                failures = 0
+                if status not in ACTIVE and status not in TERMINAL:
+                    raise C3CommandError(f"unrecognised job status {status!r}")
             except (C3CommandError, ValueError, KeyError, AttributeError, TypeError) as e:
-                failures += 1  # a CLI error or a document shape we do not understand
+                # a CLI error, a document shape we do not understand, or a status neither
+                # ACTIVE nor TERMINAL: none of these are safe to poll on for ever
+                failures += 1
                 if failures >= self.poll_failures_max:
                     raise BenchUnavailable(f"C3 unreachable for {failures} polls: "
                                            f"{_redact(str(e))[:200]}") from None
                 self._sleep(self.poll_s)
                 continue
+            failures = 0
             now = self._clock()
             if status == "RUNNING" and first_running is None:
                 first_running = now
@@ -114,8 +121,9 @@ class C3Bench:
                 return status, first_running, now
             if status in QUEUED and now - submitted > self.pending_timeout_s:
                 self._cancel(job_id)
-                raise BenchUnavailable(f"no C3 capacity in {self.pending_timeout_s}s; "
-                                       f"job {job_id} cancelled")
+                self._pending.set(None)  # else the next resume reattaches to a cancelled job
+                raise BenchUnavailable(f"no C3 capacity for {profile} in "
+                                       f"{self.pending_timeout_s}s; job {job_id} cancelled")
             self._sleep(self.poll_s)
 
     def _cancel(self, job_id: str) -> None:
@@ -127,8 +135,14 @@ class C3Bench:
     def _pull(self, job_id: str, job_dir: Path) -> Path:
         job_dir.mkdir(parents=True, exist_ok=True)  # a reattach never wrote the job dir
         pulled = job_dir / job_id
+        d = pulled
         for attempt in range(2):
-            doc = parse_json_stdout(self._c3("pull", job_id, "--json", cwd=job_dir))
+            try:
+                doc = parse_json_stdout(self._c3("pull", job_id, "--json", cwd=job_dir))
+            except (C3CommandError, ValueError):
+                if attempt == 1:  # a transient pull failure gets one retry, same job id
+                    raise
+                continue
             jobs = doc.get("jobs") or []
             d = Path(jobs[0]["directory"]) if jobs and jobs[0].get("directory") else pulled
             if not d.is_absolute():
@@ -141,6 +155,9 @@ class C3Bench:
 
     # ── evaluate ───────────────────────────────────────────────────────
     def evaluate(self, request: EvalRequest) -> EvalResult:
+        if self._stop:  # noticed before any deploy: nothing was submitted, so nothing to cancel
+            self._pending.set(None)
+            raise BenchCancelled("stop requested before submission")
         pend = self._pending.get() or {}
         purpose = str(pend.get("purpose", "adhoc"))
         job_dir = self.run_dir / "c3" / purpose
@@ -166,9 +183,12 @@ class C3Bench:
         return job_id
 
     def _collect(self, job_id: str, job_dir: Path, request: EvalRequest) -> EvalResult:
-        status, t_run, t_end = self._wait(job_id)
+        profile = c3_profile(CHALLENGES[request.challenge])
+        status, t_run, t_end = self._wait(job_id, profile)
         if t_run is not None:
-            profile = c3_profile(CHALLENGES[request.challenge])
+            # ESTIMATE. Reattaching to a job already RUNNING bills only from the reattach,
+            # undercounting whatever ran before this process started polling; reattaching to
+            # a job that is already terminal bills nothing for it at all.
             self._cost += (t_end - t_run) / 3600 * GBP_PER_HOUR[profile] * USD_PER_GBP
         try:
             artifacts = self._pull(job_id, job_dir)
@@ -179,8 +199,17 @@ class C3Bench:
         if not results.exists():
             if status in DONE:
                 raise BenchUnavailable(f"C3 job {job_id} succeeded without results.json")
+            if status == "TIMED_OUT":
+                # a build/score run that burned its whole time budget is a property of the
+                # files, not an infrastructure blip: resubmitting doubles the most expensive
+                # failure mode instead of surfacing it
+                raise BenchUnavailable(f"C3 job {job_id} timed out before writing results")
             raise _JobFailed(f"{job_id} {status} with no results")
-        return self._result_from(status, json.loads(results.read_text()), request)
+        try:
+            return self._result_from(status, json.loads(results.read_text()), request)
+        except (ValueError, TypeError, KeyError, AttributeError) as e:
+            raise BenchUnavailable(
+                f"C3 job {job_id} wrote unreadable results: {_redact(str(e))[:300]}") from None
 
     @staticmethod
     def _result_from(status: str, data: dict, request: EvalRequest) -> EvalResult:
