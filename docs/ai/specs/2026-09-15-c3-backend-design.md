@@ -101,7 +101,7 @@ C3 job.
 |---|---|
 | `.c3` | generated YAML, see §3.2 |
 | `job.sh` | fixed wrapper, see §4 |
-| `c3_job.py`, `inside.py`, `scoring.py`, `types.py`, `challenges.py` | copies of the Talos modules the job imports, flattened so the job needs no package install |
+| `talos/` (`__init__.py`, `c3_job.py`, `inside.py`, `scoring.py`, `types.py`, `challenges.py`) | copies of the Talos modules the job imports, shipped as a package directory so the job needs no package install |
 | `payload.json` | `challenge`, `challenge_id`, `files`, `training`, `holdout`, `fuel`, `baseline_training`, `rule`, `monorepo_ref` |
 
 The rand hash lives only in `payload.json`. The whole directory is uploaded to
@@ -182,7 +182,7 @@ time is not billed by C3 and is not counted. Values at 2026-09-15 from
 set -euo pipefail
 curl -fsSL "https://codeload.github.com/tig-foundation/tig-monorepo/tar.gz/$MONOREPO_REF" | tar xz -C /app --strip-components=1
 cd "$C3_JOB_WORKDIR"
-exec python3 c3_job.py
+exec python3 -m talos.c3_job
 ```
 
 `$MONOREPO_REF` is substituted into `job.sh` when the job directory is

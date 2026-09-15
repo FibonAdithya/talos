@@ -112,7 +112,9 @@ edit outside the algorithm files fails the iteration.
 
 On the C3 backend, the sandbox has no `talos.config.json` to read, so the configured
 backend is passed to it as `TALOS_BACKEND`; each `talos compile` the agent runs from the
-sandbox is one C3 job of about 12 minutes.
+sandbox is one C3 job of about 12 minutes. If the agent's 30-minute timeout kills a sandbox
+compile while its C3 job is still running, the job is not cancelled: it runs on to its own
+time limit and bills for it, which bounds the cost but does not avoid it.
 
 ### `talos compile`
 
@@ -164,6 +166,10 @@ dimensions. The wall-clock budget (`--budget-hours`) counts elapsed time from th
 start, including time spent resumed. Compute spend shown in status lines and the final
 report is an **estimate**, computed from measured container seconds times list prices in
 a table shipped with Talos — not a billed amount.
+
+Compute spent by `talos compile` from the agentic sandbox is not counted against
+`--budget-compute-usd`; on C3 each of those is one job (about 12 minutes of overhead,
+MEASURED 2026-09-14) billed at the profile's rate.
 
 ## Live smoke test
 
