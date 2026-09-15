@@ -47,7 +47,7 @@ def _require_scoreable(challenge: str, fuel: int, label: str, nonce_sets: list[N
 
 
 def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[NonceSet],
-                     fuel: int, bench, cache_dir: Path, hardware_class: str,
+                     fuel: int, bench, cache_dir: Path, hardware_class: str, rule,
                      mainnet=_mainnet, log=lambda msg: None) -> tuple[BaselineRecord, str]:
     top = mainnet.top_algorithm(challenge)
     if top is None:
@@ -65,18 +65,19 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
             log(f"baseline {name}: cache hit {key}")
             return rec, template
     files = mainnet.fetch_algorithm_files(challenge, name)
-    log(f"baseline {name} (adoption {adoption}): compiling {len(files)} file(s)")
-    c = bench.compile(challenge, files)
-    if not c.ok:
+    log(f"baseline {name} (adoption {adoption}): compiling and scoring {len(files)} file(s)")
+    from talos.bench import EvalRequest
+    r = bench.evaluate(EvalRequest(challenge=challenge, files=files, training=training,
+                                   holdout=holdout, fuel=fuel, baseline_training=None, rule=rule))
+    if not r.compile.ok:
         raise BaselineError(f"baseline {name} failed to compile; likely dev-image drift at "
-                            f"{MONOREPO_REF}.\n{c.output[-4000:]}")
-    log("baseline: scoring training nonces")
-    tr: list[NonceResult] = bench.score(challenge, c.artifact_id, training, fuel)
-    log("baseline: scoring held-out nonces")
-    ho: list[NonceResult] = bench.score(challenge, c.artifact_id, holdout, fuel)
+                            f"{MONOREPO_REF}.\n{r.compile.output[-4000:]}")
+    if r.holdout is None:
+        raise BaselineError(f"baseline {name}: held-out set was not scored ({r.holdout_reason})")
+    tr, ho = r.training, r.holdout
     _require_scoreable(challenge, fuel, "training", training, tr)
     _require_scoreable(challenge, fuel, "held-out", holdout, ho)
-    rec = BaselineRecord(name=name, adoption=adoption, artifact_id=c.artifact_id, files=files,
+    rec = BaselineRecord(name=name, adoption=adoption, artifact_id=r.compile.artifact_id, files=files,
                          training=tr, holdout=ho)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(cache_file, json.dumps(rec.to_dict(), indent=1))

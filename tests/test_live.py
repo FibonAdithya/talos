@@ -13,6 +13,9 @@ pytestmark = pytest.mark.live
 
 
 def test_baseline_compiles_and_scores():
+    from talos.bench import EvalRequest
+    from talos.challenges import CHALLENGES
+
     ch = os.environ.get("TALOS_LIVE_CHALLENGE", "knapsack")
     info = mainnet.fetch_challenge_info(ch)
     top = mainnet.top_algorithm(ch)
@@ -20,10 +23,11 @@ def test_baseline_compiles_and_scores():
     name, adoption = top
     files = mainnet.fetch_algorithm_files(ch, name)
     bench = ModalBench()
-    c = bench.compile(ch, files)
-    assert c.ok, c.output[-3000:]
-    tr, _ = draw_nonce_sets(info.tracks[:1], new_rand_hash(), training_count=2, holdout_count=0)
-    res = bench.score(ch, c.artifact_id, tr, info.max_fuel)
+    tr, ho = draw_nonce_sets(info.tracks[:1], new_rand_hash(), training_count=2, holdout_count=0)
+    r = bench.evaluate(EvalRequest(ch, files, tr, ho, info.max_fuel, None,
+                                   CHALLENGES[ch].beat))
+    assert r.compile.ok, r.compile.output[-3000:]
+    res = r.training
     assert len(res) == 2
     assert all(r.error != "panic" for r in res), [r.to_dict() for r in res]
     assert any(r.ok for r in res), [r.to_dict() for r in res]
