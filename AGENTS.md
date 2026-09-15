@@ -35,8 +35,9 @@ When two documents disagree, the one higher in this list wins.
 
 ## Invariants
 
-These are silent until violated. Nothing in the test suite catches them, and
-each is easy to break while believing you are making progress.
+These are silent until violated. The test suite covers only the parts named
+below as tested; the rest is easy to break while believing you are making
+progress.
 
 1. **Baseline and candidate are always scored on identical nonces, fuel, and
    hardware class.** A delta across any of those is meaningless and
@@ -52,8 +53,11 @@ each is easy to break while believing you are making progress.
    nonces it is scored on. It is stripped from the spec the prompts see
    (`talos/state.py::JobSpec.redacted`), redacted from bench output
    (`talos/bench.py::_redact`), and the agentic worktree is deliberately
-   placed outside `runs/` (`talos/agentic.py::prepare_worktree`). No test
-   greps prompts, transcripts or the package for the hash.
+   placed outside `runs/` (`talos/agentic.py::prepare_worktree`). Tests grep
+   the prompts and timeline (`tests/test_loop.py`), the hand-back package and
+   zip (`tests/test_package.py`) and the redacted bench output
+   (`tests/test_bench.py`) for the hash. Nothing greps the agentic mode's
+   copied transcript (`talos/agentic.py::_copy_transcript`) for it.
 3. **The monorepo commit and dev image tag are pins, and both are part of
    every cache key.** `MONOREPO_REF` and `DEV_IMAGE_TAG` in
    `talos/challenges.py` enter the Modal artifact hash

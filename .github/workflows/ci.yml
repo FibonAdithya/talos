@@ -2,7 +2,7 @@
 #
 # The push-to-main trigger is not redundant with the PR one: a direct push
 # reaches main without a PR and would otherwise arrive with nothing having
-# run. It is also the trigger the self-healing loop files bugs from.
+# run.
 name: ci
 
 on:
