@@ -16,7 +16,9 @@ baseline on training and then held-out nonces, or when the budget runs out.
 Its output is a local, submit-ready package under `runs/<job_id>/package/`;
 the user submits it to TIG themselves. Talos is not a hosted service and not a
 swarm, it never submits on the user's behalf, and LLM-authored code never
-executes on the user's machine.
+executes on the user's machine. C3 (cthree.cloud) is the alternative compute
+backend chosen at `talos setup`, running the same compile-and-score work as
+one batch job per iteration instead of a Modal container call.
 
 ## Source of truth, in order
 
@@ -121,6 +123,10 @@ Do not decide these yourself. Raise them and stop.
   `.talos/secrets.json`, or sends data anywhere other than the user's own LLM
   provider and Modal account.
 - Running `tests/test_live.py`. It spends the user's Modal budget.
+- Changing `talos/challenges.py::IMAGE_NAMESPACE` or the C3 prices in
+  `talos/c3_bench.py::GBP_PER_HOUR`. Those are the budget for the C3 backend.
+- Running the C3 live test (`tests/test_live.py::test_c3_knapsack_job`). It
+  spends the user's C3 credit.
 
 To report a bug in this project, file an issue with the `agent-reported`
 label:
@@ -145,6 +151,9 @@ nobody.
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |
 | Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `talos/inside.py` |
 | Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
+| C3 client: deploy, poll, pull, cost estimate | `talos/c3_bench.py::C3Bench` |
+| C3 job directory: .c3 config, job.sh, payload.json | `talos/c3_jobdir.py::write_job_dir` |
+| C3 in-container runner: build, score, write results | `talos/c3_job.py::main` |
 | LLM providers and prices | `talos/providers/__init__.py`, `talos/providers/pricing.py::PRICES` |
 | Agentic mode: sandbox and scope check | `talos/agentic.py::sandbox_settings`, `talos/agentic.py::read_back` |
 | Budget rules | `talos/budget.py::exhausted`, `README.md#budget` |
