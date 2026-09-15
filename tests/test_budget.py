@@ -36,3 +36,12 @@ def test_modal_usd_alone_is_not_a_budget():
     # mutation: counting modal_usd as a budget lets a run start with unbounded LLM spend
     with pytest.raises(ValueError):
         Budget(usd=None, hours=None, iterations=None, modal_usd=5.0).validate()
+
+
+def test_zero_cap_is_a_valid_budget():
+    # README: "zero is a valid, real cap, not unset". validate() must accept it so that exhausted()
+    # can then refuse the first call.
+    # mutation: `all(not v ...)` instead of `all(v is None ...)` refuses `--budget-usd 0` and
+    # `--budget-iterations 0` as "no budget dimension set"
+    Budget(usd=0.0, hours=None, iterations=None, modal_usd=None).validate()
+    Budget(usd=None, hours=None, iterations=0, modal_usd=None).validate()

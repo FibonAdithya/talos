@@ -34,7 +34,9 @@ def test_setup_writes_config_and_0600_secret(tmp_path, monkeypatch):
     assert cfg["provider"] == "anthropic" and cfg["model"] == "claude-opus-5"
     sec = tmp_path / ".talos" / "secrets.json"
     assert json.loads(sec.read_text()) == {"api_key": "sk-test"}
-    assert stat.S_IMODE(sec.stat().st_mode) == 0o600  # mutation: dropping chmod fails this
+    # mutation: os.open creates a NEW file 0600 and chmod repairs a pre-existing one, so only
+    # widening the open mode AND dropping the chmod fails this (either alone is covered by the other)
+    assert stat.S_IMODE(sec.stat().st_mode) == 0o600
     assert calls == ["deploy"]
 
 

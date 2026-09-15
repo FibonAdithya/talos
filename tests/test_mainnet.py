@@ -5,7 +5,8 @@ from talos import mainnet
 BLOCK = {"block": {"id": "b1"}}
 CHALLENGES = {"challenges": [
     {"id": "c002", "config": {"name": "vehicle_routing", "type": "cpu",
-                              "active_tracks": {"n_nodes=600": {}, "n_nodes=700": {}},
+                              # inserted out of order so that forgetting sorted() is visible
+                              "active_tracks": {"n_nodes=700": {}, "n_nodes=600": {}},
                               "max_fuel_budget": 5000000000000}},
     {"id": "c005", "config": {"name": "hypergraph", "type": "gpu",
                               "active_tracks": {"k=8": {}}, "max_fuel_budget": 7}},
@@ -64,9 +65,17 @@ def test_top_algorithm_skips_uncompiled_and_other_challenges():
 
 def test_top_algorithm_none_when_no_adoption():
     # mutation: treating adoption 0 or a missing algo_name as a valid best returns a tuple, not None
+    # (both candidates below are compiled and on the right challenge; only the filter rejects them)
     def gj(url):
         if "/get-algorithms?" in url:
-            return {"codes": [], "binarys": []}
+            return {"codes": [
+                {"id": "z1", "details": {"challenge_id": "c002", "name": "unadopted"},
+                 "block_data": {"adoption": "0"}},
+                {"id": "z2", "details": {"challenge_id": "c002"}, "block_data": {"adoption": "40"}},
+            ], "binarys": [
+                {"algorithm_id": "z1", "details": {"compile_success": True}},
+                {"algorithm_id": "z2", "details": {"compile_success": True}},
+            ]}
         return fake_get_json(url)
     assert mainnet.top_algorithm("vehicle_routing", get_json=gj) is None
 
