@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import shutil
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Callable
 
 from talos.baseline import resolve_baseline
-from talos.bench import BenchUnavailable
+from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, EvalResult
 from talos.budget import BudgetExhausted, exhausted
 from talos.challenges import CHALLENGES
 from talos.edits import EditError, EditOutcome, apply_edit_response
@@ -41,10 +41,10 @@ class Interrupted(Exception):
 class _BudgetedBench:
     """The bench, with the loop's budget check and cost accounting around every call.
 
-    resolve_baseline makes one compile and two scoring runs of its own, and on a cold cache
-    those are the most expensive compute calls of the whole job. Handing it the raw bench let a
-    baseline run to completion with --budget-compute-usd 0, and charged its cost only after the
-    last call had already happened."""
+    resolve_baseline compiles and scores both nonce sets in one evaluate of its own, and on a
+    cold cache that is the most expensive compute call of the whole job. Handing it the raw bench
+    let a baseline run to completion with --budget-compute-usd 0, and charged its cost only after
+    the call had already happened."""
 
     def __init__(self, loop: "Loop"):
         self._loop = loop
@@ -60,11 +60,11 @@ class _BudgetedBench:
             loop.state.spend.compute_usd += self._bench.cost_usd_since(mark)
             loop._save()
 
-    def compile(self, challenge: str, files: dict[str, str]):
-        return self._metered(lambda: self._bench.compile(challenge, files))
+    def evaluate(self, request):
+        return self._metered(lambda: self._bench.evaluate(request))
 
-    def score(self, challenge: str, artifact_id: str, nonce_sets, fuel: int):
-        return self._metered(lambda: self._bench.score(challenge, artifact_id, nonce_sets, fuel))
+    def request_stop(self) -> None:
+        self._bench.request_stop()
 
     def cost_mark(self) -> float:
         return self._bench.cost_mark()
@@ -103,14 +103,8 @@ class Loop:
     def _save(self) -> None:
         self.store.save(self.state)
 
-    def _check_budget(self, count_iterations: bool = True) -> None:
-        """count_iterations=False exempts a held-out confirmation from the iterations cap: the
-        candidate has already been scored and made best, and aborting the confirmation would
-        strand the job at "confirming" with a proven win it can never record. Every spend
-        dimension (usd, hours, compute_usd) still applies."""
-        budget = self.spec.budget if count_iterations else replace(self.spec.budget,
-                                                                   iterations=None)
-        dim = exhausted(budget, self.state.spend, self.clock())
+    def _check_budget(self) -> None:
+        dim = exhausted(self.spec.budget, self.state.spend, self.clock())
         if dim:
             raise BudgetExhausted(dim)
         if self._stop:
@@ -138,33 +132,41 @@ class Loop:
         self._save()
         return c
 
-    def _bench_compile(self, files):
-        self._check_budget()
-        mark = self.bench.cost_mark()
-        r = self.bench.compile(self.spec.challenge, files)
-        self.state.spend.compute_usd += self.bench.cost_usd_since(mark)
-        self._save()
-        return r
+    def _request(self, files: dict[str, str], baseline_training) -> EvalRequest:
+        return EvalRequest(challenge=self.spec.challenge, files=files, training=self.spec.training,
+                           holdout=self.spec.holdout, fuel=self.spec.fuel,
+                           baseline_training=baseline_training, rule=self.rule)
 
-    def _bench_score(self, artifact_id, nonce_sets, count_iterations: bool = True):
-        self._check_budget(count_iterations)
-        mark = self.bench.cost_mark()
-        r = self.bench.score(self.spec.challenge, artifact_id, nonce_sets, self.spec.fuel)
-        self.state.spend.compute_usd += self.bench.cost_usd_since(mark)
+    def _bench_evaluate(self, files: dict[str, str]) -> EvalResult:
+        """pending_job carries the files BEFORE the call: a C3 job outlives this process, and a
+        resume must be able to rebuild the exact request and reattach to it."""
+        self._check_budget()
+        self.state.pending_job = {**(self.state.pending_job or {}), "files": files}
         self._save()
-        return r
+        mark = self.bench.cost_mark()
+        try:
+            return self.bench.evaluate(self._request(files, self.state.baseline.training))
+        finally:
+            self.state.spend.compute_usd += self.bench.cost_usd_since(mark)
+            self._save()
 
     # ── baseline ──────────────────────────────────────────────────────
 
     def measure_baseline(self, cache_dir, hardware_class: str, mainnet=None) -> None:
-        self._check_budget()  # a zero (or already spent) Modal cap must bite before the compile
+        self._check_budget()  # a zero (or already spent) compute cap must bite before the call
         self.state.status = "measuring_baseline"
+        self._save()
+        pend = self.state.pending_job
+        if not (pend and pend.get("purpose") == "baseline"):
+            pend = {"purpose": "baseline"}
+        self.state.pending_job = pend  # keep a stored job_id: a resumed baseline reattaches
         self._save()
         kw = {"mainnet": mainnet} if mainnet else {}
         rec, template = resolve_baseline(self.spec.challenge, self.spec.training,
                                          self.spec.holdout, self.spec.fuel, _BudgetedBench(self),
-                                         cache_dir, hardware_class,
+                                         cache_dir, hardware_class, rule=self.rule,
                                          log=lambda m: self._event("baseline", message=m), **kw)
+        self.state.pending_job = None
         self.state.baseline = rec
         self.template_rs = template
         self.state.status = "researching"
@@ -248,7 +250,8 @@ class Loop:
             # Applying the in-scope blocks of the same response and carrying on would let the
             # out-of-scope block go unpunished and reward a response that tried it.
             self._event("edits_rejected", paths=outcome.rejected)
-            raise EditError(f"edit outside the algorithm files rejected: {sorted(outcome.rejected)}")
+            raise EditError("edit outside the algorithm files "
+                            f"rejected: {sorted(outcome.rejected)}")
         if outcome.applied == 0:
             raise EditError("no edit block applied")
         return hypothesis, outcome.files
@@ -271,16 +274,21 @@ class Loop:
             return
         record.update(hypothesis)
         (it_dir / "hypothesis.json").write_text(json.dumps(hypothesis))
-        self.state.strategy_counts[hypothesis["strategy_tag"]] = (
-            self.state.strategy_counts.get(hypothesis["strategy_tag"], 0) + 1)
+        self.state.pending_job = {"purpose": n, "hypothesis": hypothesis, "files": files}
+        self._save()
+        self._score_candidate(n, ctx, record, hypothesis, files)
 
-        # compile with bounded fix rounds
-        comp = self._bench_compile(files)
+    def _score_candidate(self, n: int, ctx: PromptContext, record: dict, hypothesis: dict,
+                         files: dict[str, str]) -> None:
+        """Everything after the LLM has produced files: compile-fix rounds, scoring, confirmation.
+        Entered from iterate() and from a resume with a pending job."""
+        it_dir = self.store.iteration_dir(n)
+        res = self._bench_evaluate(files)
         for _ in range(self.t.compile_fix_rounds):
-            if comp.ok:
+            if res.compile.ok:
                 break
-            self._event("compile_failed", output=comp.output[-2000:])
-            system, user = compile_fix_prompts(ctx, files, comp.output)
+            self._event("compile_failed", output=res.compile.output[-2000:])
+            system, user = compile_fix_prompts(ctx, files, res.compile.output)
             try:
                 fixed = apply_edit_response(files, self._llm(system, user).text)
             except EditError:
@@ -293,30 +301,28 @@ class Loop:
                 self._finish_iteration(n, record, improved=False)
                 return
             if fixed.applied == 0:
-                break  # byte-identical files; recompiling them would only repeat the same error
+                break  # byte-identical files; re-evaluating them would repeat the same error
             files = fixed.files
-            comp = self._bench_compile(files)
-        if not comp.ok:
+            res = self._bench_evaluate(files)
+        if not res.compile.ok:
             record.update(outcome="failed:compile")
             self._finish_iteration(n, record, improved=False)
             return
         for name, text in files.items():
             (it_dir / name).parent.mkdir(parents=True, exist_ok=True)
             (it_dir / name).write_text(text)
-
-        # score on training
-        results = self._bench_score(comp.artifact_id, self.spec.training)
+        results = res.training
         try:
             delta = bundle_delta(self.state.baseline.training, results)
         except ScoringError as e:
             record.update(outcome="failed:score", error=str(e))
             self._finish_iteration(n, record, improved=False)
             return
-        cand = Candidate(iteration=n, files=files, artifact_id=comp.artifact_id,
+        cand = Candidate(iteration=n, files=files, artifact_id=res.compile.artifact_id,
                          training=results, delta=delta.to_dict(), hypothesis=hypothesis)
         self._event("scored", mean_rel_delta=delta.mean_rel_delta,
                     worst_rel_delta=delta.worst_rel_delta, error_rate=delta.error_rate)
-        if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a runtime failure
+        if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a failure
             record.update(outcome="failed:runtime", error_rate=delta.error_rate)
             self._finish_iteration(n, record, improved=False)
             return
@@ -331,18 +337,28 @@ class Loop:
             record["outcome"] = "improved"
         else:
             record["outcome"] = "failed:score"
-        # The record and the iteration bump are persisted BEFORE the held-out run, so a kill during
-        # confirmation resumes into _confirm instead of discarding the winning iteration.
+        # The record and the iteration bump are persisted BEFORE the confirmation is read out of
+        # the result, so a kill between the two never loses the iteration.
         self._finish_iteration(n, record, improved=improved)
         if wins:
-            self._confirm(cand)
+            self._confirm(cand, res.holdout, res.holdout_reason)
 
-    def _confirm(self, cand: Candidate) -> None:
+    def _confirm(self, cand: Candidate, ho, reason: str) -> None:
+        """The held-out results come back from the same evaluate call that scored training: the
+        bench (or the C3 job) applies the beat rule itself and scores held-out only on a win."""
         self.state.status = "confirming"
         self._save()
         self._event("confirming")
-        ho = self._bench_score(cand.artifact_id, self.spec.holdout, count_iterations=False)
         cand.holdout = ho
+        if ho is None:
+            # The job said "won on training" but produced no held-out results (a timeout inside
+            # the container, say). That is not a win, and it must not strand the job at
+            # "confirming".
+            self.state.false_positives.append(cand.iteration)
+            self.state.status = "researching"
+            self._save()
+            self._event("false_positive", error=f"held-out not scored ({reason})")
+            return
         try:
             won = beats(self.state.baseline.holdout, ho, self.rule)
             holdout_delta = bundle_delta(self.state.baseline.holdout, ho).to_dict()
@@ -380,6 +396,12 @@ class Loop:
             self.state.runs_since_improvement = 0
         else:
             self.state.runs_since_improvement += 1
+        # Counted here, not where the hypothesis is parsed: a resumed pending iteration re-enters
+        # at _score_candidate, and counting at propose time would count that iteration twice.
+        if record.get("strategy_tag"):
+            self.state.strategy_counts[record["strategy_tag"]] = (
+                self.state.strategy_counts.get(record["strategy_tag"], 0) + 1)
+        self.state.pending_job = None
         self._save()
         self._event("iteration_done", outcome=record["outcome"],
                     runs_since_improvement=self.state.runs_since_improvement)
@@ -410,10 +432,21 @@ class Loop:
 
     def _discard_incomplete_iteration(self) -> None:
         n = self.state.iteration + 1
+        if (self.state.pending_job or {}).get("purpose") == n:
+            return  # that iteration is not abandoned: its job is still in flight and resumable
         d = self.store.run_dir / "iterations" / f"{n:04d}"
         if d.exists():
             shutil.rmtree(d)
             self._event("discarded_incomplete", discarded=n)
+
+    def _resume_pending(self, pending: dict) -> None:
+        n = pending["purpose"]
+        self._n = n
+        self._event("resumed_pending", job_id=pending.get("job_id"))
+        anchor = self.state.best.iteration if self.state.best else 0
+        hypothesis = pending["hypothesis"]
+        record = {"iteration": n, "against": anchor, **hypothesis, "outcome": "started"}
+        self._score_candidate(n, self._context(), record, hypothesis, pending["files"])
 
     def run(self) -> JobState:
         if self.state.status in TERMINAL:
@@ -422,13 +455,15 @@ class Loop:
         try:
             self.state.status = "researching"
             self._save()
-            best = self.state.best
-            if (best is not None and best.holdout is None
-                    and beats(self.state.baseline.training, best.training, self.rule)):
-                # A confirmation killed mid-flight (a stop, a bench outage, a hard kill): finish
-                # it first. Keyed on the candidate, not on status == "confirming", because the CLI
-                # resets a cancelled/paused job to "researching" before it gets here.
-                self._confirm(best)
+            pending = self.state.pending_job
+            if pending is not None and pending.get("purpose") == "baseline":
+                self.state.pending_job = None  # the baseline is recorded; the record is stale
+                self._save()
+            elif pending is not None and isinstance(pending.get("purpose"), int):
+                # An evaluate killed mid-flight (a stop, a bench outage, a hard kill): re-enter
+                # that iteration with its own files, so the backend can reattach to the job
+                # instead of abandoning one C3 is still billing for.
+                self._resume_pending(pending)
             while self.state.status not in TERMINAL:
                 self._check_budget()
                 self.iterate()
@@ -436,6 +471,9 @@ class Loop:
             self.state.status, self.state.stop_reason = "exhausted", e.dimension
         except Interrupted:
             self.state.status, self.state.stop_reason = "cancelled", "user requested stop"
+        except BenchCancelled as e:
+            self.state.status, self.state.stop_reason = ("cancelled",
+                                                         f"stopped; bench job cancelled: {e}")
         except ProviderAuthError as e:
             self.state.status, self.state.stop_reason = "failed", f"provider auth: {e}"
         except ProviderError as e:

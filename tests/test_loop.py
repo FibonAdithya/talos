@@ -8,7 +8,7 @@ from talos.bench import FakeBench
 from talos.loop import Loop, Thresholds
 from talos.providers import ProviderAuthError, ProviderRateLimited
 from talos.providers.fake import FakeProvider
-from talos.state import BaselineRecord, Candidate, JobSpec, JobState, JobStore
+from talos.state import BaselineRecord, JobSpec, JobState, JobStore
 from talos.types import NonceResult, NonceSet
 
 HASH = "ab" * 32
@@ -58,7 +58,6 @@ def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=No
     st.status = "researching"
     st.best = None
     fb = FakeBench(scores)
-    fb.compile("knapsack", BASE_FILES)  # register the baseline files under an artifact id
     fp = FakeProvider(script)
     loop = Loop(sp, st, store, fp, fb, template_rs="pub fn solve_challenge(",
                 clock=lambda: 0.0, sleep=lambda s: None, thresholds=thresholds or Thresholds())
@@ -71,7 +70,7 @@ def test_win_requires_training_then_holdout_beat(tmp_path):
     st = loop.run()
     assert st.status == "won" and st.best.iteration == 1
     assert st.best.holdout is not None and st.confirmed == [1]
-    assert fb.score_calls == 1 + 1  # training, then held-out
+    assert fb.holdout_runs == 1
     # mutation: stamping events with state.iteration labels iteration 1's events as iteration 0
     raw = (tmp_path / "timeline.jsonl").read_text()
     events = [json.loads(ln) for ln in raw.splitlines()]
@@ -117,7 +116,7 @@ def test_compile_fix_rounds_then_skip(tmp_path):
     st = loop.run()
     assert st.status == "won"
     assert st.hypotheses[0]["outcome"] == "failed:compile"
-    assert fb.compile_calls == 1 + 4 + 1  # baseline reg + 1 edit + 3 fixes + winning edit
+    assert len(fb.calls) == 4 + 1  # 1 edit + 3 fixes + winning edit
 
 
 def test_budget_stops_before_llm_call(tmp_path):
@@ -128,7 +127,7 @@ def test_budget_stops_before_llm_call(tmp_path):
     st = loop.run()
     assert st.status == "exhausted" and st.stop_reason == "usd"
     assert len(fp.calls) == 2  # hypothesis + edit, then the compile's budget check refuses
-    assert fb.compile_calls == 1  # only the baseline registration in make(); no candidate compile
+    assert len(fb.calls) == 0  # the evaluate's budget check refuses before any bench call
 
 
 def test_over_error_ceiling_is_failed_runtime(tmp_path):
@@ -238,37 +237,6 @@ def test_distill_auth_error_stops_the_run(tmp_path):
     assert st.stop_reason.startswith("provider auth")
 
 
-def test_resume_finishes_a_pending_confirmation(tmp_path):
-    # mutation: forcing status back to researching on resume drops a pending held-out confirmation
-    store = JobStore(tmp_path)
-    store.write_spec(spec())
-    fb = FakeBench(quality_from_files)
-    files = {"mod.rs": "fn solve() { let k = 5; }\n"}
-    art = fb.compile("knapsack", files).artifact_id
-    st = JobState.fresh(Spend(started_at=0.0))
-    st.baseline = baseline()
-    st.status = "confirming"          # killed between the training score and the held-out run
-    st.iteration = 1
-    st.spend.iterations = 1
-    st.best = Candidate(iteration=1, files=files, artifact_id=art,
-                        training=[NonceResult("t", n, True, 104, 1) for n in range(4)],
-                        delta={"tracks": [], "mean_rel_delta": 0.04, "worst_rel_delta": 0.04,
-                               "error_rate": 0.0},
-                        hypothesis={"title": "a", "description": "d",
-                                    "strategy_tag": "local_search"})
-    st.hypotheses = [{"iteration": 1, "against": 0, "title": "a", "description": "d",
-                      "strategy_tag": "local_search", "outcome": "improved"}]
-    store.save(st)
-    fp = FakeProvider([])  # an empty script raises if the loop asks for a completion
-    loop = Loop(store.read_spec(), store.load(), store, fp, fb, template_rs="x",
-                clock=lambda: 0.0, sleep=lambda s: None)
-    result = loop.run()
-    assert result.status == "won" and result.confirmed == [1]
-    assert result.hypotheses[0]["outcome"] == "won"
-    assert fb.score_calls == 1  # the held-out run only; training is not repeated
-    assert fp.calls == []       # no new hypothesis was proposed
-
-
 def test_holdout_scoring_error_is_a_false_positive(tmp_path):
     # mutation: letting ScoringError escape _confirm strands the job at "confirming"
     b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
@@ -293,7 +261,7 @@ def test_compile_fix_stops_when_repair_applies_nothing(tmp_path):
     st = loop.run()
     assert st.status == "won"
     assert st.hypotheses[0]["outcome"] == "failed:compile"
-    assert fb.compile_calls == 1 + 1 + 1  # baseline reg + the broken edit + the winning edit
+    assert len(fb.calls) == 1 + 1  # the broken edit + the winning edit
 
 
 def test_recall_starts_exactly_at_threshold(tmp_path):
@@ -332,18 +300,6 @@ def test_rate_limit_wait_rechecks_the_budget(tmp_path):
     assert seen["n"] == 1  # the retry after the sleep never happened
 
 
-def test_confirm_still_honours_the_time_cap(tmp_path):
-    # the held-out confirmation is exempt from the ITERATIONS cap only (its iteration is already
-    # counted); every spend dimension still bites.
-    # mutation: exempting confirmation from every budget dimension lets it run past a hard cap
-    b = Budget(usd=None, hours=1.0, iterations=None, compute_usd=None)
-    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
-    loop.clock = lambda: 7200.0 if fb.score_calls >= 1 else 0.0  # cap passes after training
-    st = loop.run()
-    assert st.status == "exhausted" and st.stop_reason == "hours"
-    assert st.best is not None and st.best.holdout is None  # refused, not waved through
-
-
 def test_rejected_edit_paths_fail_the_iteration(tmp_path):
     # spec §9: an edit outside the algorithm files fails the iteration in both modes.
     # mutation: applying the in-scope blocks after a rejected one lets an out-of-scope edit go
@@ -357,7 +313,7 @@ def test_rejected_edit_paths_fail_the_iteration(tmp_path):
     assert st.status == "exhausted" and st.best is None
     assert st.hypotheses[0]["outcome"] == "failed:edit"
     assert "Cargo.toml" in st.hypotheses[0]["error"]
-    assert fb.compile_calls == 1  # baseline registration only: the candidate never reached compile
+    assert len(fb.calls) == 0  # the candidate never reached the bench
     events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
     rejected = [e for e in events if e["kind"] == "edits_rejected"]
     assert rejected and rejected[0]["paths"] == ["Cargo.toml"]
@@ -369,7 +325,7 @@ def test_baseline_is_budget_checked_before_the_first_modal_call(tmp_path):
     b = Budget(usd=None, hours=None, iterations=20, compute_usd=0.0)
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
     loop.state.baseline = None
-    calls_before = fb.compile_calls
+    calls_before = len(fb.calls)
     mainnet = types.SimpleNamespace(
         top_algorithm=lambda ch: ("base", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
@@ -377,13 +333,16 @@ def test_baseline_is_budget_checked_before_the_first_modal_call(tmp_path):
     with pytest.raises(BudgetExhausted) as ei:
         loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
     assert ei.value.dimension == "compute_usd"
-    assert fb.compile_calls == calls_before  # nothing was compiled
+    assert len(fb.calls) == calls_before  # nothing was evaluated
     assert not (tmp_path / "cache").exists()
 
 
-def test_baseline_modal_cost_is_charged_per_call(tmp_path):
-    # mutation: accounting for the baseline's Modal cost only after resolve_baseline returns
-    # lets a cold baseline run past the cap and charges it when it is too late to matter
+def test_baseline_compute_cost_is_charged_before_the_next_check(tmp_path):
+    # The baseline is now a single evaluate, so "charged per call" and "charged once
+    # resolve_baseline returns" cannot be told apart inside measure_baseline itself; what still
+    # has to hold is that the charge is on spend, and on disk, before the NEXT budget check.
+    # mutation: dropping the charge (or the save) in _BudgetedBench._metered lets the loop's
+    # next check pass on a stale zero and burn an iteration past the compute cap
     b = Budget(usd=None, hours=None, iterations=20, compute_usd=0.015)  # one scored nonce = 0.01
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
     loop.state.baseline = None
@@ -391,11 +350,13 @@ def test_baseline_modal_cost_is_charged_per_call(tmp_path):
         top_algorithm=lambda ch: ("base", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
         fetch_template=lambda ch: "pub fn solve_challenge(")
-    with pytest.raises(BudgetExhausted):
-        loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
-    # the compile and the training scoring run charged before the next call was refused
+    loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
+    # the evaluate call charged before the next check
     assert loop.state.spend.compute_usd > 0.0
     assert json.loads((tmp_path / "state.json").read_text())["spend"]["compute_usd"] > 0.0
+    st = loop.run()
+    assert st.status == "exhausted" and st.stop_reason == "compute_usd"
+    assert fp.calls == [] and len(fb.calls) == 1  # the baseline evaluate only
 
 
 def test_baseline_and_best_dirs_are_written(tmp_path):
@@ -444,7 +405,7 @@ def test_rejected_path_survives_a_repair_round(tmp_path):
     st = loop.run()
     assert st.hypotheses[0]["outcome"] == "failed:edit"
     assert "Cargo.toml" in st.hypotheses[0]["error"]
-    assert fb.compile_calls == 1  # baseline registration only
+    assert len(fb.calls) == 0  # the candidate never reached the bench
 
 
 def test_compile_fix_rejects_out_of_scope_edits(tmp_path):
@@ -461,55 +422,168 @@ def test_compile_fix_rejects_out_of_scope_edits(tmp_path):
     st = loop.run()
     assert st.hypotheses[0]["outcome"] == "failed:edit"
     assert "Cargo.toml" in st.hypotheses[0]["error"]
-    assert fb.compile_calls == 1 + 1  # baseline registration + the broken edit; the fix never built
+    assert len(fb.calls) == 1  # the broken edit only; the fix never built
     events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
     assert [e["paths"] for e in events if e["kind"] == "edits_rejected"] == [["Cargo.toml"]]
 
 
-def _pending_confirmation(tmp_path, status, training_quality=104):
+def test_win_is_recorded_before_the_time_cap_bites(tmp_path):
+    # mutation: checking the hours cap between the evaluate call and recording the win would
+    # strand a proven winner as "exhausted" with best.holdout set but confirmed == []
+    b = Budget(usd=None, hours=1.0, iterations=None, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
+    loop.clock = lambda: 7200.0 if fb.calls else 0.0  # the cap passes during the evaluate
+    st = loop.run()
+    assert st.status == "won" and st.confirmed == [1]
+
+
+def test_holdout_not_scored_is_a_false_positive(tmp_path):
+    # mutation: treating holdout=None as "won" would confirm a candidate whose held-out run
+    # timed out inside a C3 job
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)],
+                               budget=Budget(usd=None, hours=None, iterations=1,
+                                             compute_usd=None))
+    real = fb.evaluate
+
+    def evaluate(request):
+        r = real(request)
+        r.holdout, r.holdout_reason = None, "timeout"
+        return r
+    fb.evaluate = evaluate
+    st = loop.run()
+    assert st.false_positives == [1] and st.confirmed == [] and st.status == "exhausted"
+    events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
+    fp_ev = [e for e in events if e["kind"] == "false_positive"]
+    assert fp_ev and "timeout" in fp_ev[0]["error"]
+
+
+def test_pending_job_is_written_before_evaluate_and_cleared_after(tmp_path):
+    # mutation: writing pending_job after evaluate returns means a kill during a 20-minute C3
+    # job leaves nothing to reattach to; never clearing it makes every later resume "reattach"
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)],
+                               budget=Budget(usd=None, hours=None, iterations=1,
+                                             compute_usd=None))
+    seen = {}
+    real = fb.evaluate
+
+    def evaluate(request):
+        seen["pending"] = json.loads((tmp_path / "state.json").read_text())["pending_job"]
+        return real(request)
+    fb.evaluate = evaluate
+    st = loop.run()
+    assert seen["pending"]["purpose"] == 1
+    assert seen["pending"]["files"] == {"mod.rs": "fn solve() { let k = 5; }\n"}
+    assert seen["pending"]["hypothesis"]["title"] == "a"
+    assert st.pending_job is None
+    assert json.loads((tmp_path / "state.json").read_text())["pending_job"] is None
+
+
+def test_pending_job_files_follow_a_compile_fix(tmp_path):
+    # mutation: writing pending_job only in iterate() (and not in _bench_evaluate) leaves the
+    # pre-fix sources in the record, so a resume during the fix round's evaluate reattaches to,
+    # or rebuilds, a request for code the loop has already thrown away
+    broken = "<<<<<<< SEARCH mod.rs\nlet k = 1;\n=======\nlet k = BUG;\n>>>>>>> REPLACE\n"
+    fix = "<<<<<<< SEARCH mod.rs\nlet k = BUG;\n=======\nlet k = 5;\n>>>>>>> REPLACE\n"
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), broken, fix])
+    fb._compile_ok = lambda files: "BUG" not in files["mod.rs"]
+    seen = []
+    real = fb.evaluate
+
+    def evaluate(request):
+        seen.append(json.loads((tmp_path / "state.json").read_text())["pending_job"]["files"])
+        return real(request)
+    fb.evaluate = evaluate
+    st = loop.run()
+    assert st.status == "won"
+    assert seen == [{"mod.rs": "fn solve() { let k = BUG; }\n"},
+                    {"mod.rs": "fn solve() { let k = 5; }\n"}]
+
+
+def test_resume_with_a_pending_job_re_evaluates_without_a_new_hypothesis(tmp_path):
+    # mutation: ignoring pending_job on resume proposes a fresh hypothesis (fp.calls != [])
+    # and abandons the job C3 is still billing for
     store = JobStore(tmp_path)
     store.write_spec(spec(Budget(usd=None, hours=None, iterations=1, compute_usd=None)))
-    fb = FakeBench(quality_from_files)
-    files = {"mod.rs": "fn solve() { let k = 5; }\n"}
-    art = fb.compile("knapsack", files).artifact_id
     st = JobState.fresh(Spend(started_at=0.0))
     st.baseline = baseline()
-    st.status = status
-    st.iteration = 1
-    st.spend.iterations = 1
-    st.best = Candidate(iteration=1, files=files, artifact_id=art,
-                        training=[NonceResult("t", n, True, training_quality, 1) for n in range(4)],
-                        delta={"tracks": [], "mean_rel_delta": training_quality / 100 - 1,
-                               "worst_rel_delta": 0.0, "error_rate": 0.0},
-                        hypothesis={"title": "a", "description": "d",
-                                    "strategy_tag": "local_search"})
-    st.hypotheses = [{"iteration": 1, "against": 0, "title": "a", "description": "d",
-                      "strategy_tag": "local_search", "outcome": "improved"}]
+    st.status = "researching"
+    files = {"mod.rs": "fn solve() { let k = 5; }\n"}
+    st.pending_job = {"purpose": 1, "files": files,
+                      "hypothesis": {"title": "a", "description": "d",
+                                     "strategy_tag": "local_search"}}
     store.save(st)
-    return store, fb
-
-
-def test_run_confirms_a_training_winner_after_the_status_was_reset(tmp_path):
-    # A stop request or a bench outage landing during the held-out run leaves the job
-    # "cancelled"/"paused", and the CLI resets that to "researching" on resume. The training
-    # winner still has no held-out result, so the confirmation must run before anything else.
-    # mutation: keying the resumed confirmation on status == "confirming" alone skips it, and
-    # the loop proposes a fresh hypothesis instead — the winner is never held-out scored
-    store, fb = _pending_confirmation(tmp_path, "researching")
+    fb = FakeBench(quality_from_files)
     fp = FakeProvider([])  # an empty script raises if the loop asks for a completion
     loop = Loop(store.read_spec(), store.load(), store, fp, fb, template_rs="x",
                 clock=lambda: 0.0, sleep=lambda s: None)
     result = loop.run()
-    assert result.status == "won" and result.confirmed == [1]
-    assert fb.score_calls == 1 and fp.calls == []
+    assert fp.calls == [] and len(fb.calls) == 1 and fb.calls[0].files == files
+    assert result.status == "won" and result.confirmed == [1] and result.iteration == 1
+    assert result.hypotheses[0]["title"] == "a" and result.hypotheses[0]["outcome"] == "won"
+    assert result.strategy_counts == {"local_search": 1}  # counted once, not on both runs
+    assert result.pending_job is None
 
 
-def test_run_does_not_confirm_a_best_that_never_won_on_training(tmp_path):
-    # mutation: confirming every best with an empty holdout spends a held-out run on a candidate
-    # that only improved on the baseline without beating it
-    store, fb = _pending_confirmation(tmp_path, "researching", training_quality=100)
-    fp = FakeProvider([])
-    loop = Loop(store.read_spec(), store.load(), store, fp, fb, template_rs="x",
+def test_resume_does_not_discard_the_pending_iteration_dir(tmp_path):
+    # mutation: _discard_incomplete_iteration wiping iterations/0001 on a pending resume deletes
+    # the hypothesis.json the package later reads
+    store = JobStore(tmp_path)
+    store.write_spec(spec(Budget(usd=None, hours=None, iterations=1, compute_usd=None)))
+    st = JobState.fresh(Spend(started_at=0.0))
+    st.baseline = baseline()
+    st.status = "researching"
+    st.pending_job = {"purpose": 1, "files": {"mod.rs": "fn solve() { let k = 5; }\n"},
+                      "hypothesis": {"title": "a", "description": "d",
+                                     "strategy_tag": "local_search"}}
+    store.save(st)
+    (store.iteration_dir(1) / "hypothesis.json").write_text("{}")
+    loop = Loop(store.read_spec(), store.load(), store, FakeProvider([]),
+                FakeBench(quality_from_files), template_rs="x",
                 clock=lambda: 0.0, sleep=lambda s: None)
-    result = loop.run()  # the iterations cap (1) is already spent: exhausted at once
-    assert result.status == "exhausted" and fb.score_calls == 0 and result.confirmed == []
+    loop.run()
+    assert (tmp_path / "iterations" / "0001" / "hypothesis.json").exists()
+
+
+def test_stale_baseline_pending_job_is_cleared(tmp_path):
+    # mutation: a leftover {"purpose": "baseline"} record after the baseline was recorded must
+    # not be treated as a pending iteration (an int purpose) nor survive the run
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)],
+                               budget=Budget(usd=None, hours=None, iterations=1,
+                                             compute_usd=None))
+    loop.state.pending_job = {"purpose": "baseline", "job_id": "job_old"}
+    st = loop.run()
+    assert st.status == "won" and st.pending_job is None
+
+
+def test_measure_baseline_keeps_a_stored_baseline_job_record(tmp_path):
+    # mutation: overwriting pending_job with a fresh {"purpose": "baseline"} drops the job_id a
+    # killed baseline run stored, so the resume submits (and pays for) a second baseline job
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)])
+    loop.state.baseline = None
+    loop.state.pending_job = {"purpose": "baseline", "job_id": "job_b", "request_hash": "h"}
+    seen = {}
+    real = fb.evaluate
+
+    def evaluate(request):
+        seen["pending"] = dict(loop.state.pending_job)
+        return real(request)
+    fb.evaluate = evaluate
+    mainnet = types.SimpleNamespace(
+        top_algorithm=lambda ch: ("base", 1),
+        fetch_algorithm_files=lambda ch, name: BASE_FILES,
+        fetch_template=lambda ch: "pub fn solve_challenge(")
+    loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
+    assert seen["pending"]["job_id"] == "job_b" and loop.state.pending_job is None
+
+
+def test_bench_cancelled_stops_the_run_as_cancelled(tmp_path):
+    # mutation: letting BenchCancelled escape run() tracebacks out of the CLI instead of
+    # packaging the best so far
+    from talos.bench import BenchCancelled
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)])
+
+    def evaluate(request):
+        raise BenchCancelled("job_x")
+    fb.evaluate = evaluate
+    st = loop.run()
+    assert st.status == "cancelled" and "job_x" in st.stop_reason
