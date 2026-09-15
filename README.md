@@ -144,5 +144,5 @@ for the full design.
 
 GPLv3 (see `LICENSE`). `talos/search_replace.py` is lifted from
 [tig-foundation/prometheus-swarm](https://github.com/tig-foundation/prometheus-swarm)
-(`scripts/search_replace.py`), also GPLv3; `talos/agentic.py`'s sandbox settings mirror
+(its file scripts/search_replace.py), also GPLv3; `talos/agentic.py`'s sandbox settings mirror
 Prometheus's `_build_sandbox_settings` design without copying its code.

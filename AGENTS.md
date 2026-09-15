@@ -7,17 +7,25 @@ that goes stale.
 
 ## What this project is
 
-<<FILL: Two to four sentences. What Talos does, who or what consumes
-its output, and what success means for it. Say what it is not, if that is a
-common misreading. Guidance: docs/adopting.md#what-this-project-is in the
-agentify repo.>>
+Talos is a command-line tool that runs an LLM-driven research loop against one
+TIG challenge. It measures the current top-adoption mainnet algorithm once as
+the baseline, then has an LLM propose and edit candidates, compiles and scores
+each one with TIG's own `tig-runtime` and `tig-verifier` inside Modal
+containers in the user's own account, and stops when a candidate beats the
+baseline on training and then held-out nonces, or when the budget runs out.
+Its output is a local, submit-ready package under `runs/<job_id>/package/`;
+the user submits it to TIG themselves. Talos is not a hosted service and not a
+swarm, it never submits on the user's behalf, and LLM-authored code never
+executes on the user's machine.
 
 ## Source of truth, in order
 
 When two documents disagree, the one higher in this list wins.
 
 1. **The code** and its configuration. If a document describes behaviour the
-   code does not have, the document is wrong.
+   code does not have, the document is wrong. The per-challenge facts (pinned
+   monorepo commit, dev image tag, beat rule, hardware class) are code:
+   `talos/challenges.py`.
 2. **`README.md`** — setup and the commands you run day to day.
 3. **`docs/ai/`** — *not authoritative*. Design specs and plans written by
    agents during development, kept for the reasoning behind decisions. They
@@ -25,20 +33,56 @@ When two documents disagree, the one higher in this list wins.
    writing a new design spec put it in `docs/ai/specs/`; implementation
    plans go in `docs/ai/plans/`; nowhere else.
 
-<<FILL: If the project has a technical reference, a data contract, or a
-config schema document, insert it between the code and README.md and say
-what it covers. Otherwise delete this marker.>>
-
 ## Invariants
 
 These are silent until violated. Nothing in the test suite catches them, and
 each is easy to break while believing you are making progress.
 
-<<FILL: A numbered list. One invariant per item: the rule, why it exists, and
-where the truth lives. Find them by reading the tests for what is covered and
-the configs and data contracts for what is not; an invariant is the mistake an
-agent would make while believing it was making progress. Guidance:
-docs/adopting.md#finding-invariants in the agentify repo.>>
+1. **Baseline and candidate are always scored on identical nonces, fuel, and
+   hardware class.** A delta across any of those is meaningless and
+   `talos/scoring.py::beats` cannot tell. The nonce sets, fuel, tracks and
+   monorepo commit are frozen into `job.json` at job start
+   (`talos/state.py::JobSpec`), and `job.json` is write-once
+   (`talos/state.py::JobStore.write_spec`). The hardware class is part of the
+   baseline cache key (`talos/challenges.py::hardware_class`,
+   `talos/baseline.py::cache_key`); a cached baseline measured under different
+   hardware or fuel is a different key, never a hit.
+2. **The job's `rand_hash` lives in `job.json` and nowhere the agent can
+   read.** It seeds every nonce; an LLM that sees it can tune to the exact
+   nonces it is scored on. It is stripped from the spec the prompts see
+   (`talos/state.py::JobSpec.redacted`), redacted from bench output
+   (`talos/bench.py::_redact`), and the agentic worktree is deliberately
+   placed outside `runs/` (`talos/agentic.py::prepare_worktree`). No test
+   greps prompts, transcripts or the package for the hash.
+3. **The monorepo commit and dev image tag are pins, and both are part of
+   every cache key.** `MONOREPO_REF` and `DEV_IMAGE_TAG` in
+   `talos/challenges.py` enter the Modal artifact hash
+   (`modal_app/talos_bench.py::content_hash`) and the baseline cache key. The
+   exit codes in `modal_app/inside.py` were read from `tig-runtime` at that
+   commit. Bumping either pin silently changes what every cached baseline
+   meant, and the Modal app must be redeployed (`talos setup`) before any run.
+4. **An edit outside the algorithm files fails the whole iteration; its
+   in-scope blocks are never applied either.** `talos/edits.py::apply_edit_response`
+   reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration
+   on any of them, including in a compile-fix round. With `codex-cli` the
+   sandbox settings are ignored, so `talos/agentic.py::read_back` is the only
+   enforcement, which is why agentic codex is opt-in behind
+   `TALOS_ALLOW_CODEX_AGENTIC`.
+5. **Every budget dimension is checked before a call, never only after, and
+   zero is a real cap.** `talos/budget.py::exhausted` uses `>=`, and
+   `talos/loop.py::_BudgetedBench` wraps the baseline's Modal calls as well as
+   the loop's. A job with `--budget-modal-usd 0` must stop before the baseline
+   compile. A guard written as `if budget:` reintroduces the bug this was
+   fixed for.
+6. **`state.json` is written atomically and fsynced.**
+   `talos/state.py::_atomic_write` is the only way it is written. A resume
+   reads it back; a truncated `state.json` is an unresumable job.
+7. **Every cost Talos shows is an estimate, never a bill.** Modal spend is
+   measured container seconds times list prices shipped in
+   `talos/bench.py::_seconds_cost`; LLM spend is measured tokens times
+   `talos/providers/pricing.py::PRICES`. An unknown model is "unpriced"
+   (`None`), never zero, and a dollar-only budget with an unpriced model is
+   refused rather than allowed to run uncapped.
 
 ## What "done" means
 
@@ -50,14 +94,29 @@ That is the same command CI runs (`.github/workflows/ci.yml`). No target uses
 `|| true`; a red suite is a failure, not a warning. The `Makefile` is the
 executable definition of a valid change.
 
+`make check` is ruff lint, pytest with the `live` marker excluded, and the
+agentify contract self-check. `tests/test_live.py` spends real Modal budget
+and is run by hand (see `README.md#live-smoke-test`).
+
 ## What requires a human
 
 Do not decide these yourself. Raise them and stop.
 
-<<FILL: A bulleted list. Typical entries: changing what a version or variant
-number means, tightening a threshold or gate band, changing a pinned
-dependency, anything that redefines what an existing result meant. Guidance:
-docs/adopting.md#what-requires-a-human in the agentify repo.>>
+- Changing `MONOREPO_REF` or `DEV_IMAGE_TAG` in `talos/challenges.py`. It
+  redefines every cached baseline and needs a redeploy and a live smoke test.
+- Changing a challenge's `BeatRule` (margin, track tolerance, error ceiling)
+  or its hardware class. That redefines what "beats the baseline" meant for
+  every package already handed back.
+- Changing the nonce counts or `HOLDOUT_START` in `talos/nonces.py`. Training
+  and held-out sets must stay disjoint under the same hash.
+- Adding or repricing a model in `talos/providers/pricing.py`, or a Modal
+  per-second rate in `talos/bench.py`. Those tables are the budget.
+- Loosening the agentic sandbox (`talos/agentic.py::sandbox_settings`), the
+  child-process environment allowlist, or the codex opt-in.
+- Anything that submits to TIG, stores a credential anywhere other than
+  `.talos/secrets.json`, or sends data anywhere other than the user's own LLM
+  provider and Modal account.
+- Running `tests/test_live.py`. It spends the user's Modal budget.
 
 To report a bug in this project, file an issue with the `agent-reported`
 label:
@@ -74,7 +133,16 @@ nobody.
 | Set up and run day-to-day commands | `README.md` |
 | Run the gate | `Makefile` |
 | Why a decision was made (non-authoritative) | `docs/ai/specs/` |
-<<FILL: One row per recurring task: the entry point, the data contract, the
-configs, where the tests for a subsystem live. Cite documents by anchor
-(doc.md#heading) and code by symbol (src/x.py::name), never by line number;
-tests/test_docs_references.py rejects line numbers.>>
+| CLI entry point, wizards, flags | `talos/cli.py::main` |
+| Per-challenge pins, beat rules, hardware | `talos/challenges.py::CHALLENGES` |
+| One iteration of the research loop | `talos/loop.py::Loop.iterate`, confirmation in `talos/loop.py::Loop._confirm` |
+| How a candidate is compared to the baseline | `talos/scoring.py::bundle_delta`, `talos/scoring.py::beats` |
+| What a job persists, and the run directory layout | `talos/state.py::JobStore`, `README.md#where-results-land` |
+| Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |
+| Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `modal_app/inside.py` |
+| Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
+| LLM providers and prices | `talos/providers/__init__.py`, `talos/providers/pricing.py::PRICES` |
+| Agentic mode: sandbox and scope check | `talos/agentic.py::sandbox_settings`, `talos/agentic.py::read_back` |
+| Budget rules | `talos/budget.py::exhausted`, `README.md#budget` |
+| Hand-back package contents | `talos/package.py`, `README.md#where-results-land` |
+| Tests | `tests/`, one file per module; the manual live smoke test is `tests/test_live.py` |
