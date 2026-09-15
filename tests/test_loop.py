@@ -319,9 +319,10 @@ def test_rejected_edit_paths_fail_the_iteration(tmp_path):
     assert rejected and rejected[0]["paths"] == ["Cargo.toml"]
 
 
-def test_baseline_is_budget_checked_before_the_first_modal_call(tmp_path):
-    # mutation: an unchecked baseline spends the whole Modal budget before the first check —
-    # resolve_baseline makes one compile and two scoring runs of its own
+def test_baseline_is_budget_checked_before_the_first_bench_call(tmp_path):
+    # mutation: an unchecked baseline spends the whole compute budget before the first check —
+    # resolve_baseline compiles and scores both nonce sets in one evaluate of its own, and on a
+    # cold cache that single call is the most expensive of the whole job
     b = Budget(usd=None, hours=None, iterations=20, compute_usd=0.0)
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
     loop.state.baseline = None
@@ -545,13 +546,26 @@ def test_resume_does_not_discard_the_pending_iteration_dir(tmp_path):
 
 
 def test_stale_baseline_pending_job_is_cleared(tmp_path):
-    # mutation: a leftover {"purpose": "baseline"} record after the baseline was recorded must
-    # not be treated as a pending iteration (an int purpose) nor survive the run
+    # mutation: dropping run()'s `purpose == "baseline"` branch leaves the stale record on disk
+    # until iterate() happens to overwrite it — so a run that exhausts its budget (or is stopped)
+    # before the first iteration keeps a baseline job_id a C3 backend would reattach to. The
+    # end-state assertions alone cannot see that, so snapshot the record before iterating.
+    # mutation: a leftover {"purpose": "baseline"} record must also never be taken for a pending
+    # iteration (an int purpose), which would send _resume_pending looking for a hypothesis
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)],
                                budget=Budget(usd=None, hours=None, iterations=1,
                                              compute_usd=None))
     loop.state.pending_job = {"purpose": "baseline", "job_id": "job_old"}
+    seen = {}
+    real = fp.complete
+
+    def complete(system, user):
+        seen.setdefault("pending",
+                        json.loads((tmp_path / "state.json").read_text())["pending_job"])
+        return real(system, user)
+    fp.complete = complete
     st = loop.run()
+    assert seen["pending"] is None  # cleared before the first iteration, not by it
     assert st.status == "won" and st.pending_job is None
 
 
