@@ -5,7 +5,7 @@ import pytest
 
 from talos.baseline import BaselineError, cache_key, resolve_baseline
 from talos.bench import FakeBench
-from talos.challenges import CHALLENGES, MONOREPO_REF, hardware_class
+from talos.challenges import CHALLENGES, BeatRule, MONOREPO_REF, hardware_class
 from talos.types import NonceSet
 
 TR = [NonceSet("t", "ab" * 32, 0, 2)]
@@ -24,20 +24,22 @@ def test_resolve_compiles_and_scores_both_sets(tmp_path):
     # mutation: swapping training/holdout order, or scoring only one set, or dropping adoption
     fb = FakeBench(lambda ch, files, ns: [10 + n for n in ns.nonces()])
     rec, template = resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
-                                     mainnet=fake_mainnet())
+                                     rule=BeatRule(), mainnet=fake_mainnet())
     assert rec.name == "algo_x" and rec.adoption == 55 and rec.artifact_id
     assert [r.quality for r in rec.training] == [10, 11]
     assert [r.nonce for r in rec.holdout] == [1_000_000, 1_000_001]
     assert "solve_challenge" in template
-    assert fb.compile_calls == 1 and fb.score_calls == 2
+    assert len(fb.calls) == 1 and fb.holdout_runs == 1
 
 
 def test_cache_hit_skips_bench(tmp_path):
     # mutation: ignoring the cache re-measures and charges the user twice
     fb = FakeBench(lambda ch, files, ns: [1 for _ in ns.nonces()])
-    resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192", mainnet=fake_mainnet())
-    resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192", mainnet=fake_mainnet())
-    assert fb.compile_calls == 1 and fb.score_calls == 2
+    resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                     rule=BeatRule(), mainnet=fake_mainnet())
+    resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                     rule=BeatRule(), mainnet=fake_mainnet())
+    assert len(fb.calls) == 1
 
 
 def test_cache_key_changes_with_fuel_and_hardware():
@@ -53,7 +55,8 @@ def test_no_top_algorithm_is_an_error(tmp_path):
     # instead of a clear BaselineError naming the missing mainnet algorithm
     fb = FakeBench(lambda ch, files, ns: [1])
     with pytest.raises(BaselineError):
-        resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192", mainnet=fake_mainnet(top=None))
+        resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                         rule=BeatRule(), mainnet=fake_mainnet(top=None))
 
 
 def test_baseline_compile_failure_is_an_error_with_output(tmp_path):
@@ -61,7 +64,8 @@ def test_baseline_compile_failure_is_an_error_with_output(tmp_path):
     # violate spec §9, which requires the raw output on a baseline compile failure
     fb = FakeBench(lambda ch, files, ns: [1], compile_ok=lambda f: False)
     with pytest.raises(BaselineError) as ei:
-        resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192", mainnet=fake_mainnet())
+        resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                         rule=BeatRule(), mainnet=fake_mainnet())
     assert "E0308" in str(ei.value)
 
 
@@ -74,8 +78,8 @@ def test_corrupt_cache_is_remeasured(tmp_path):
 
     fb = FakeBench(lambda ch, files, ns: [10 + n for n in ns.nonces()])
     rec, _template = resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
-                                      mainnet=fake_mainnet())
-    assert fb.compile_calls == 1 and fb.score_calls == 2
+                                      rule=BeatRule(), mainnet=fake_mainnet())
+    assert len(fb.calls) == 1 and fb.holdout_runs == 1
     assert [r.quality for r in rec.training] == [10, 11]
     assert json.loads(cache_file.read_text())["name"] == "algo_x"
 
@@ -86,7 +90,7 @@ def test_all_error_baseline_is_refused_and_not_cached(tmp_path):
     fb = FakeBench(lambda ch, files, ns: [None for _ in ns.nonces()])
     with pytest.raises(BaselineError) as ei:
         resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
-                         mainnet=fake_mainnet())
+                         rule=BeatRule(), mainnet=fake_mainnet())
     msg = str(ei.value)
     assert "knapsack" in msg and "fuel 5" in msg and "'t'" in msg and "no_solution" in msg
     assert not list(tmp_path.rglob("*.json"))  # an unusable baseline is never cached
@@ -98,7 +102,7 @@ def test_zero_quality_baseline_is_refused(tmp_path):
     fb = FakeBench(lambda ch, files, ns: [0 for _ in ns.nonces()])
     with pytest.raises(BaselineError):
         resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
-                         mainnet=fake_mainnet())
+                         rule=BeatRule(), mainnet=fake_mainnet())
 
 
 def test_partly_erroring_baseline_is_accepted(tmp_path):
@@ -106,8 +110,17 @@ def test_partly_erroring_baseline_is_accepted(tmp_path):
     # legitimately fail some nonces
     fb = FakeBench(lambda ch, files, ns: [None, 10])
     rec, _ = resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
-                              mainnet=fake_mainnet())
+                              rule=BeatRule(), mainnet=fake_mainnet())
     assert [r.ok for r in rec.training] == [False, True]
+
+
+def test_baseline_forces_the_holdout_run(tmp_path):
+    # mutation: passing the baseline's own training results as baseline_training makes the
+    # held-out run conditional on beating itself, which it never does, so holdout comes back None
+    fb = FakeBench(lambda ch, files, ns: [10 for _ in ns.nonces()])
+    rec, _ = resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                              rule=BeatRule(), mainnet=fake_mainnet())
+    assert fb.calls[0].baseline_training is None and len(rec.holdout) == 2
 
 
 def test_hardware_class_separates_cpu_memory_and_gpu():

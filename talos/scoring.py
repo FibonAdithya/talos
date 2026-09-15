@@ -77,3 +77,15 @@ def beats(baseline: list[NonceResult], candidate: list[NonceResult], rule: BeatR
     return (d.mean_rel_delta >= rule.margin
             and d.worst_rel_delta >= -rule.track_tolerance
             and d.error_rate <= rule.error_ceiling)
+
+
+def holdout_decision(baseline_training: list[NonceResult] | None, training: list[NonceResult],
+                     rule: BeatRule) -> tuple[bool, str]:
+    """Whether to score the held-out set, and the reason recorded with the result. Lives here,
+    not in the bench, because the C3 job applies it inside the container with the same code."""
+    if baseline_training is None:
+        return True, "forced"
+    try:
+        return (True, "won") if beats(baseline_training, training, rule) else (False, "not_won")
+    except ScoringError:
+        return False, "not_won"

@@ -97,7 +97,8 @@ class Candidate:
         return cls(iteration=d["iteration"], files=d["files"], artifact_id=d["artifact_id"],
                    training=[NonceResult.from_dict(r) for r in d["training"]], delta=d["delta"],
                    hypothesis=d["hypothesis"],
-                   holdout=[NonceResult.from_dict(r) for r in d["holdout"]] if d.get("holdout") else None)
+                   holdout=([NonceResult.from_dict(r) for r in d["holdout"]]
+                            if d.get("holdout") else None))
 
 
 @dataclass
@@ -114,6 +115,9 @@ class JobState:
     stop_reason: str | None = None
     tacit: str = ""
     strategy_counts: dict[str, int] = field(default_factory=dict)
+    # The compute job in flight, if any: written before the call and cleared after it, so a
+    # resume can rebuild the request and reattach to a job that outlived this process.
+    pending_job: dict | None = None
 
     @classmethod
     def fresh(cls, spend: Spend) -> "JobState":
@@ -128,7 +132,7 @@ class JobState:
                 "hypotheses": self.hypotheses, "spend": self.spend.to_dict(),
                 "confirmed": self.confirmed, "false_positives": self.false_positives,
                 "stop_reason": self.stop_reason, "tacit": self.tacit,
-                "strategy_counts": self.strategy_counts}
+                "strategy_counts": self.strategy_counts, "pending_job": self.pending_job}
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobState":
@@ -139,7 +143,8 @@ class JobState:
                    hypotheses=d["hypotheses"], spend=Spend(**d["spend"]),
                    confirmed=d.get("confirmed", []), false_positives=d.get("false_positives", []),
                    stop_reason=d.get("stop_reason"), tacit=d.get("tacit", ""),
-                   strategy_counts=d.get("strategy_counts", {}))
+                   strategy_counts=d.get("strategy_counts", {}),
+                   pending_job=d.get("pending_job"))
 
 
 def _atomic_write(path: Path, text: str) -> None:

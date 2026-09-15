@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from modal_app import inside
+from talos import inside
 
 
 def make_monorepo(tmp_path: Path) -> Path:

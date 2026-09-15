@@ -16,7 +16,9 @@ baseline on training and then held-out nonces, or when the budget runs out.
 Its output is a local, submit-ready package under `runs/<job_id>/package/`;
 the user submits it to TIG themselves. Talos is not a hosted service and not a
 swarm, it never submits on the user's behalf, and LLM-authored code never
-executes on the user's machine.
+executes on the user's machine. C3 (cthree.cloud) is the alternative compute
+backend chosen at `talos setup`, running the same compile-and-score work as
+one batch job per iteration instead of a Modal container call.
 
 ## Source of truth, in order
 
@@ -62,7 +64,7 @@ progress.
    every cache key.** `MONOREPO_REF` and `DEV_IMAGE_TAG` in
    `talos/challenges.py` enter the Modal artifact hash
    (`modal_app/talos_bench.py::content_hash`) and the baseline cache key. The
-   exit codes in `modal_app/inside.py` were read from `tig-runtime` at that
+   exit codes in `talos/inside.py` were read from `tig-runtime` at that
    commit. Bumping either pin silently changes what every cached baseline
    meant, and the Modal app must be redeployed (`talos setup`) before any run.
 4. **An edit outside the algorithm files fails the whole iteration; its
@@ -73,17 +75,20 @@ progress.
    enforcement, which is why agentic codex is opt-in behind
    `TALOS_ALLOW_CODEX_AGENTIC`.
 5. **Every budget dimension is checked before a call, never only after, and
-   zero is a real cap.** `talos/budget.py::exhausted` uses `>=`, and
-   `talos/loop.py::_BudgetedBench` wraps the baseline's Modal calls as well as
-   the loop's. A job with `--budget-modal-usd 0` must stop before the baseline
-   compile. A guard written as `if budget:` reintroduces the bug this was
-   fixed for.
+   zero is a real cap.** `talos/budget.py::exhausted` uses `>=`. Two mechanisms
+   apply it: `talos/loop.py::_BudgetedBench` wraps the baseline's compute calls,
+   and an iteration's own calls go through `talos/loop.py::Loop._bench_evaluate`,
+   which checks the budget and then charges the spend inline. A job with
+   `--budget-compute-usd 0` must stop before the baseline compile. A guard
+   written as `if budget:` reintroduces the bug this was fixed for.
 6. **`state.json` is written atomically and fsynced.**
    `talos/state.py::_atomic_write` is the only way it is written. A resume
    reads it back; a truncated `state.json` is an unresumable job.
 7. **Every cost Talos shows is an estimate, never a bill.** Modal spend is
    measured container seconds times list prices shipped in
-   `talos/bench.py::_seconds_cost`; LLM spend is measured tokens times
+   `talos/bench.py::_seconds_cost`; C3 spend is measured running seconds times
+   `talos/c3_bench.py::GBP_PER_HOUR` converted at
+   `talos/c3_bench.py::USD_PER_GBP`; LLM spend is measured tokens times
    `talos/providers/pricing.py::PRICES`. An unknown model is "unpriced"
    (`None`), never zero, and a dollar-only budget with an unpriced model is
    refused rather than allowed to run uncapped.
@@ -99,8 +104,8 @@ That is the same command CI runs (`.github/workflows/ci.yml`). No target uses
 executable definition of a valid change.
 
 `make check` is ruff lint, pytest with the `live` marker excluded, and the
-agentify contract self-check. `tests/test_live.py` spends real Modal budget
-and is run by hand (see `README.md#live-smoke-test`).
+agentify contract self-check. `tests/test_live.py` spends real Modal budget or
+real C3 credit and is run by hand (see `README.md#live-smoke-test`).
 
 ## What requires a human
 
@@ -120,7 +125,11 @@ Do not decide these yourself. Raise them and stop.
 - Anything that submits to TIG, stores a credential anywhere other than
   `.talos/secrets.json`, or sends data anywhere other than the user's own LLM
   provider and Modal account.
-- Running `tests/test_live.py`. It spends the user's Modal budget.
+- Running `tests/test_live.py`. It spends the user's Modal budget or C3 credit.
+- Changing `talos/challenges.py::IMAGE_NAMESPACE` or the C3 prices in
+  `talos/c3_bench.py::GBP_PER_HOUR`. Those are the budget for the C3 backend.
+- Running the C3 live test (`tests/test_live.py::test_c3_knapsack_job`). It
+  spends the user's C3 credit.
 
 To report a bug in this project, file an issue with the `agent-reported`
 label:
@@ -143,8 +152,11 @@ nobody.
 | How a candidate is compared to the baseline | `talos/scoring.py::bundle_delta`, `talos/scoring.py::beats` |
 | What a job persists, and the run directory layout | `talos/state.py::JobStore`, `README.md#where-results-land` |
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |
-| Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `modal_app/inside.py` |
+| Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `talos/inside.py` |
 | Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
+| C3 client: deploy, poll, pull, cost estimate | `talos/c3_bench.py::C3Bench` |
+| C3 job directory: .c3 config, job.sh, payload.json | `talos/c3_jobdir.py::write_job_dir` |
+| C3 in-container runner: build, score, write results | `talos/c3_job.py::main` |
 | LLM providers and prices | `talos/providers/__init__.py`, `talos/providers/pricing.py::PRICES` |
 | Agentic mode: sandbox and scope check | `talos/agentic.py::sandbox_settings`, `talos/agentic.py::read_back` |
 | Budget rules | `talos/budget.py::exhausted`, `README.md#budget` |

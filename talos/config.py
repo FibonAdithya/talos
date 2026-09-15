@@ -21,6 +21,7 @@ class Config:
     model: str
     mode: str
     api_base: str | None
+    backend: str = "modal"
     config_path: Path | None = None
     secrets_path: Path | None = None
 
@@ -38,7 +39,8 @@ def load(root: Path) -> Config:
         raise ConfigError("talos.config.json not found; run `talos setup` first")
     d = json.loads(cp.read_text())
     return Config(provider=d["provider"], model=d["model"], mode=d.get("mode", "single-shot"),
-                  api_base=d.get("api_base"), config_path=cp, secrets_path=root / ".talos" / "secrets.json")
+                  api_base=d.get("api_base"), backend=d.get("backend", "modal"), config_path=cp,
+                  secrets_path=root / ".talos" / "secrets.json")
 
 
 def save(root: Path, config: Config, api_key: str | None) -> None:

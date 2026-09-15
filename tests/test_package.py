@@ -10,7 +10,7 @@ HASH = "cd" * 32
 
 def make(tmp_path, status="won"):
     spec = JobSpec(job_id="j", challenge="knapsack", direction="go", provider="fake", model="m",
-                   mode="single-shot", budget=Budget(usd=1.0, hours=None, iterations=None, modal_usd=None),
+                   mode="single-shot", budget=Budget(usd=1.0, hours=None, iterations=None, compute_usd=None),
                    rand_hash=HASH, tracks=["t"], training=[NonceSet("t", HASH, 0, 2)],
                    holdout=[NonceSet("t", HASH, 1_000_000, 2)], fuel=1, created_at=0.0,
                    monorepo_ref="r", challenge_id="c003")

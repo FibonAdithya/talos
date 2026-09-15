@@ -10,7 +10,7 @@ from talos.types import NonceSet
 def spec():
     return JobSpec(job_id="j1", challenge="knapsack", direction="try tabu", provider="fake",
                    model="m", mode="single-shot",
-                   budget=Budget(usd=1.0, hours=None, iterations=None, modal_usd=None),
+                   budget=Budget(usd=1.0, hours=None, iterations=None, compute_usd=None),
                    rand_hash="ab" * 32, tracks=["n=1"],
                    training=[NonceSet("n=1", "ab" * 32, 0, 2)],
                    holdout=[NonceSet("n=1", "ab" * 32, 1_000_000, 2)],
@@ -63,3 +63,15 @@ def test_terminal_set():
     # mutation: dropping "won" or "exhausted" from TERMINAL would let a
     # finished job keep being polled as if still researching
     assert TERMINAL == {"won", "exhausted", "failed", "cancelled"}
+
+
+def test_pending_job_roundtrips_and_defaults_to_none(tmp_path):
+    store = JobStore(tmp_path)
+    st = JobState.fresh(Spend(started_at=0.0))
+    assert st.pending_job is None
+    st.pending_job = {"purpose": 3, "job_id": "job_x", "files": {"mod.rs": "x"}}
+    store.save(st)
+    # mutation: dropping pending_job from to_dict loses the in-flight job on every resume
+    assert store.load().pending_job == st.pending_job
+    (tmp_path / "state.json").write_text(json.dumps({**st.to_dict(), "pending_job": None}))
+    assert store.load().pending_job is None

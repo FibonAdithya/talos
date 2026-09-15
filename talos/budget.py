@@ -9,14 +9,14 @@ class Budget:
     usd: float | None
     hours: float | None
     iterations: int | None
-    modal_usd: float | None
+    compute_usd: float | None
 
     def validate(self) -> None:
-        # spec §13: the run budget (usd/hours/iterations) must be given; the Modal cap is an
+        # spec §13: the run budget (usd/hours/iterations) must be given; the compute cap is an
         # additional always-on cap, not a substitute, so it does not count toward "at least one".
         if all(v is None for v in (self.usd, self.hours, self.iterations)):
             raise ValueError("at least one budget dimension must be set")
-        for name in ("usd", "hours", "iterations", "modal_usd"):
+        for name in ("usd", "hours", "iterations", "compute_usd"):
             v = getattr(self, name)
             if v is not None and v < 0:
                 raise ValueError(f"budget {name} must be >= 0")
@@ -29,7 +29,7 @@ class Budget:
 class Spend:
     started_at: float
     llm_usd: float = 0.0
-    modal_usd: float = 0.0
+    compute_usd: float = 0.0
     iterations: int = 0
 
     def to_dict(self) -> dict:
@@ -49,6 +49,6 @@ def exhausted(budget: Budget, spend: Spend, now: float) -> str | None:
         return "hours"
     if budget.iterations is not None and spend.iterations >= budget.iterations:
         return "iterations"
-    if budget.modal_usd is not None and spend.modal_usd >= budget.modal_usd:
-        return "modal_usd"
+    if budget.compute_usd is not None and spend.compute_usd >= budget.compute_usd:
+        return "compute_usd"
     return None

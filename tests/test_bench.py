@@ -3,8 +3,99 @@ import types
 
 import pytest
 
-from talos.bench import BenchUnavailable, FakeBench, ModalBench, _redact
-from talos.types import NonceSet
+from talos.bench import (BenchUnavailable, EvalRequest, FakeBench, ModalBench, PendingJobStore,
+                         _redact)
+from talos.challenges import BeatRule
+from talos.scoring import holdout_decision
+from talos.types import NonceResult, NonceSet
+
+TR = [NonceSet("t", "ab" * 32, 0, 3)]
+HO = [NonceSet("t", "ab" * 32, 1_000_000, 3)]
+
+
+def req(files=None, baseline=None, training=TR, holdout=HO):
+    return EvalRequest(challenge="knapsack", files=files or {"mod.rs": "x"}, training=training,
+                       holdout=holdout, fuel=1, baseline_training=baseline, rule=BeatRule())
+
+
+def base(q=100):
+    return [NonceResult("t", n, True, q, 1) for n in range(3)]
+
+
+def test_holdout_decision_forced_won_not_won():
+    tr = base(110)
+    # mutation: treating a None baseline as "never score held-out" makes the baseline
+    # measurement return no held-out results and resolve_baseline fails every job
+    assert holdout_decision(None, tr, BeatRule()) == (True, "forced")
+    assert holdout_decision(base(100), tr, BeatRule()) == (True, "won")
+    assert holdout_decision(base(100), base(100), BeatRule()) == (False, "not_won")
+    # mutation: letting ScoringError escape here crashes the C3 job instead of skipping held-out
+    short = [NonceResult("t", 0, True, 100, 1)]
+    assert holdout_decision(short, tr, BeatRule()) == (False, "not_won")
+
+
+def test_fake_bench_scores_training_and_tracks_cost():
+    fb = FakeBench(lambda ch, files, ns: [100 + n for n in ns.nonces()])
+    mark = fb.cost_mark()
+    r = fb.evaluate(req(baseline=base(200)))
+    assert r.compile.ok and r.compile.artifact_id
+    assert [x.quality for x in r.training] == [100, 101, 102]
+    assert all(x.track == "t" for x in r.training)
+    # mutation: scoring held-out on a loss wastes a run per iteration and hides losses from tests
+    assert r.holdout is None and r.holdout_reason == "not_won" and fb.holdout_runs == 0
+    assert fb.cost_usd_since(mark) > 0  # mutation: not charging makes budget tests vacuous
+    assert fb.calls == [req(baseline=base(200))]
+
+
+def test_fake_bench_scores_holdout_on_a_win_and_when_forced():
+    fb = FakeBench(lambda ch, files, ns: [110 for _ in ns.nonces()])
+    won = fb.evaluate(req(baseline=base(100)))
+    # mutation: scoring held-out only on "won" and never on "forced" (or the reverse) leaves
+    # the baseline job with no held-out results
+    assert (won.holdout_reason == "won"
+            and [x.nonce for x in won.holdout] == [1_000_000, 1_000_001, 1_000_002])
+    forced = fb.evaluate(req(baseline=None))
+    assert forced.holdout_reason == "forced" and len(forced.holdout) == 3
+    assert fb.holdout_runs == 2
+
+
+def test_fake_bench_none_means_error():
+    fb = FakeBench(lambda ch, files, ns: [None, 5, 5])
+    r = fb.evaluate(req(baseline=base(1)))
+    # mutation: mapping a None quality to ok=True would feed phantom solutions to scoring
+    assert (not r.training[0].ok and r.training[0].error == "no_solution"
+            and r.training[1].quality == 5)
+
+
+def test_fake_bench_compile_failure_scores_nothing():
+    fb = FakeBench(lambda ch, files, ns: [1, 1, 1],
+                   compile_ok=lambda files: "BUG" not in files["mod.rs"])
+    r = fb.evaluate(req(files={"mod.rs": "BUG"}))
+    # mutation: ignoring compile_ok makes every compile-failure path in the loop untestable;
+    # scoring a failed compile would hand the loop qualities for code that never built
+    assert not r.compile.ok and r.training == [] and r.holdout is None
+    assert r.holdout_reason == "not_compiled"
+
+
+def test_fake_bench_rejects_a_short_scores_callback():
+    fb = FakeBench(lambda ch, files, ns: [1, 2])
+    # mutation: zip() silently truncates, so a 2-quality callback would score a 3-nonce set
+    # as 2 results and every count-based assertion downstream would quietly pass
+    with pytest.raises(ValueError):
+        fb.evaluate(req())
+
+
+def test_pending_job_store_in_memory_roundtrip():
+    # mutation: a memory store whose set() is a no-op makes every reattach test pass vacuously
+    p = PendingJobStore.memory()
+    assert p.get() is None
+    p.set({"job_id": "j"})
+    assert p.get() == {"job_id": "j"}
+
+
+def test_redact_hides_a_rand_hash():
+    # mutation: dropping the redaction leaks the seed into the pause message
+    assert _redact("x " + "ab" * 32 + " y") == "x <hash> y"
 
 
 class FakeClock:
@@ -22,47 +113,6 @@ def recording_sleep(clock: FakeClock, sleeps: list):
         sleeps.append(d)
         clock.t += d
     return sleep
-
-
-def test_fake_bench_scores_per_nonce_and_tracks_cost():
-    def scores(challenge, files, ns):
-        return [100 + n for n in ns.nonces()]
-    fb = FakeBench(scores)
-    c = fb.compile("knapsack", {"mod.rs": "x"})
-    assert c.ok and c.artifact_id
-    mark = fb.cost_mark()
-    res = fb.score("knapsack", c.artifact_id, [NonceSet("t", "ab", 0, 3)], fuel=1)
-    assert [r.quality for r in res] == [100, 101, 102]
-    assert all(r.track == "t" for r in res)
-    assert fb.cost_usd_since(mark) > 0  # mutation: not charging makes budget tests vacuous
-
-
-def test_fake_bench_none_means_error():
-    fb = FakeBench(lambda ch, files, ns: [None, 5])
-    c = fb.compile("knapsack", {"mod.rs": "x"})
-    res = fb.score("knapsack", c.artifact_id, [NonceSet("t", "ab", 0, 2)], fuel=1)
-    # mutation: mapping a None quality to ok=True would feed phantom solutions to scoring
-    assert not res[0].ok and res[0].error == "no_solution" and res[1].quality == 5
-
-
-def test_fake_bench_compile_failure():
-    fb = FakeBench(lambda ch, files, ns: [], compile_ok=lambda files: "BUG" not in files["mod.rs"])
-    # mutation: ignoring compile_ok makes every compile-failure path in the loop untestable
-    assert not fb.compile("knapsack", {"mod.rs": "BUG"}).ok
-
-
-def test_fake_bench_rejects_a_short_scores_callback():
-    fb = FakeBench(lambda ch, files, ns: [1, 2])
-    c = fb.compile("knapsack", {"mod.rs": "x"})
-    # mutation: zip() silently truncates, so a 2-quality callback would score a 3-nonce set
-    # as 2 results and every count-based assertion downstream would quietly pass
-    with pytest.raises(ValueError):
-        fb.score("knapsack", c.artifact_id, [NonceSet("t", "ab", 0, 3)], fuel=1)
-
-
-def test_redact_hides_a_rand_hash():
-    # mutation: dropping the redaction leaks the seed into the pause message
-    assert _redact("x " + "ab" * 32 + " y") == "x <hash> y"
 
 
 def test_with_retry_returns_after_transient_failures():
@@ -121,7 +171,7 @@ def test_missing_deployment_says_run_talos_setup(monkeypatch):
     sleeps = []
     b = ModalBench(clock=clock, sleep=recording_sleep(clock, sleeps))
     with pytest.raises(BenchUnavailable) as ei:
-        b.score("knapsack", "art", [NonceSet("t", "ab", 0, 1)], fuel=1)
+        b.evaluate(req())
     assert "talos setup" in str(ei.value)
     # mutation: retrying a NotFoundError wastes the whole window on a deterministic error
     assert sleeps == []
@@ -134,7 +184,7 @@ def test_transient_lookup_failure_is_retried_not_blamed_on_setup(monkeypatch):
     sleeps = []
     b = ModalBench(retry_window_s=20, clock=clock, sleep=recording_sleep(clock, sleeps))
     with pytest.raises(BenchUnavailable) as ei:
-        b.score("knapsack", "art", [NonceSet("t", "ab", 0, 1)], fuel=1)
+        b.evaluate(req())
     # mutation: converting every lookup error to "not deployed" pauses the run on a network
     # blip and prints the wrong advice
     assert "talos setup" not in str(ei.value)
@@ -147,6 +197,9 @@ def test_lookup_is_cached_after_a_successful_hydrate(monkeypatch):
     class Fn:
         def hydrate(self):
             pass
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": "ok"}
 
         def starmap(self, args):
             return [{"track": t, "nonce": n, "ok": True, "quality": 1, "runtime_ms": 1,
@@ -163,6 +216,34 @@ def test_lookup_is_cached_after_a_successful_hydrate(monkeypatch):
 
     b = ModalBench()
     for _ in range(3):
-        b.score("knapsack", "art", [NonceSet("t", "ab", 0, 1)], fuel=1)
+        b.evaluate(req())
     # mutation: re-hydrating on every call adds a round trip per nonce batch
-    assert lookups == ["score_nonce_knapsack"]
+    assert lookups == ["compile_knapsack", "score_nonce_knapsack"]
+
+
+def test_modal_evaluate_skips_holdout_on_a_loss_and_charges_each_call(monkeypatch):
+    starmaps = []
+
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": "ok"}
+
+        def starmap(self, args):
+            starmaps.append(len(args))
+            return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1000,
+                     "error": None} for (_a, t, _h, n, _f) in args]
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    b = ModalBench()
+    r = b.evaluate(req(baseline=base(100)))  # candidate 100 vs baseline 100: not a win
+    # mutation: unconditional held-out scoring doubles Modal spend on every losing iteration
+    assert starmaps == [3] and r.holdout is None and r.holdout_reason == "not_won"
+    assert b.cost_mark() > 0
+    r2 = b.evaluate(req(baseline=base(50)))
+    assert starmaps == [3, 3, 3] and r2.holdout_reason == "won" and len(r2.holdout) == 3

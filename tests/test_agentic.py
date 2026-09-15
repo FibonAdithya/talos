@@ -202,3 +202,13 @@ def test_attach_agentic_copies_transcript_to_iteration_dir(tmp_path):
     # mutation: copying only after read_back succeeds (instead of in a finally) loses the
     # transcript whenever the iteration fails, which is exactly when it is needed for debugging
     assert (it_dir / "agent_stdout.txt").read_text() == "agent output"
+
+
+def test_agent_env_passes_the_backend_through(monkeypatch):
+    from talos.agentic import _agent_env
+    monkeypatch.setenv("TALOS_BACKEND", "c3")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    env = _agent_env()
+    # mutation: dropping TALOS_BACKEND from the allowlist sends agentic C3 compiles to Modal;
+    # widening the allowlist leaks keys into the sandbox
+    assert env["TALOS_BACKEND"] == "c3" and "ANTHROPIC_API_KEY" not in env
