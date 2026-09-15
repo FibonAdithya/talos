@@ -25,7 +25,10 @@ Talos compiles and scores candidates on one of two backends, chosen once at `tal
 On C3, one iteration is one batch job with about 12 minutes of fixed overhead before any
 nonce is scored — MEASURED 2026-09-14 on a spike run (knapsack, 4 vCPU): about 4 minutes
 to script start, 466 seconds to build the candidate, then 1 to 2 seconds per nonce at
-mainnet fuel. Modal has no equivalent per-job overhead.
+mainnet fuel. The release smoke test on 2026-09-15 (MEASURED, knapsack, 4 vCPU, two
+training and two held-out nonces) took 12 min 20 s from submission to result: about 2 minutes
+queued, 470 seconds to build, 1.3 to 1.7 seconds per nonce; the client's cost estimate was
+$0.027 and the account balance fell by £0.02. Modal has no equivalent per-job overhead.
 
 C3 pulls only public Docker Hub images, never GHCR. Maintainers mirror the TIG dev images
 to `docker.io/fibonadithya/tig-<challenge>-dev:<tag>` with `make mirror-images`
@@ -181,15 +184,17 @@ TALOS_LIVE_CHALLENGE=knapsack .venv/bin/pytest -m live tests/test_live.py -s
 ```
 
 For the C3 backend, a separate test runs one real C3 job end to end; it needs `c3 login`
-and about £0.05 of credit, and takes about 20 minutes:
+and a few pence of credit (MEASURED 2026-09-15: £0.02 billed, 12 min 20 s wall clock, job
+`SUCCEEDED`, `1 passed`):
 
 ```bash
 TALOS_LIVE_BACKEND=c3 .venv/bin/pytest -m live tests/test_live.py -k c3 -s
 ```
 
-Run these once yourself after `talos setup`, before trusting a real run — they have not
-been run by the developers of this repository (no Modal, C3, or LLM credentials were
-available in the development environment).
+Run these once yourself after `talos setup`, before trusting a real run. The C3 test was
+run by the maintainers on 2026-09-15 (see above); the Modal test has not been run by the
+developers of this repository (no Modal or LLM credentials were available in the
+development environment).
 
 ## How it works
 
