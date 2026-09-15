@@ -145,6 +145,8 @@ _AGENT_ENV_ALLOWLIST = frozenset({
     "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
     "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+    # the sandbox runs `talos compile`, which has no talos.config.json to read the backend from
+    "TALOS_BACKEND",
 })
 
 _TRANSCRIPT_CAP = 200_000

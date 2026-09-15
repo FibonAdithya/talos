@@ -1,11 +1,12 @@
 """`talos setup | run | compile | status`. Wizard prompts go through `ask` so tests can script
 them; after every finished iteration a plain one-line status is printed to stdout with the job id,
-iteration, best delta, LLM and Modal spend and the wall-clock time left."""
+iteration, best delta, LLM and compute spend and the wall-clock time left."""
 from __future__ import annotations
 
 import argparse
 import getpass
 import json
+import os
 import re
 import shutil
 import signal
@@ -13,11 +14,14 @@ import subprocess
 import sys
 import time
 import types
+import urllib.error
+import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
 from talos.budget import Budget, Spend
-from talos.challenges import CHALLENGES, MONOREPO_REF, hardware_class
+from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_image,
+                              hardware_class)
 from talos.config import Config, ConfigError, ENV_KEYS, load, resolve_api_key, save
 from talos.mainnet import ChallengeInfo, MainnetError, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
@@ -31,6 +35,9 @@ MODAL_APP_FILE = Path(__file__).resolve().parent.parent / "modal_app" / "talos_b
 CLI_PROVIDERS = ("claude-cli", "codex-cli")
 UNMETERED = CLI_PROVIDERS + ("fake",)
 DEFAULT_COMPUTE_USD = 20.0
+BACKENDS = ("modal", "c3")
+MIRROR_HINT = ("the C3 backend needs the dev image on Docker Hub; a maintainer runs "
+               "`make mirror-images` (scripts/mirror_images.sh) once per image tag")
 
 
 def default_ask(prompt: str, default: str | None = None, secret: bool = False) -> str:
@@ -52,8 +59,61 @@ def deploy_bench(token_id: str | None, token_secret: str | None, run=subprocess.
         raise ConfigError(f"modal deploy failed: {(r.stderr or r.stdout)[-2000:]}")
 
 
+def check_c3(run=None) -> float:
+    """Confirms a logged-in `c3` session and returns the credit balance in GBP. `run` is
+    resolved at call time so a test can monkeypatch `cli.subprocess`."""
+    run = run or subprocess.run
+    r = run(["c3", "whoami"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise ConfigError(f"C3 login check failed: {(r.stderr or r.stdout)[-300:].strip()}; "
+                          f"run `c3 login` and retry")
+    r = run(["c3", "balance"], capture_output=True, text=True)
+    m = re.search(r"Credit balance:\s*£([0-9.]+)", r.stdout or "")
+    balance = float(m.group(1)) if m else 0.0
+    if balance < 1.0:
+        print(f"warning: C3 credit balance is low (£{balance:.2f}); run `c3 topup`",
+              file=sys.stderr)
+    return balance
+
+
+def image_available(challenge: str, fetch=None) -> bool:
+    """GET the public Hub tag endpoint; 200 means C3 can pull the image."""
+    image = c3_image(challenge)
+    name, tag = image.split("/", 1)[1].rsplit(":", 1)
+    url = f"https://hub.docker.com/v2/repositories/{name}/tags/{tag}"
+    if fetch is None:
+        def fetch(u):
+            try:
+                with urllib.request.urlopen(u, timeout=20) as resp:
+                    return resp.status
+            except urllib.error.HTTPError as e:
+                return e.code
+            except urllib.error.URLError:
+                return 0  # unreachable: reported as "not available", the message says so
+    return fetch(url) == 200
+
+
+def make_bench(backend: str, run_dir: Path, pending):
+    if backend == "modal":
+        from talos.bench import ModalBench
+        return ModalBench()
+    if backend == "c3":
+        from talos.c3_bench import C3Bench
+        return C3Bench(run_dir, pending=pending)
+    raise ConfigError(f"unknown backend {backend!r}; run `talos setup`")
+
+
+def bench_hardware_class(backend: str, challenge: str) -> str:
+    spec = CHALLENGES[challenge]
+    return c3_hardware_class(spec) if backend == "c3" else hardware_class(spec)
+
+
 def cmd_setup(args, ask) -> int:
     root = Path.cwd()
+    backend = ask(f"Compute backend ({' or '.join(BACKENDS)})", "modal")
+    if backend not in BACKENDS:
+        print(f"unknown backend {backend!r}", file=sys.stderr)
+        return 2
     kinds = ", ".join(k for k in KINDS if k != "fake")
     kind = ask(f"Provider ({kinds})", "anthropic")
     # "fake" is the in-process test double: it is in KINDS, but setting it up would write a
@@ -69,19 +129,25 @@ def cmd_setup(args, ask) -> int:
     mode = "single-shot"
     if kind in CLI_PROVIDERS:
         mode = ask("Mode (single-shot or agentic)", "single-shot")
-    token_id = ask("Modal token id (create at modal.com/settings/tokens)")
-    token_secret = ask("Modal token secret", secret=True)
+    token_id = token_secret = None
+    if backend == "modal":
+        token_id = ask("Modal token id (create at modal.com/settings/tokens)")
+        token_secret = ask("Modal token secret", secret=True)
     provider = make_provider(kind, model, api_key=api_key, api_base=api_base)
     err = validate_provider(provider)
     if err:
         print(f"Provider check failed: {err}", file=sys.stderr)
         return 1
     try:
-        deploy_bench(token_id or None, token_secret or None)
+        if backend == "c3":
+            check_c3()
+        else:
+            deploy_bench(token_id or None, token_secret or None)
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 1
-    save(root, Config(provider=kind, model=model, mode=mode, api_base=api_base), api_key)
+    save(root, Config(provider=kind, model=model, mode=mode, api_base=api_base,
+                      backend=backend), api_key)
     print("Setup complete. Run `talos run` to start a job.")
     return 0
 
@@ -195,20 +261,36 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         store.save(state)
 
     from talos.agentic import attach_agentic
+    from talos.bench import BenchCancelled, PendingJobStore
     fake = cfg.provider == "fake"
+
+    def _set_pending(d):
+        state.pending_job = d
+        store.save(state)
+
+    # The backend records the job it has in flight in the run's own state, so a resumed run
+    # reattaches to it instead of abandoning one C3 is still billing for.
+    pending = PendingJobStore(get=lambda: state.pending_job, set=_set_pending)
     if fake:
         from talos.bench import FakeBench
         from talos.providers.fake import FakeProvider
         provider, bench = FakeProvider(_fake_script), FakeBench(_fake_scores)
         cache_dir, mainnet = store.run_dir / "baseline_cache", FAKE_MAINNET
     else:
-        from talos.bench import ModalBench
         provider = make_provider(cfg.provider, cfg.model, api_key=resolve_api_key(cfg),
                                  api_base=cfg.api_base)
-        bench = ModalBench()
+        bench = make_bench(cfg.backend, store.run_dir, pending)
         cache_dir, mainnet = BASELINE_CACHE, None
+        # Before the baseline, not after: C3 pulls the image at job start, so a missing mirror
+        # costs a whole job (and its queue wait) to report a pull failure.
+        if cfg.backend == "c3" and not image_available(spec.challenge):
+            print(f"image {c3_image(spec.challenge)} is not on Docker Hub (or Hub is "
+                  f"unreachable): {MIRROR_HINT}", file=sys.stderr)
+            return 1
     from talos.loop import Loop
-    hardware = hardware_class(CHALLENGES[spec.challenge])
+    hardware = bench_hardware_class(cfg.backend, spec.challenge)
+    # `talos compile` inside the agentic sandbox runs in a worktree with no talos.config.json.
+    os.environ["TALOS_BACKEND"] = "modal" if fake else cfg.backend
 
     def on_event(kind, data):
         # loop._n is the iteration the event belongs to; state.iteration only catches up when an
@@ -223,7 +305,8 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     loop = Loop(spec, state, store, provider, bench, template_rs="", on_event=on_event)
     if cfg.mode == "agentic":
         attach_agentic(loop, cfg.provider, cfg.model)
-    previous_sigint = signal.signal(signal.SIGINT, lambda *_: loop.request_stop())
+    previous_sigint = signal.signal(signal.SIGINT,
+                                   lambda *_: (loop.request_stop(), bench.request_stop()))
     try:
         if state.baseline is None:
             loop.measure_baseline(cache_dir, hardware, mainnet=mainnet)
@@ -233,6 +316,12 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
             from talos.mainnet import fetch_template
             loop.template_rs = fetch_template(spec.challenge)
         final = loop.run()
+    except BenchCancelled as e:
+        # Only measure_baseline can raise it here: run() records its own cancelled outcome.
+        # Without this the blanket handler below would call a stopped run a failed one.
+        state.status, state.stop_reason = "cancelled", f"stopped; bench job cancelled: {e}"
+        store.save(state)
+        final = state
     except Exception as e:  # noqa: BLE001 - report, package what we have, exit non-zero
         state.status, state.stop_reason = "failed", str(e)
         store.save(state)
@@ -257,7 +346,8 @@ def cmd_run(args, ask) -> int:
     # spec §11: --fake needs neither a config file nor network, so it must be resolved before
     # `load(root)` is even attempted; a fresh clone with no talos.config.json still runs it.
     if args.fake:
-        cfg = Config(provider="fake", model="fake", mode="single-shot", api_base=None)
+        cfg = Config(provider="fake", model="fake", mode="single-shot", api_base=None,
+                     backend="modal")  # the fake bench is in-process: no backend to pick
     else:
         try:
             cfg = load(root)
@@ -389,7 +479,24 @@ def cmd_run(args, ask) -> int:
     return execute_job(spec, store, cfg, resume=False)
 
 
+def compile_backend(args, root: Path) -> str:
+    """--backend, then TALOS_BACKEND (exported by execute_job for the agentic sandbox, whose
+    worktree has no config file), then the config in `root`, then modal."""
+    if getattr(args, "backend", None):
+        return args.backend
+    env = os.environ.get("TALOS_BACKEND")
+    if env:
+        return env
+    try:
+        return load(root).backend
+    except ConfigError:
+        return "modal"
+
+
 def cmd_compile(args, ask) -> int:
+    """Compile only: no nonce is scored. On C3 the job dir is the fixed `.talos/compile/c3/adhoc`,
+    which every run rewrites, so two `talos compile` runs at once in one directory are
+    unsupported."""
     d = Path(args.dir)
     files = ({str(p.relative_to(d)): p.read_text() for p in d.rglob("*")
               if p.is_file() and p.suffix in (".rs", ".cu")} if d.is_dir() else {})
@@ -398,8 +505,11 @@ def cmd_compile(args, ask) -> int:
     if not files:
         print(f"no .rs/.cu files under {d}", file=sys.stderr)
         return 2
-    from talos.bench import ModalBench
-    r = ModalBench().compile(args.challenge, files)
+    from talos.bench import EvalRequest, PendingJobStore
+    backend = compile_backend(args, Path.cwd())
+    bench = make_bench(backend, Path.cwd() / ".talos" / "compile", PendingJobStore.memory())
+    r = bench.evaluate(EvalRequest(args.challenge, files, [], [], 0, None,
+                                   CHALLENGES[args.challenge].beat)).compile
     print(r.output[-4000:])
     return 0 if r.ok else 1
 
@@ -432,6 +542,7 @@ def main(argv=None, ask=default_ask) -> int:
     c = sub.add_parser("compile")
     c.add_argument("--challenge", required=True)
     c.add_argument("--dir", default="algorithm")
+    c.add_argument("--backend", choices=list(BACKENDS))
     sub.add_parser("status")
     args = p.parse_args(argv)
     return {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status}[args.cmd](args, ask)
