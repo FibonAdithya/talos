@@ -235,6 +235,22 @@ def test_request_stop_before_evaluate_raises_cancelled_without_deploying(tmp_pat
     assert not any(c[1] == "deploy" for (c, _) in c3.calls)
 
 
+def test_request_stop_before_evaluate_cancels_a_reattachable_job(tmp_path):
+    from talos.c3_jobdir import request_hash
+    c3 = FakeC3(["RUNNING"], results_doc(), job_id="job_old")
+    pending = PendingJobStore.memory()
+    pending.set({"purpose": 3, "job_id": "job_old", "request_hash": request_hash(req()),
+                 "job_dir": str(tmp_path / "c3" / "3")})
+    b, _ = bench(tmp_path, c3, pending=pending)
+    b.request_stop()
+    with pytest.raises(BenchCancelled):
+        b.evaluate(req())
+    # mutation: clearing the record without cancelling leaves a billing job nobody can find
+    assert any(c[1] == "cancel" and c[2] == "job_old" for (c, _) in c3.calls)
+    assert not any(c[1] == "deploy" for (c, _) in c3.calls)
+    assert pending.get() is None
+
+
 def test_pending_too_long_cancels_and_pauses(tmp_path):
     c3 = FakeC3(["PENDING"], results_doc())
     pending = PendingJobStore.memory()

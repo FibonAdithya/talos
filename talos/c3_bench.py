@@ -155,10 +155,16 @@ class C3Bench:
 
     # ── evaluate ───────────────────────────────────────────────────────
     def evaluate(self, request: EvalRequest) -> EvalResult:
-        if self._stop:  # noticed before any deploy: nothing was submitted, so nothing to cancel
-            self._pending.set(None)
-            raise BenchCancelled("stop requested before submission")
         pend = self._pending.get() or {}
+        if self._stop:
+            # a resume can restore a pending record naming a real, billing job before the
+            # first poll ever runs; cancel it (best-effort, idempotent) whatever its
+            # request_hash — only when no job_id is on record is there nothing to cancel
+            stale_job_id = pend.get("job_id")
+            if stale_job_id:
+                self._cancel(stale_job_id)
+            self._pending.set(None)
+            raise BenchCancelled(stale_job_id or "stop requested before submission")
         purpose = str(pend.get("purpose", "adhoc"))
         job_dir = self.run_dir / "c3" / purpose
         rh = request_hash(request)
