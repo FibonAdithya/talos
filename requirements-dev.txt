@@ -1,0 +1,5 @@
+# Development tools for `make check`. agentify is pinned so the contract self-check
+# runs against a known version; bump the tag deliberately.
+ruff
+pytest
+agentify @ git+https://github.com/FibonAdithya/agentic-coding-scaffold@v0.1.2

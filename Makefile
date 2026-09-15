@@ -3,3 +3,4 @@ PYTHON ?= python3
 check:
 	$(PYTHON) -m ruff check .
 	$(PYTHON) -m pytest -q -m "not live"
+	$(PYTHON) -m agentify check .

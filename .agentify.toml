@@ -1,0 +1,20 @@
+# agentify configuration. The contract is CONTRACT.md in the agentify repo.
+
+[contract]
+# The highest contract level this repo has adopted. tests/test_contract.py
+# checks every item up to it on every `make check`. Raised by
+# `agentify adopt --level N`; never lowered automatically.
+level = 1
+
+[docs]
+# Reference prefixes the docs test treats as correctly absent from a clean
+# checkout: build products, downloaded data, run directories.
+ignore_references = [
+  # Per-job run products, written under runs/<job_id>/ or ~/.talos/ by `talos run`
+  # and `talos setup`; none exist in a clean checkout.
+  "runs/", ".talos/", "talos.config.json",
+  "job.json", "state.json", "timeline.jsonl", "tacit.md", "CHALLENGE.md",
+  "scores.md", "hypotheses.md", "evidence_draft.md",
+  # Written by agentic mode into the throwaway worktree, not this repo's own.
+  ".claude/settings.json",
+]

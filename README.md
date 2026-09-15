@@ -137,12 +137,12 @@ Talos measures the current top-adoption mainnet algorithm as its baseline, then 
 LLM proposes a hypothesis and an edit, `talos compile` + the Modal bench harness score it
 against training nonces, promising candidates are confirmed against held-out nonces, and
 the loop stops when a candidate beats baseline on both, or the budget runs out. See
-[docs/superpowers/specs/2026-09-11-talos-design.md](docs/superpowers/specs/2026-09-11-talos-design.md)
+[docs/ai/specs/2026-09-11-talos-design.md](docs/ai/specs/2026-09-11-talos-design.md)
 for the full design.
 
 ## Licence
 
 GPLv3 (see `LICENSE`). `talos/search_replace.py` is lifted from
 [tig-foundation/prometheus-swarm](https://github.com/tig-foundation/prometheus-swarm)
-(`scripts/search_replace.py`), also GPLv3; `talos/agentic.py`'s sandbox settings mirror
+(its file scripts/search_replace.py), also GPLv3; `talos/agentic.py`'s sandbox settings mirror
 Prometheus's `_build_sandbox_settings` design without copying its code.
