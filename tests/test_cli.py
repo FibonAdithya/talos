@@ -80,7 +80,7 @@ def test_run_requires_budget_and_creates_job(tmp_path, monkeypatch):
     assert spec.challenge == "knapsack" and spec.fuel == 7 and spec.tracks == ["n=1"]
     assert spec.budget.iterations == 3
     # mutation: dropping the default leaves Modal spend unbounded
-    assert spec.budget.modal_usd == 20.0
+    assert spec.budget.compute_usd == 20.0
     assert len(spec.rand_hash) == 64
     job_files = list((tmp_path / "runs").glob("*/job.json"))
     assert len(job_files) == 1
@@ -131,7 +131,7 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     assert prompts[-1] == "Mode (single-shot or agentic)"
     assert "agentic mode uses roughly 5-20x the tokens of single-shot" in captured.out
     assert seen["spec"].budget.iterations == 3 and seen["spec"].budget.hours == 4.0
-    assert seen["spec"].budget.modal_usd == 5.0
+    assert seen["spec"].budget.compute_usd == 5.0
     assert seen["cfg"].mode == "agentic" and seen["spec"].mode == "agentic"
 
 
@@ -464,11 +464,11 @@ def test_status_lists_every_run(tmp_path, monkeypatch, capsys):
         d = tmp_path / "runs" / name
         d.mkdir(parents=True)
         (d / "state.json").write_text(json.dumps(
-            {"status": status, "iteration": 2, "spend": {"llm_usd": 1.5, "modal_usd": 0.25}}))
+            {"status": status, "iteration": 2, "spend": {"llm_usd": 1.5, "compute_usd": 0.25}}))
     (tmp_path / "runs" / "20260103-000000-knapsack").mkdir()  # started, nothing saved yet
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
-    assert "20260101-000000-knapsack: won it=2 llm=$1.50 modal=$0.25" in out
+    assert "20260101-000000-knapsack: won it=2 llm=$1.50 compute=$0.25" in out
     assert "20260102-000000-knapsack: failed it=2" in out
 
 
@@ -510,7 +510,7 @@ def test_status_line_says_unpriced_instead_of_zero_dollars(tmp_path):
     def line(provider, model):
         spec = cli.JobSpec(job_id="j", challenge="knapsack", direction="d", provider=provider,
                            model=model, mode="single-shot",
-                           budget=Budget(usd=5.0, hours=None, iterations=None, modal_usd=1.0),
+                           budget=Budget(usd=5.0, hours=None, iterations=None, compute_usd=1.0),
                            rand_hash="ab" * 32, tracks=["t"], training=[], holdout=[], fuel=1,
                            created_at=0.0, monorepo_ref="r", challenge_id="c003")
         return cli._status_line(spec, JobState.fresh(Spend(started_at=0.0)), 0.0)

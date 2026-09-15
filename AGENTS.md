@@ -74,8 +74,8 @@ progress.
    `TALOS_ALLOW_CODEX_AGENTIC`.
 5. **Every budget dimension is checked before a call, never only after, and
    zero is a real cap.** `talos/budget.py::exhausted` uses `>=`, and
-   `talos/loop.py::_BudgetedBench` wraps the baseline's Modal calls as well as
-   the loop's. A job with `--budget-modal-usd 0` must stop before the baseline
+   `talos/loop.py::_BudgetedBench` wraps the baseline's compute calls as well as
+   the loop's. A job with `--budget-compute-usd 0` must stop before the baseline
    compile. A guard written as `if budget:` reintroduces the bug this was
    fixed for.
 6. **`state.json` is written atomically and fsynced.**

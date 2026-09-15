@@ -30,7 +30,7 @@ BASELINE_CACHE = Path.home() / ".talos" / "baselines"
 MODAL_APP_FILE = Path(__file__).resolve().parent.parent / "modal_app" / "talos_bench.py"
 CLI_PROVIDERS = ("claude-cli", "codex-cli")
 UNMETERED = CLI_PROVIDERS + ("fake",)
-DEFAULT_MODAL_USD = 20.0
+DEFAULT_COMPUTE_USD = 20.0
 
 
 def default_ask(prompt: str, default: str | None = None, secret: bool = False) -> str:
@@ -123,7 +123,7 @@ def _codex_refused(cfg: Config) -> bool:
 
 def _budget_from_args(args) -> Budget:
     b = Budget(usd=args.budget_usd, hours=args.budget_hours, iterations=args.budget_iterations,
-               modal_usd=args.budget_modal_usd)
+               compute_usd=args.budget_compute_usd)
     b.validate()
     return b
 
@@ -164,7 +164,7 @@ def _status_line(spec: JobSpec, state: JobState, now: float) -> str:
         left = f"{max(0.0, spec.budget.hours - (now - state.spend.started_at) / 3600):.1f}h"
     llm = "unpriced" if unpriced(spec.provider, spec.model) else f"${state.spend.llm_usd:.2f}"
     return (f"[status] job={spec.job_id} it={state.iteration} best={best} "
-            f"llm={llm} modal≈${state.spend.modal_usd:.2f} left={left}")
+            f"llm={llm} compute≈${state.spend.compute_usd:.2f} left={left}")
 
 
 def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> int:
@@ -247,7 +247,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         print("Best delta vs baseline: n/a (no candidate)")
     llm = (f"unpriced (no price-table entry for {spec.model})"
            if unpriced(spec.provider, spec.model) else f"${final.spend.llm_usd:.2f}")
-    print(f"LLM spend: {llm}   Modal spend (estimated): ${final.spend.modal_usd:.2f}")
+    print(f"LLM spend: {llm}   Compute spend (estimated): ${final.spend.compute_usd:.2f}")
     print(f"Package: {pkg}")
     return 0 if final.status == "won" else 1
 
@@ -322,17 +322,17 @@ def cmd_run(args, ask) -> int:
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return 2
-        # spec §5.2: Modal spend is always capped. The default is applied only after the budget
+        # spec §5.2: compute spend is always capped. The default is applied only after the budget
         # has been validated, so it can never stand in for the LLM/time/iteration cap the run
         # needs.
-        if budget.modal_usd is None:
+        if budget.compute_usd is None:
             if args.yes:
-                budget = replace(budget, modal_usd=DEFAULT_MODAL_USD)
-                print(f"No --budget-modal-usd given; capping Modal spend at "
-                      f"${DEFAULT_MODAL_USD:.2f}.")
+                budget = replace(budget, compute_usd=DEFAULT_COMPUTE_USD)
+                print(f"No --budget-compute-usd given; capping compute spend at "
+                      f"${DEFAULT_COMPUTE_USD:.2f}.")
             else:
-                budget = replace(budget, modal_usd=_ask_number(
-                    ask, "Modal budget in USD", str(DEFAULT_MODAL_USD)))
+                budget = replace(budget, compute_usd=_ask_number(
+                    ask, "Compute budget in USD", str(DEFAULT_COMPUTE_USD)))
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -409,7 +409,7 @@ def cmd_status(args, ask) -> int:
     for job in sorted(root.glob("*/state.json")):
         st = json.loads(job.read_text())
         print(f"{job.parent.name}: {st['status']} it={st['iteration']} "
-              f"llm=${st['spend']['llm_usd']:.2f} modal=${st['spend']['modal_usd']:.2f}")
+              f"llm=${st['spend']['llm_usd']:.2f} compute=${st['spend']['compute_usd']:.2f}")
     return 0
 
 
@@ -425,7 +425,7 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--budget-usd", type=float)
     r.add_argument("--budget-hours", type=float)
     r.add_argument("--budget-iterations", type=int)
-    r.add_argument("--budget-modal-usd", type=float)
+    r.add_argument("--budget-compute-usd", type=float)
     r.add_argument("--resume")
     r.add_argument("--yes", action="store_true")
     r.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)

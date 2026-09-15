@@ -43,7 +43,7 @@ Run per job. Prompts interactively for anything not given as a flag:
   first entry in the job's tacit knowledge.
 - `--mode {single-shot,agentic}` — overrides the configured mode for this run; `agentic`
   is only valid for a CLI provider.
-- `--budget-usd`, `--budget-hours`, `--budget-iterations`, `--budget-modal-usd` — see
+- `--budget-usd`, `--budget-hours`, `--budget-iterations`, `--budget-compute-usd` — see
   Budget below.
 - `--resume <job_id>` — reloads `runs/<job_id>/job.json` and `state.json` and continues a
   job that was interrupted, cancelled, or failed.
@@ -110,11 +110,11 @@ instead.
 ## Budget
 
 At least one of `--budget-usd`, `--budget-hours`, or `--budget-iterations` must be set
-(directly, or through the wizard); zero is a valid, real cap, not "unset". Modal spend is
-always capped separately in dollars — `--budget-modal-usd`, defaulting to $20 when `--yes`
-is passed without it — and is checked before every Modal call regardless of the other
+(directly, or through the wizard); zero is a valid, real cap, not "unset". Compute spend is
+always capped separately in dollars — `--budget-compute-usd`, defaulting to $20 when `--yes`
+is passed without it — and is checked before every compute call regardless of the other
 dimensions. The wall-clock budget (`--budget-hours`) counts elapsed time from the job's
-start, including time spent resumed. Modal spend shown in status lines and the final
+start, including time spent resumed. Compute spend shown in status lines and the final
 report is an **estimate**, computed from measured container seconds times list prices in
 a table shipped with Talos — not a billed amount.
 

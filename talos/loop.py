@@ -42,8 +42,8 @@ class _BudgetedBench:
     """The bench, with the loop's budget check and cost accounting around every call.
 
     resolve_baseline makes one compile and two scoring runs of its own, and on a cold cache
-    those are the most expensive Modal calls of the whole job. Handing it the raw bench let a
-    baseline run to completion with --budget-modal-usd 0, and charged its cost only after the
+    those are the most expensive compute calls of the whole job. Handing it the raw bench let a
+    baseline run to completion with --budget-compute-usd 0, and charged its cost only after the
     last call had already happened."""
 
     def __init__(self, loop: "Loop"):
@@ -57,7 +57,7 @@ class _BudgetedBench:
         try:
             return call()
         finally:
-            loop.state.spend.modal_usd += self._bench.cost_usd_since(mark)
+            loop.state.spend.compute_usd += self._bench.cost_usd_since(mark)
             loop._save()
 
     def compile(self, challenge: str, files: dict[str, str]):
@@ -107,7 +107,7 @@ class Loop:
         """count_iterations=False exempts a held-out confirmation from the iterations cap: the
         candidate has already been scored and made best, and aborting the confirmation would
         strand the job at "confirming" with a proven win it can never record. Every spend
-        dimension (usd, hours, modal_usd) still applies."""
+        dimension (usd, hours, compute_usd) still applies."""
         budget = self.spec.budget if count_iterations else replace(self.spec.budget,
                                                                    iterations=None)
         dim = exhausted(budget, self.state.spend, self.clock())
@@ -142,7 +142,7 @@ class Loop:
         self._check_budget()
         mark = self.bench.cost_mark()
         r = self.bench.compile(self.spec.challenge, files)
-        self.state.spend.modal_usd += self.bench.cost_usd_since(mark)
+        self.state.spend.compute_usd += self.bench.cost_usd_since(mark)
         self._save()
         return r
 
@@ -150,7 +150,7 @@ class Loop:
         self._check_budget(count_iterations)
         mark = self.bench.cost_mark()
         r = self.bench.score(self.spec.challenge, artifact_id, nonce_sets, self.spec.fuel)
-        self.state.spend.modal_usd += self.bench.cost_usd_since(mark)
+        self.state.spend.compute_usd += self.bench.cost_usd_since(mark)
         self._save()
         return r
 

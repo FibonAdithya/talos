@@ -10,7 +10,7 @@ from talos.types import NonceSet
 def spec():
     return JobSpec(job_id="j1", challenge="knapsack", direction="try tabu", provider="fake",
                    model="m", mode="single-shot",
-                   budget=Budget(usd=1.0, hours=None, iterations=None, modal_usd=None),
+                   budget=Budget(usd=1.0, hours=None, iterations=None, compute_usd=None),
                    rand_hash="ab" * 32, tracks=["n=1"],
                    training=[NonceSet("n=1", "ab" * 32, 0, 2)],
                    holdout=[NonceSet("n=1", "ab" * 32, 1_000_000, 2)],

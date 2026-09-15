@@ -20,7 +20,7 @@ BASE_FILES = {"mod.rs": "fn solve() { let k = 1; }\n"}
 def spec(budget=None):
     return JobSpec(job_id="j", challenge="knapsack", direction="go", provider="fake", model="m",
                    mode="single-shot",
-                   budget=budget or Budget(usd=None, hours=None, iterations=20, modal_usd=None),
+                   budget=budget or Budget(usd=None, hours=None, iterations=20, compute_usd=None),
                    rand_hash=HASH, tracks=["t"], training=TR, holdout=HO, fuel=1, created_at=0.0,
                    monorepo_ref="r", challenge_id="c003")
 
@@ -92,7 +92,7 @@ def test_false_positive_returns_to_research(tmp_path):
         if ns.start >= 1_000_000:
             return [100 for _ in ns.nonces()]  # held-out never improves
         return [100 + k - 1 for _ in ns.nonces()]
-    b = Budget(usd=None, hours=None, iterations=2, modal_usd=None)
+    b = Budget(usd=None, hours=None, iterations=2, compute_usd=None)
     # iteration 2 edits the iteration-1 best (k=5), so its SEARCH text is `let k = 5;`
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5), hyp("b"), edit(6, frm=5)], scores, b)
     st = loop.run()
@@ -123,7 +123,7 @@ def test_compile_fix_rounds_then_skip(tmp_path):
 def test_budget_stops_before_llm_call(tmp_path):
     # mutation: checking the budget only between iterations lets a half-iteration overspend
     # (the compile here must be refused, not run)
-    b = Budget(usd=0.015, hours=None, iterations=None, modal_usd=None)  # one fake call = 0.01
+    b = Budget(usd=0.015, hours=None, iterations=None, compute_usd=None)  # one fake call = 0.01
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(2), hyp("b"), edit(3)], budget=b)
     st = loop.run()
     assert st.status == "exhausted" and st.stop_reason == "usd"
@@ -141,7 +141,7 @@ def test_over_error_ceiling_is_failed_runtime(tmp_path):
             return [100 for _ in ns.nonces()]
         return [None if n % 2 else 100 + k for n in ns.nonces()]  # half the nonces error out
 
-    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(9)], scores, b)
     st = loop.run()
     assert st.hypotheses[0]["outcome"] == "failed:runtime" and st.best is None
@@ -156,7 +156,7 @@ def test_stagnation_recall_distill_reset(tmp_path):
     for i in range(6):
         script += [hyp(f"h{i}"), edit(1)]
     script.insert(6, "LESSON: constants are not the answer.")  # distill call after 3rd failure
-    b = Budget(usd=None, hours=None, iterations=6, modal_usd=None)
+    b = Budget(usd=None, hours=None, iterations=6, compute_usd=None)
     loop, fp, fb, store = make(tmp_path, script, budget=b,
                                thresholds=Thresholds(recall=2, distill=3, reset=5))
     st = loop.run()
@@ -271,7 +271,7 @@ def test_resume_finishes_a_pending_confirmation(tmp_path):
 
 def test_holdout_scoring_error_is_a_false_positive(tmp_path):
     # mutation: letting ScoringError escape _confirm strands the job at "confirming"
-    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
     # the baseline holds 3 held-out nonces but the run scores 4 -> bundle_delta cannot pair them
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b, holdout_n=3)
     st = loop.run()
@@ -301,7 +301,7 @@ def test_recall_starts_exactly_at_threshold(tmp_path):
     script = []
     for i in range(3):
         script += [hyp(f"h{i}"), edit(1)]
-    b = Budget(usd=None, hours=None, iterations=3, modal_usd=None)
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
     loop, fp, fb, store = make(tmp_path, script, budget=b,
                                thresholds=Thresholds(recall=2, distill=99, reset=99))
     loop.run()
@@ -336,7 +336,7 @@ def test_confirm_still_honours_the_time_cap(tmp_path):
     # the held-out confirmation is exempt from the ITERATIONS cap only (its iteration is already
     # counted); every spend dimension still bites.
     # mutation: exempting confirmation from every budget dimension lets it run past a hard cap
-    b = Budget(usd=None, hours=1.0, iterations=None, modal_usd=None)
+    b = Budget(usd=None, hours=1.0, iterations=None, compute_usd=None)
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
     loop.clock = lambda: 7200.0 if fb.score_calls >= 1 else 0.0  # cap passes after training
     st = loop.run()
@@ -351,7 +351,7 @@ def test_rejected_edit_paths_fail_the_iteration(tmp_path):
     # mutation: dropping the edits_rejected event hides an LLM trying to write outside the
     # algorithm's own files
     stray = "<<<<<<< SEARCH Cargo.toml\nfoo\n=======\nbar\n>>>>>>> REPLACE\n" + edit(5)
-    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
     loop, fp, fb, store = make(tmp_path, [hyp("a"), stray], budget=b)
     st = loop.run()
     assert st.status == "exhausted" and st.best is None
@@ -366,7 +366,7 @@ def test_rejected_edit_paths_fail_the_iteration(tmp_path):
 def test_baseline_is_budget_checked_before_the_first_modal_call(tmp_path):
     # mutation: an unchecked baseline spends the whole Modal budget before the first check —
     # resolve_baseline makes one compile and two scoring runs of its own
-    b = Budget(usd=None, hours=None, iterations=20, modal_usd=0.0)
+    b = Budget(usd=None, hours=None, iterations=20, compute_usd=0.0)
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
     loop.state.baseline = None
     calls_before = fb.compile_calls
@@ -376,7 +376,7 @@ def test_baseline_is_budget_checked_before_the_first_modal_call(tmp_path):
         fetch_template=lambda ch: "pub fn solve_challenge(")
     with pytest.raises(BudgetExhausted) as ei:
         loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
-    assert ei.value.dimension == "modal_usd"
+    assert ei.value.dimension == "compute_usd"
     assert fb.compile_calls == calls_before  # nothing was compiled
     assert not (tmp_path / "cache").exists()
 
@@ -384,7 +384,7 @@ def test_baseline_is_budget_checked_before_the_first_modal_call(tmp_path):
 def test_baseline_modal_cost_is_charged_per_call(tmp_path):
     # mutation: accounting for the baseline's Modal cost only after resolve_baseline returns
     # lets a cold baseline run past the cap and charges it when it is too late to matter
-    b = Budget(usd=None, hours=None, iterations=20, modal_usd=0.015)  # one scored nonce = 0.01
+    b = Budget(usd=None, hours=None, iterations=20, compute_usd=0.015)  # one scored nonce = 0.01
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
     loop.state.baseline = None
     mainnet = types.SimpleNamespace(
@@ -394,8 +394,8 @@ def test_baseline_modal_cost_is_charged_per_call(tmp_path):
     with pytest.raises(BudgetExhausted):
         loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
     # the compile and the training scoring run charged before the next call was refused
-    assert loop.state.spend.modal_usd > 0.0
-    assert json.loads((tmp_path / "state.json").read_text())["spend"]["modal_usd"] > 0.0
+    assert loop.state.spend.compute_usd > 0.0
+    assert json.loads((tmp_path / "state.json").read_text())["spend"]["compute_usd"] > 0.0
 
 
 def test_baseline_and_best_dirs_are_written(tmp_path):
@@ -426,7 +426,7 @@ def test_repair_round_keeps_the_blocks_already_applied(tmp_path):
     # doesn't match", so the iteration must go on with the block that DID apply.
     # mutation: replacing the outcome with the repair round's own outcome resets `applied` to 0
     # and fails the iteration as "no edit block applied" although one block was applied
-    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5) + NEVER_MATCHES, NEVER_MATCHES],
                                budget=b)
     st = loop.run()
@@ -438,7 +438,7 @@ def test_rejected_path_survives_a_repair_round(tmp_path):
     # spec §9: the out-of-scope block in the FIRST response must still fail the iteration when a
     # miss in the same response sends the loop through a repair round.
     # mutation: taking `rejected` from the repair round's outcome alone forgets the stray block
-    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
     loop, fp, fb, store = make(tmp_path, [hyp("a"), STRAY + edit(5) + NEVER_MATCHES, NEVER_MATCHES],
                                budget=b)
     st = loop.run()
@@ -454,7 +454,7 @@ def test_compile_fix_rejects_out_of_scope_edits(tmp_path):
     def swap(frm, to):
         return f"<<<<<<< SEARCH mod.rs\nlet k = {frm};\n=======\nlet k = {to};\n>>>>>>> REPLACE\n"
 
-    b = Budget(usd=None, hours=None, iterations=1, modal_usd=None)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
     loop, fp, fb, store = make(tmp_path, [hyp("a"), swap(1, "BUG"), STRAY + swap("BUG", 5)],
                                budget=b)
     fb._compile_ok = lambda files: "BUG" not in files["mod.rs"]
@@ -468,7 +468,7 @@ def test_compile_fix_rejects_out_of_scope_edits(tmp_path):
 
 def _pending_confirmation(tmp_path, status, training_quality=104):
     store = JobStore(tmp_path)
-    store.write_spec(spec(Budget(usd=None, hours=None, iterations=1, modal_usd=None)))
+    store.write_spec(spec(Budget(usd=None, hours=None, iterations=1, compute_usd=None)))
     fb = FakeBench(quality_from_files)
     files = {"mod.rs": "fn solve() { let k = 5; }\n"}
     art = fb.compile("knapsack", files).artifact_id
