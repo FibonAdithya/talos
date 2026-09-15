@@ -74,6 +74,9 @@ class C3Bench:
             # any other CLI failure, not traceback out of evaluate into "job failed".
             raise C3CommandError(f"c3 {args[0]} could not be run: "
                                  f"{_redact(str(e))[:200]}") from None
+        except subprocess.TimeoutExpired:
+            # Not an OSError. A CLI call that hangs past its timeout is a CLI failure too.
+            raise C3CommandError(f"c3 {args[0]} timed out after {timeout}s") from None
         if r.returncode != 0:
             raise C3CommandError(f"c3 {args[0]} failed ({r.returncode}): "
                                  f"{_redact((r.stderr or r.stdout)[-500:])}")

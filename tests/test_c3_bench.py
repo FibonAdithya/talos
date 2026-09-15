@@ -387,3 +387,17 @@ def test_a_missing_c3_binary_pauses_the_run_instead_of_tracebacking(tmp_path):
     # mutation: letting OSError escape _c3 crashes evaluate into execute_job's blanket handler,
     # which marks the whole job failed instead of pausing it for a resume
     assert "deploy" in str(ei.value)
+
+
+def test_a_hung_c3_call_pauses_the_run_instead_of_tracebacking(tmp_path):
+    import subprocess
+
+    def run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+    b, _ = bench(tmp_path, run)
+    with pytest.raises(BenchUnavailable) as ei:
+        b.evaluate(req())
+    # mutation: TimeoutExpired is not an OSError, so catching OSError alone in _c3 lets a
+    # `c3 deploy` that hangs past its timeout escape evaluate into execute_job's blanket
+    # handler, which marks the whole job failed instead of pausing it for a resume
+    assert "deploy" in str(ei.value) and "timed out" in str(ei.value)
