@@ -36,6 +36,11 @@ checks the Hub tag before the baseline is measured and fails with a mirror hint 
 missing. Maintainers can point at a test mirror instead of the real one with
 `TALOS_IMAGE_NAMESPACE`.
 
+The mirror script needs `talos` importable, which the system `python3` does not have: from
+a fresh shell run `make mirror-images PYTHON=.venv/bin/python`, or activate the venv first
+and run plain `make mirror-images` (`Makefile`'s `PYTHON ?= python3` otherwise picks the
+system interpreter and fails with "No module named talos").
+
 ## Install
 
 ```bash
@@ -138,9 +143,10 @@ outcomes), `evidence_draft.md` (a partially filled-in TIG advance-evidence templ
 On the C3 backend, each job also gets `runs/<job_id>/c3/<n>/` (and
 `runs/<job_id>/c3/baseline/` for the baseline measurement): the files C3 generates and
 uploads for that job — a .c3 config, a job.sh entrypoint, a payload.json, and copies of
-the modules the container needs — plus the pulled artifacts under
-`<job_id>/artifacts/`. The payload carries the job's rand hash and is uploaded to C3's
-workspace store as part of the job directory.
+the modules the container needs — plus the pulled artifacts, which land under
+`runs/<job_id>/c3/<n>/<c3-job-id>/artifacts/`, where `<c3-job-id>` is C3's own job id from
+`c3 deploy`, distinct from the Talos `<job_id>`. The payload carries the job's rand hash
+and is uploaded to C3's workspace store as part of the job directory.
 
 The measured baseline is cached separately from the run directory, keyed by challenge,
 monorepo ref, algorithm, nonce sets, fuel, and hardware class: real runs share
