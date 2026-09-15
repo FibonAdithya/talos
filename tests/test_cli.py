@@ -7,7 +7,8 @@ import types
 import pytest
 
 from talos import cli
-from talos.bench import EvalResult
+from talos.bench import BenchCancelled, EvalResult
+from talos.challenges import DEV_IMAGE_TAG
 from talos.config import Config, ConfigError, load, resolve_api_key, save
 from talos.mainnet import MainnetError
 from talos.types import CompileResult
@@ -564,14 +565,16 @@ def test_deploy_bench_failure_never_quotes_the_token_secret():
     assert "app deploy failed" in str(excinfo.value)
 
 
-def _c3_runner(whoami_rc=0, balance="  Credit balance: £9.89\n"):
+def _c3_runner(whoami_rc=0, balance="  Credit balance: £9.89\n", balance_rc=0):
     def run(cmd, **kw):
         if cmd[:2] == ["c3", "whoami"]:
             return types.SimpleNamespace(
                 returncode=whoami_rc, stdout="Access approved" if whoami_rc == 0 else "",
                 stderr="" if whoami_rc == 0 else "Your C3 session has expired")
         if cmd[:2] == ["c3", "balance"]:
-            return types.SimpleNamespace(returncode=0, stdout=balance, stderr="")
+            return types.SimpleNamespace(returncode=balance_rc,
+                                         stdout="" if balance_rc else balance,
+                                         stderr="c3: request failed" if balance_rc else "")
         raise AssertionError(cmd)
     return run
 
@@ -617,6 +620,10 @@ def test_check_c3_parses_the_balance_and_warns_when_low(capsys):
     assert cli.check_c3(run=_c3_runner(balance="Credit balance: £0.40\n")) == 0.40
     # mutation: dropping the warning lets a run start on 40p and pause at the first job
     assert "low" in capsys.readouterr().err.lower()
+    assert cli.check_c3(run=_c3_runner(balance_rc=1)) == 0.0
+    err = capsys.readouterr().err
+    # mutation: reporting an unreadable balance as "£0.00 is low" invents a number `c3` never gave
+    assert "could not read" in err and "low" not in err.lower()
     with pytest.raises(ConfigError):
         cli.check_c3(run=_c3_runner(whoami_rc=1))
 
@@ -628,14 +635,19 @@ def test_config_without_backend_loads_as_modal(tmp_path):
     assert load(tmp_path).backend == "modal"
 
 
-def test_image_available_hits_the_hub_tag_endpoint():
+def test_image_available_hits_the_hub_tag_endpoint(monkeypatch):
+    monkeypatch.delenv("TALOS_IMAGE_NAMESPACE", raising=False)
     seen = {}
 
     def fetch(url):
         seen["url"] = url
-        return 200 if "tig-knapsack-dev/tags/" in url else 404
+        # the tag-list endpoint (no tag) answers 200 for any repo that exists at all
+        return 200 if url.endswith(f"tig-knapsack-dev/tags/{DEV_IMAGE_TAG}") else 404
     assert cli.image_available("knapsack", fetch=fetch) is True
     assert "hub.docker.com/v2/repositories/fibonadithya/tig-knapsack-dev/tags/" in seen["url"]
+    # mutation: dropping the tag from the URL degrades the check to "the repo exists", so a
+    # DEV_IMAGE_TAG bump with no re-mirror pays for a job that dies at the pull
+    assert seen["url"].endswith(f"/tags/{DEV_IMAGE_TAG}")
     assert cli.image_available("hypergraph", fetch=fetch) is False
 
 
@@ -644,6 +656,9 @@ def test_run_c3_refuses_a_missing_image_before_the_baseline(tmp_path, monkeypatc
     save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
                           backend="c3"), None)
     monkeypatch.setattr(cli, "image_available", lambda ch, fetch=None: False)
+    # the bench is stubbed as well as the check: the check is what is under test, so the test
+    # must not depend on it to stay off a real, billable C3 job
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: _refuse_bench("baseline reached"))
     fake_info = type("I", (), {"id": "c003", "name": "knapsack", "is_gpu": False,
                                "tracks": ["n=1"], "max_fuel": 7})()
     monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: fake_info)
@@ -652,6 +667,10 @@ def test_run_c3_refuses_a_missing_image_before_the_baseline(tmp_path, monkeypatc
     err = capsys.readouterr().err
     # mutation: checking the image after the baseline pays for a job that fails at the pull
     assert rc == 1 and "mirror_images" in err and "tig-knapsack-dev" in err
+    st = json.loads(next((tmp_path / "runs").glob("*/state.json")).read_text())
+    # mutation: returning without recording the outcome leaves `talos status` listing the run
+    # as live for ever, with no reason
+    assert st["status"] == "failed" and st["stop_reason"] == "dev image not mirrored"
 
 
 def test_compile_backend_resolution_order(tmp_path, monkeypatch):
@@ -733,3 +752,104 @@ def test_a_cancelled_baseline_is_not_a_failed_run(tmp_path, monkeypatch, capsys)
     st = json.loads((run_dir / "state.json").read_text())
     assert st["status"] == "cancelled" and "job_x" in st["stop_reason"]
     assert "Status: cancelled" in capsys.readouterr().out
+
+
+class _RefusingBench:
+    """A bench that fails the test instead of reaching a backend: no test may submit a job."""
+
+    def __init__(self, why):
+        self._why = why
+
+    def evaluate(self, request):
+        raise AssertionError(self._why)
+
+    def request_stop(self):
+        pass
+
+    def cost_mark(self):
+        return 0.0
+
+    def cost_usd_since(self, mark):
+        return 0.0
+
+
+def _refuse_bench(why):
+    return _RefusingBench(why)
+
+
+def _stub_mainnet(monkeypatch):
+    """Everything resolve_baseline reads from mainnet, so a test never hits the network."""
+    monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("fake_base", 1))
+    monkeypatch.setattr("talos.mainnet.fetch_template", lambda ch: "pub fn solve_challenge(")
+    monkeypatch.setattr("talos.mainnet.fetch_algorithm_files",
+                        lambda ch, name: {"mod.rs": "fn solve() {}\n"})
+
+
+def test_execute_job_exports_the_c3_backend_it_actually_runs_on(tmp_path, monkeypatch):
+    # mutation: hardcoding "modal" in the export (or reading anything but cfg.backend) sends
+    # every `talos compile` from the agentic sandbox to Modal on a C3 run
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TALOS_BACKEND", raising=False)
+    save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
+                          backend="c3"), None)
+    monkeypatch.setattr(cli, "image_available", lambda ch, fetch=None: True)
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    _stub_mainnet(monkeypatch)
+    seen = {}
+
+    class B(_RefusingBench):
+        def evaluate(self, request):
+            seen["backend"] = os.environ.get("TALOS_BACKEND")
+            raise BenchCancelled("stop")  # nothing runs past the baseline
+
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: B("unreachable"))
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "1", "--yes"])
+    assert rc == 1 and seen["backend"] == "c3"
+
+
+def test_setup_rejects_an_unknown_backend(tmp_path, monkeypatch, capsys):
+    # mutation: accepting any answer writes a config whose first run cannot pick a bench at all
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
+    assert cli.main(["setup"], ask=scripted(["aws"])) == 2
+    assert "unknown backend 'aws'" in capsys.readouterr().err
+    assert not (tmp_path / "talos.config.json").exists()
+
+
+def test_run_refuses_a_config_naming_an_unknown_backend(tmp_path, monkeypatch, capsys):
+    # mutation: leaving a hand-edited backend to make_bench raises ConfigError from inside
+    # execute_job, past every early return, so `talos run` tracebacks instead of reporting
+    monkeypatch.chdir(tmp_path)
+    save(tmp_path, Config(provider="fake", model="fake", mode="single-shot", api_base=None,
+                          backend="aws"), None)
+    monkeypatch.setattr(cli, "execute_job", lambda *a, **k: _refuse_bench("started").evaluate(None))
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "1", "--yes"])
+    assert rc == 2 and "unknown backend 'aws'" in capsys.readouterr().err
+
+
+def test_compile_rejects_an_unknown_challenge(tmp_path, monkeypatch, capsys):
+    # mutation: indexing CHALLENGES with an unvalidated name tracebacks in the agent's sandbox
+    # instead of printing a message and exiting 2
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "algorithm").mkdir()
+    (tmp_path / "algorithm" / "mod.rs").write_text("fn solve() {}\n")
+    monkeypatch.setattr(cli, "make_bench",
+                        lambda *a, **k: _refuse_bench("bench built for an unknown challenge"))
+    assert cli.main(["compile", "--challenge", "knapsak"]) == 2
+    assert "unknown challenge 'knapsak'" in capsys.readouterr().err
+
+
+def test_compile_refuses_an_unknown_backend(tmp_path, monkeypatch, capsys):
+    # mutation: a stale TALOS_BACKEND in the sandbox env raises ConfigError out of cmd_compile
+    # and the agent sees a traceback instead of exit code 2
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "algorithm").mkdir()
+    (tmp_path / "algorithm" / "mod.rs").write_text("fn solve() {}\n")
+    monkeypatch.setenv("TALOS_BACKEND", "aws")
+    monkeypatch.setattr(cli, "make_bench",
+                        lambda *a, **k: _refuse_bench("bench built for an unknown backend"))
+    assert cli.main(["compile", "--challenge", "knapsack"]) == 2
+    assert "unknown backend 'aws'" in capsys.readouterr().err

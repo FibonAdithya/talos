@@ -69,7 +69,12 @@ def check_c3(run=None) -> float:
                           f"run `c3 login` and retry")
     r = run(["c3", "balance"], capture_output=True, text=True)
     m = re.search(r"Credit balance:\s*£([0-9.]+)", r.stdout or "")
-    balance = float(m.group(1)) if m else 0.0
+    if r.returncode != 0 or not m:
+        # "£0.00 is low" would be a number the CLI never reported. Say what happened instead.
+        print(f"warning: could not read the C3 balance: "
+              f"{(r.stderr or r.stdout or '')[-200:].strip()}", file=sys.stderr)
+        return 0.0
+    balance = float(m.group(1))
     if balance < 1.0:
         print(f"warning: C3 credit balance is low (£{balance:.2f}); run `c3 topup`",
               file=sys.stderr)
@@ -284,6 +289,10 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         # Before the baseline, not after: C3 pulls the image at job start, so a missing mirror
         # costs a whole job (and its queue wait) to report a pull failure.
         if cfg.backend == "c3" and not image_available(spec.challenge):
+            # A run that stops here is over: left at its initial status `talos status` would
+            # list it as live for ever, with no reason recorded.
+            state.status, state.stop_reason = "failed", "dev image not mirrored"
+            store.save(state)
             print(f"image {c3_image(spec.challenge)} is not on Docker Hub (or Hub is "
                   f"unreachable): {MIRROR_HINT}", file=sys.stderr)
             return 1
@@ -354,6 +363,12 @@ def cmd_run(args, ask) -> int:
         except ConfigError as e:
             print(str(e), file=sys.stderr)
             return 2
+    # A backend that reached the config by hand would otherwise raise out of make_bench, which
+    # sits past every early return in execute_job: a traceback rather than a message.
+    if cfg.backend not in BACKENDS:
+        print(f"unknown backend {cfg.backend!r} in talos.config.json; run `talos setup`",
+              file=sys.stderr)
+        return 2
     if args.resume:
         run_dir = root / "runs" / args.resume
         # A run that was refused before its first save (a bad credential, say) has job.json but
@@ -482,21 +497,24 @@ def cmd_run(args, ask) -> int:
 def compile_backend(args, root: Path) -> str:
     """--backend, then TALOS_BACKEND (exported by execute_job for the agentic sandbox, whose
     worktree has no config file), then the config in `root`, then modal."""
-    if getattr(args, "backend", None):
-        return args.backend
-    env = os.environ.get("TALOS_BACKEND")
-    if env:
-        return env
-    try:
-        return load(root).backend
-    except ConfigError:
-        return "modal"
+    backend = getattr(args, "backend", None) or os.environ.get("TALOS_BACKEND")
+    if not backend:
+        try:
+            backend = load(root).backend
+        except ConfigError:
+            return "modal"
+    if backend not in BACKENDS:
+        raise ConfigError(f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}")
+    return backend
 
 
 def cmd_compile(args, ask) -> int:
     """Compile only: no nonce is scored. On C3 the job dir is the fixed `.talos/compile/c3/adhoc`,
     which every run rewrites, so two `talos compile` runs at once in one directory are
     unsupported."""
+    if args.challenge not in CHALLENGES:
+        print(f"unknown challenge {args.challenge!r}", file=sys.stderr)
+        return 2
     d = Path(args.dir)
     files = ({str(p.relative_to(d)): p.read_text() for p in d.rglob("*")
               if p.is_file() and p.suffix in (".rs", ".cu")} if d.is_dir() else {})
@@ -506,7 +524,11 @@ def cmd_compile(args, ask) -> int:
         print(f"no .rs/.cu files under {d}", file=sys.stderr)
         return 2
     from talos.bench import EvalRequest, PendingJobStore
-    backend = compile_backend(args, Path.cwd())
+    try:
+        backend = compile_backend(args, Path.cwd())
+    except ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     bench = make_bench(backend, Path.cwd() / ".talos" / "compile", PendingJobStore.memory())
     r = bench.evaluate(EvalRequest(args.challenge, files, [], [], 0, None,
                                    CHALLENGES[args.challenge].beat)).compile
