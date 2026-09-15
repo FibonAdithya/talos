@@ -66,22 +66,33 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
 
     log(f"[0s] challenge={challenge} files={sorted(payload['files'])} "
         f"workers={payload['workers']}")
-    inside.stage_algorithm(monorepo, challenge, payload["files"], inside.ALGO_NAME)
-    log(f"[{int(clock() - t0)}s] build start")
-    ok, build_out = inside.build(monorepo, challenge, inside.ALGO_NAME, run=run)
+    try:
+        inside.stage_algorithm(monorepo, challenge, payload["files"], inside.ALGO_NAME)
+        log(f"[{int(clock() - t0)}s] build start")
+        ok, build_out = inside.build(monorepo, challenge, inside.ALGO_NAME, run=run)
+    except Exception as e:
+        # An application-level failure (e.g. a malformed relative path from an LLM-authored
+        # file map) is a result, not a crash: raising here would exit non-zero and lose every
+        # result, including the compile-only one this job could still report.
+        build_out = f"staging failed: {e}"
+        (art / "build.log").write_text(build_out)
+        out["compile"] = {"ok": False, "artifact_id": None, "output": build_out}
+        _atomic(results, out)
+        log(f"[{int(clock() - t0)}s] staging/build raised: {e}")
+        return 0
     (art / "build.log").write_text(build_out)
     so, ptx = inside.artifact_paths(monorepo, challenge, inside.ALGO_NAME)
     log(f"[{int(clock() - t0)}s] build ok={ok} so={so.exists()}")
     if not ok or not so.exists():
         out["compile"] = {"ok": False, "artifact_id": None,
-                          "output": build_out[-20000:]
+                          "output": build_out
                           + ("" if so.exists() else f"\nbuild produced no .so at {so}")}
         _atomic(results, out)
         return 0  # a compile error is a result, not a job failure
     out["compile"] = {"ok": True, "output": build_out[-4000:],
                       "artifact_id": inside.content_hash(payload["files"],
                                                          payload["monorepo_ref"],
-                                                         payload.get("dev_image_tag", ""))}
+                                                         payload["dev_image_tag"])}
     _atomic(results, out)
 
     def scored(key):

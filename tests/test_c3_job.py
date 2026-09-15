@@ -95,7 +95,36 @@ def test_no_baseline_forces_holdout(tmp_path):
     c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(quality=5), monorepo=mono,
                 log=lambda *a: None)
     r = json.loads((art / "results.json").read_text())
-    assert r["holdout_reason"] == "forced" and len(r["holdout"]) == 2
+    # mutation: treating a null baseline as a loss (skipping held-out) leaves the baseline
+    # measurement with nothing to record
+    assert r["holdout_reason"] == "forced"
+    assert [x["nonce"] for x in r["holdout"]] == [1_000_000, 1_000_001]
+    assert [x["quality"] for x in r["holdout"]] == [5, 5]
+    assert r["started"] == {"training": True, "holdout": True}
+
+
+def test_staging_error_is_a_compile_failure_not_a_crash(tmp_path):
+    mono = tmp_path / "mono"
+    (mono / "tig-algorithms" / "src" / "knapsack").mkdir(parents=True)
+    (mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs").write_text("// c003\n")
+    base = [NonceResult("t", i, True, 100, 1) for i in range(2)]
+    req = EvalRequest("knapsack", {"../evil.rs": "x"}, [NonceSet("t", HASH, 0, 2)],
+                      [NonceSet("t", HASH, 1_000_000, 2)], 7, base, CHALLENGES["knapsack"].beat)
+    work = write_job_dir(tmp_path / "work", req, "1")
+    art = tmp_path / "art"
+    art.mkdir()
+    # mutation: an uncaught ValueError from stage_algorithm's path check crashes the job and
+    # loses even the compile-only result instead of reporting a deterministic failure
+    rc = c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(), monorepo=mono,
+                     log=lambda *a: None)
+    assert rc == 0
+    r = json.loads((art / "results.json").read_text())
+    assert r["compile"]["ok"] is False
+    assert "escapes algorithm dir" in r["compile"]["output"]
+    assert r["training"] == [] and r["holdout"] is None
+    assert r["holdout_reason"] == "not_compiled"
+    assert r["started"] == {"training": False, "holdout": False}
+    assert (art / "build.log").exists()
 
 
 def test_results_are_written_after_every_nonce(tmp_path):
