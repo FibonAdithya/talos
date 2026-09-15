@@ -342,3 +342,48 @@ def test_fill_timeouts_orders_by_track_and_nonce():
     # mutation: appending real rows before filled timeouts (instead of walking the nonce
     # range in order) would put nonce 1 first instead of in its slot
     assert [(r.nonce, r.error) for r in out] == [(0, "timeout"), (1, None), (2, "timeout")]
+
+
+def _terminal_without_results(tmp_path, terminal, total_deploys):
+    """Two evaluates against a bench whose job reaches `terminal` with no results.json."""
+    c3 = FakeC3(["RUNNING", terminal], results=None)
+    pending = PendingJobStore.memory()
+    pending.set({"purpose": "3", "hypothesis": {"idea": "swap the pivot"}})
+    b, _ = bench(tmp_path, c3, pending=pending)
+    with pytest.raises(BenchUnavailable):
+        b.evaluate(req())
+    rec = pending.get()
+    # mutation: keeping the reattach keys makes every `talos run --resume` reattach to a job
+    # that is already terminal, find no artifacts and pause again without deploying anything
+    assert not {"job_id", "request_hash", "job_dir"} & set(rec)
+    # mutation: clearing the whole record loses the iteration, spending a fresh hypothesis
+    assert rec["purpose"] == "3" and rec["hypothesis"] == {"idea": "swap the pivot"}
+    with pytest.raises(BenchUnavailable):
+        b.evaluate(req())
+    assert len([c for (c, _) in c3.calls if c[1] == "deploy"]) == total_deploys
+    return rec
+
+
+def test_a_timed_out_job_without_results_is_forgotten_so_a_resume_redeploys(tmp_path):
+    _terminal_without_results(tmp_path, "TIMED_OUT", total_deploys=2)
+
+
+def test_a_succeeded_job_without_results_is_forgotten_so_a_resume_redeploys(tmp_path):
+    _terminal_without_results(tmp_path, "SUCCEEDED", total_deploys=2)
+
+
+def test_a_job_that_failed_twice_leaves_no_job_id_on_record(tmp_path):
+    # FAILED is resubmitted once inside each evaluate, so two evaluates deploy four times
+    rec = _terminal_without_results(tmp_path, "FAILED", total_deploys=4)
+    assert "job_id" not in rec
+
+
+def test_a_missing_c3_binary_pauses_the_run_instead_of_tracebacking(tmp_path):
+    def run(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "c3")
+    b, _ = bench(tmp_path, run)
+    with pytest.raises(BenchUnavailable) as ei:
+        b.evaluate(req())
+    # mutation: letting OSError escape _c3 crashes evaluate into execute_job's blanket handler,
+    # which marks the whole job failed instead of pausing it for a resume
+    assert "deploy" in str(ei.value)

@@ -88,3 +88,15 @@ def test_request_hash_tracks_files_and_nonces_only():
     other.files = {"mod.rs": "fn y(){}"}
     assert a != c3_jobdir.request_hash(other)
     assert len(a) == 16 and HASH not in a
+
+
+def test_a_compile_only_request_gets_the_one_nonce_floor_and_empty_sets(tmp_path):
+    r = EvalRequest("knapsack", {"mod.rs": "fn x(){}"}, [], [], 7, None,
+                    CHALLENGES["knapsack"].beat)
+    d = c3_jobdir.write_job_dir(tmp_path / "job", r, "compile")
+    floor = c3_jobdir.hhmmss(c3_jobdir.time_limit_s(1, c3_workers(CHALLENGES["knapsack"])))
+    # mutation: dropping the max(nonces, 1) floor asks C3 for time_limit_s(0, 4) = 00:20:00,
+    # the bare build allowance with no slack at all
+    assert f'time: "{floor}"' in (d / ".c3").read_text() and floor == "00:23:00"
+    p = json.loads((d / "payload.json").read_text())
+    assert p["training"] == [] and p["holdout"] == [] and p["baseline_training"] is None

@@ -615,6 +615,22 @@ def test_setup_c3_fails_when_the_session_has_expired(tmp_path, monkeypatch, caps
     assert not (tmp_path / "talos.config.json").exists()
 
 
+def test_setup_c3_without_the_c3_binary_reports_it_instead_of_tracebacking(tmp_path,
+                                                                           monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+
+    def missing(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "c3")
+    monkeypatch.setattr(cli, "subprocess", types.SimpleNamespace(run=missing))
+    rc = cli.main(["setup"], ask=scripted(["c3", "anthropic", "", "sk-test"]))
+    # mutation: cmd_setup catches ConfigError only, so a FileNotFoundError escaping check_c3
+    # tracebacks out of the wizard and throws away every answer already typed
+    assert rc == 1
+    assert "c3 CLI is not on PATH" in capsys.readouterr().err
+    assert not (tmp_path / "talos.config.json").exists()
+
+
 def test_check_c3_parses_the_balance_and_warns_when_low(capsys):
     assert cli.check_c3(run=_c3_runner()) == 9.89
     assert cli.check_c3(run=_c3_runner(balance="Credit balance: £0.40\n")) == 0.40

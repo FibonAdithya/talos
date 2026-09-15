@@ -62,12 +62,21 @@ def deploy_bench(token_id: str | None, token_secret: str | None, run=subprocess.
 def check_c3(run=None) -> float:
     """Confirms a logged-in `c3` session and returns the credit balance in GBP. `run` is
     resolved at call time so a test can monkeypatch `cli.subprocess`."""
-    run = run or subprocess.run
-    r = run(["c3", "whoami"], capture_output=True, text=True)
+    runner = run or subprocess.run
+
+    def c3(*args: str):
+        try:
+            return runner(["c3", *args], capture_output=True, text=True)
+        except OSError:
+            # FileNotFoundError included. `cmd_setup` catches ConfigError only, so anything
+            # else here tracebacks out of the wizard and throws away every answer typed.
+            raise ConfigError("the c3 CLI is not on PATH; install it and run `c3 login`") from None
+
+    r = c3("whoami")
     if r.returncode != 0:
         raise ConfigError(f"C3 login check failed: {(r.stderr or r.stdout)[-300:].strip()}; "
                           f"run `c3 login` and retry")
-    r = run(["c3", "balance"], capture_output=True, text=True)
+    r = c3("balance")
     m = re.search(r"Credit balance:\s*£([0-9.]+)", r.stdout or "")
     if r.returncode != 0 or not m:
         # "£0.00 is low" would be a number the CLI never reported. Say what happened instead.

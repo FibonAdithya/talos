@@ -31,13 +31,16 @@ def _run_one(task: tuple) -> dict:
 
 
 def _score(payload: dict, sets: list[dict], so: Path, ptx: Path | None, monorepo: Path,
-           run, log, clock, t0: float, on_row) -> None:
+           run, log, clock, t0: float, on_row, pool_factory=None) -> None:
     tasks = [(payload["challenge_id"], ns["track"], ns["rand_hash"], n, str(so), payload["fuel"],
               payload["nonce_timeout_s"], str(ptx) if ptx else None, str(monorepo))
              for ns in sets for n in range(ns["start"], ns["start"] + ns["count"])]
     workers = int(payload.get("workers", 1))
-    if workers > 1 and run is subprocess.run:
-        with multiprocessing.Pool(workers) as pool:
+    # `_run_one` builds its own subprocess calls and ignores the injected runner, so the real
+    # pool is only safe on the real subprocess; an injected pool_factory is a test driving
+    # this branch on purpose.
+    if workers > 1 and (pool_factory is not None or run is subprocess.run):
+        with (pool_factory or multiprocessing.Pool)(workers) as pool:
             rows = pool.imap_unordered(_run_one, tasks)
             for r in rows:
                 on_row(r)
@@ -53,10 +56,13 @@ def _score(payload: dict, sets: list[dict], so: Path, ptx: Path | None, monorepo
 
 
 def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=subprocess.run,
-         monorepo: Path = Path("/app"), log=print, clock=time.monotonic) -> int:
+         monorepo: Path = Path("/app"), log=print, clock=time.monotonic, pool_factory=None) -> int:
     t0 = clock()
     workdir = Path(workdir or os.environ["C3_JOB_WORKDIR"])
     art = Path(artifacts_dir or os.environ["C3_ARTIFACTS_DIR"])
+    # C3 need not have created the artifacts dir. The staging-error branch writes build.log
+    # from inside an `except`, where a second raise would lose the compile-only result.
+    art.mkdir(parents=True, exist_ok=True)
     payload = json.loads((workdir / "payload.json").read_text())
     challenge = payload["challenge"]
     out: dict = {"compile": None, "training": [], "holdout": None,
@@ -93,6 +99,9 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
                       "artifact_id": inside.content_hash(payload["files"],
                                                          payload["monorepo_ref"],
                                                          payload["dev_image_tag"])}
+    # from here on the candidate has compiled: a job cut off mid-training must not still say
+    # "not_compiled". The real decision overwrites this once training finishes.
+    out["holdout_reason"] = "timeout"
     _atomic(results, out)
 
     def scored(key):
@@ -105,7 +114,7 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
     out["started"]["training"] = True
     _atomic(results, out)
     _score(payload, payload["training"], so, ptx, monorepo, run, log, clock, t0,
-           scored("training"))
+           scored("training"), pool_factory)
     tr = [NonceResult.from_dict(r) for r in out["training"]]
     base = ([NonceResult.from_dict(r) for r in payload["baseline_training"]]
             if payload["baseline_training"] is not None else None)
@@ -117,7 +126,7 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
         out["started"]["holdout"] = True
         _atomic(results, out)
         _score(payload, payload["holdout"], so, ptx, monorepo, run, log, clock, t0,
-               scored("holdout"))
+               scored("holdout"), pool_factory)
     _atomic(results, out)
     log(f"[{int(clock() - t0)}s] done")
     return 0

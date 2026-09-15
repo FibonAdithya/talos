@@ -69,6 +69,7 @@ def request_hash(request: EvalRequest) -> str:
 
 
 def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str) -> Path:
+    """Writes the deploy directory, wiping `job_dir` first if it already exists."""
     job_dir = Path(job_dir)
     if job_dir.exists():
         shutil.rmtree(job_dir)

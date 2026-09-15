@@ -149,3 +149,77 @@ def test_log_lines_never_carry_the_rand_hash_or_argv(tmp_path):
     # mutation: logging the runtime command line prints the rand hash into `c3 logs`
     assert lines and all(HASH not in ln and "tig-runtime" not in ln for ln in lines)
     assert any("nonce" in ln for ln in lines)
+
+
+def test_a_job_cut_off_mid_training_does_not_still_claim_not_compiled(tmp_path):
+    mono, work, art = setup(tmp_path, n=2, baseline_q=200)
+    snaps = []
+    inner = fake_run(quality=120)
+
+    def run(cmd, **kw):
+        if cmd[0] == "tig-runtime" and not snaps:
+            snaps.append(json.loads((art / "results.json").read_text()))
+        return inner(cmd, **kw)
+    c3_job.main(workdir=work, artifacts_dir=art, run=run, monorepo=mono, log=lambda *a: None)
+    # mutation: leaving holdout_reason at "not_compiled" once the compile has succeeded makes
+    # a job killed mid-training ship compile.ok=True with "held-out not scored (not_compiled)"
+    assert snaps[0]["compile"]["ok"] is True and snaps[0]["holdout_reason"] == "timeout"
+    # mutation: setting it and never overwriting it turns every finished job into a timeout
+    assert json.loads((art / "results.json").read_text())["holdout_reason"] == "not_won"
+
+
+def test_the_artifacts_dir_is_created_when_c3_did_not_make_it(tmp_path):
+    mono, work, _ = setup(tmp_path)
+    art = tmp_path / "fresh" / "art"
+    # mutation: dropping the mkdir raises FileNotFoundError on the first write_text, and in
+    # the staging-error branch it raises inside the `except`, losing the compile-only result
+    c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(), monorepo=mono,
+                log=lambda *a: None)
+    assert (art / "results.json").exists() and (art / "build.log").exists()
+
+
+class FakePool:
+    """Stands in for `multiprocessing.Pool`; yields the rows back to front so the sort in
+    `main` is what puts results.json in nonce order, not the order the workers finished."""
+
+    def __init__(self, workers):
+        self.workers = workers
+        FakePool.sizes.append(workers)
+
+    sizes: list[int] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def imap_unordered(self, fn, tasks):
+        return [fn(t) for t in reversed(list(tasks))]
+
+
+def test_the_pool_path_passes_run_one_positional_tuples_and_sorts_the_rows(tmp_path,
+                                                                          monkeypatch):
+    from talos import inside
+    mono, work, art = setup(tmp_path, n=2, baseline_q=200)
+    seen = []
+
+    def stub(task):
+        seen.append(task)
+        return {"track": task[1], "nonce": task[3], "ok": True, "quality": 120,
+                "runtime_ms": 5, "error": None}
+    monkeypatch.setattr(c3_job, "_run_one", stub)
+    FakePool.sizes = []
+    c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(), monorepo=mono,
+                log=lambda *a: None, pool_factory=FakePool)
+    assert FakePool.sizes == [4]  # payload["workers"] for a CPU challenge
+    so, _ptx = inside.artifact_paths(mono, "knapsack", inside.ALGO_NAME)
+    # mutation: swapping two positions in the task tuple (say nonce and fuel) sends the wrong
+    # nonce or the wrong fuel to run_nonce, and _run_one unpacks it without noticing
+    assert {t[3]: t for t in seen}[0] == ("c003", "t", HASH, 0, str(so), 7,
+                                          inside.NONCE_TIMEOUT_S, None, str(mono))
+    assert [t[3] for t in seen] == [1, 0]  # the pool really did finish out of order
+    r = json.loads((art / "results.json").read_text())
+    # mutation: dropping the sort in `scored` writes the rows in completion order, and the
+    # loop's nonce-by-nonce comparison against the baseline then lines up the wrong pairs
+    assert [(x["track"], x["nonce"]) for x in r["training"]] == [("t", 0), ("t", 1)]

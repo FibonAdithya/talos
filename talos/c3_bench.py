@@ -66,8 +66,14 @@ class C3Bench:
 
     # ── CLI plumbing ───────────────────────────────────────────────────
     def _c3(self, *args: str, cwd: Path | None = None, timeout: int = 600) -> str:
-        r = self._run(["c3", *args], capture_output=True, text=True, timeout=timeout,
-                      cwd=str(cwd) if cwd else None)
+        try:
+            r = self._run(["c3", *args], capture_output=True, text=True, timeout=timeout,
+                          cwd=str(cwd) if cwd else None)
+        except OSError as e:
+            # FileNotFoundError included: a `c3` that is not on PATH must pause the run like
+            # any other CLI failure, not traceback out of evaluate into "job failed".
+            raise C3CommandError(f"c3 {args[0]} could not be run: "
+                                 f"{_redact(str(e))[:200]}") from None
         if r.returncode != 0:
             raise C3CommandError(f"c3 {args[0]} failed ({r.returncode}): "
                                  f"{_redact((r.stderr or r.stdout)[-500:])}")
@@ -125,6 +131,14 @@ class C3Bench:
                 raise BenchUnavailable(f"no C3 capacity for {profile} in "
                                        f"{self.pending_timeout_s}s; job {job_id} cancelled")
             self._sleep(self.poll_s)
+
+    def _forget_job(self) -> None:
+        """Drop only the reattach keys of the pending record, keeping `purpose`/`hypothesis`/
+        `files` so a resume re-enters the same iteration instead of reattaching for ever to a
+        job that is already terminal and has no artifacts to collect."""
+        rec = self._pending.get() or {}
+        self._pending.set({k: v for k, v in rec.items()
+                           if k not in ("job_id", "request_hash", "job_dir")})
 
     def _cancel(self, job_id: str) -> None:
         try:
@@ -203,6 +217,9 @@ class C3Bench:
                 f"C3 pull failed for {job_id}: {_redact(str(e))[:300]}") from None
         results = artifacts / "results.json"
         if not results.exists():
+            # every branch below is terminal for this job id: forget it, or the pause leaves a
+            # record that makes every later resume reattach to a dead job and re-pause
+            self._forget_job()
             if status in DONE:
                 raise BenchUnavailable(f"C3 job {job_id} succeeded without results.json")
             if status == "TIMED_OUT":
