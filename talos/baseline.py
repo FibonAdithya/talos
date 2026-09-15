@@ -7,6 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 from talos import mainnet as _mainnet
+from talos.bench import EvalRequest
 from talos.challenges import MONOREPO_REF
 from talos.state import BaselineRecord, _atomic_write
 from talos.types import NonceResult, NonceSet
@@ -66,7 +67,6 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
             return rec, template
     files = mainnet.fetch_algorithm_files(challenge, name)
     log(f"baseline {name} (adoption {adoption}): compiling and scoring {len(files)} file(s)")
-    from talos.bench import EvalRequest
     r = bench.evaluate(EvalRequest(challenge=challenge, files=files, training=training,
                                    holdout=holdout, fuel=fuel, baseline_training=None, rule=rule))
     if not r.compile.ok:
@@ -77,7 +77,8 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
     tr, ho = r.training, r.holdout
     _require_scoreable(challenge, fuel, "training", training, tr)
     _require_scoreable(challenge, fuel, "held-out", holdout, ho)
-    rec = BaselineRecord(name=name, adoption=adoption, artifact_id=r.compile.artifact_id, files=files,
+    rec = BaselineRecord(name=name, adoption=adoption,
+                         artifact_id=r.compile.artifact_id, files=files,
                          training=tr, holdout=ho)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(cache_file, json.dumps(rec.to_dict(), indent=1))
