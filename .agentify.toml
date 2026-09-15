@@ -1,0 +1,12 @@
+# agentify configuration. The contract is CONTRACT.md in the agentify repo.
+
+[contract]
+# The highest contract level this repo has adopted. tests/test_contract.py
+# checks every item up to it on every `make check`. Raised by
+# `agentify adopt --level N`; never lowered automatically.
+level = 1
+
+[docs]
+# Reference prefixes the docs test treats as correctly absent from a clean
+# checkout: build products, downloaded data, run directories.
+ignore_references = []
