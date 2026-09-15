@@ -56,7 +56,7 @@ class EvalResult:
     compile: CompileResult
     training: list[NonceResult]                    # empty when compile.ok is False
     holdout: list[NonceResult] | None              # None when not scored
-    holdout_reason: str                            # "won" | "not_won" | "forced" | "not_compiled"
+    holdout_reason: str      # "won" | "not_won" | "forced" | "not_compiled" | "timeout"
 ```
 
 Rules:
@@ -155,7 +155,7 @@ with canned stdout.
 |---|---|
 | `SUCCEEDED`, complete `results.json` | normal `EvalResult` |
 | `SUCCEEDED`, `results.json` has compile section only | compile failure; `compile.output` = tail of `build.log` |
-| `TIMED_OUT`, or `FAILED` with a partial `results.json` | nonces present are used; nonces missing from a set that was started become `timeout` errors; a held-out set never started is `holdout=None`, reason `"not_won"` if training did not win, else `"timeout"` is recorded on every held-out nonce |
+| `TIMED_OUT`, or `FAILED` with a partial `results.json` | nonces present are used. A set the job marked as started has its missing nonces filled in as `timeout` errors. A held-out set never started stays `holdout=None` with the job's `holdout_reason` if it wrote one, else `"timeout"` |
 | `FAILED` with no `results.json`, `CANCELED` by someone else, or a `c3` command that exits non-zero or prints unparseable JSON | retried with the anchored exponential backoff window the Modal client uses (`retry_window_s`, anchored at the first failure); then `BenchUnavailable` |
 
 A retry after a failed job submits a new job; a retry after a failed `pull`
@@ -181,9 +181,8 @@ cd "$C3_JOB_WORKDIR"
 exec python3 c3_job.py
 ```
 
-`MONOREPO_REF` is read from `payload.json` by a one-line python call, or
-substituted into `job.sh` at generation time; either way the pin is the one
-in `talos/challenges.py`. The spike measured the tarball download at 2 s for
+`$MONOREPO_REF` is substituted into `job.sh` when the job directory is
+generated, from the pin in `talos/challenges.py`. The spike measured the tarball download at 2 s for
 15 MB. The mirrored dev image ships Python 3.12 (MEASURED 2026-09-15 with
 `docker run ... python3 --version` against the knapsack mirror).
 
@@ -226,18 +225,29 @@ never carry the rand hash or the runtime command line.
 
 ## 5. State, resume, cancel
 
-`JobState` gains `pending_job: dict | None` with `backend`, `job_id`,
-`purpose` (`"baseline"` or an iteration number), and `job_dir`. `C3Bench`
-writes it through a callback the loop provides right after `c3 deploy`
-returns, and clears it after `pull` succeeds.
+The `Bench` protocol gains one method:
 
-On resume, if `pending_job` is set and the backend is c3, the loop rebuilds
-the `EvalRequest` from the job directory's `payload.json` and calls
-`C3Bench.evaluate(request, attach=job_id)`, which skips submission and polls
-that id. The result then flows through the same iterate or baseline
-bookkeeping as a fresh call. The existing "confirmation killed mid-flight"
-path is subsumed: a run resumed at `confirming` reattaches to the pending job
-if there is one, else it has the result already recorded.
+```
+    def reattach(self, pending: dict) -> EvalResult | None: ...
+```
+
+`JobState` gains `pending_job: dict | None`: `backend`, `job_id`, `purpose`
+(`"baseline"` or an iteration number), `job_dir`, and for an iteration the
+`hypothesis` dict, which is otherwise only persisted after scoring. `C3Bench`
+writes it through a callback the loop injects, right after `c3 deploy`
+returns, and clears it after `pull` succeeds. `ModalBench` never sets it and
+its `reattach` returns None.
+
+On resume, if `pending_job` is set, the loop calls `bench.reattach(pending)`
+before generating any hypothesis. `C3Bench.reattach` rebuilds the request from
+the job directory's `payload.json`, polls the recorded job id instead of
+submitting, and returns the result. The loop then feeds that result through
+the same baseline or iteration bookkeeping as a fresh call, using the files
+from the payload and the hypothesis from the record. A None return means the
+backend cannot reattach; the loop clears `pending_job` and redoes the step,
+which for Modal is what happens today. The existing "confirmation killed
+mid-flight" path is subsumed: with one call per iteration, a run can only be
+mid-flight with a pending job.
 
 Cancelling a run with a pending C3 job cancels the job with `c3 cancel`, since
 a running job bills. Modal has no pending job and needs nothing.
@@ -309,7 +319,7 @@ Unit, on any machine:
   formula at the boundaries (1 nonce, cap); deploy/squeue/pull sequence with
   canned JSON; each row of the §3.4 table; pending timeout cancels and raises;
   retry window anchored at first failure; cost from RUNNING to terminal only;
-  `attach=` skips deploy; rand hash absent from every generated file except
+  `reattach` skips deploy; rand hash absent from every generated file except
   `payload.json` and from every exception message.
 - `test_c3_job.py`: fake `run`; compile failure writes compile-only results
   and exits 0; partial `results.json` after each nonce; conditional held-out
