@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, `modal` 1.5.x (pinned `>=1.5,<2`), `rich` for terminal status, stdlib `urllib` for HTTP, `pytest` + `ruff` for checks. GPLv3.
 
-**Spec:** `docs/superpowers/specs/2026-09-11-talos-design.md`
+**Spec:** `docs/ai/specs/2026-09-11-talos-design.md`
 
 ## Global Constraints
 
