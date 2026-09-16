@@ -128,3 +128,106 @@ def test_fetch_algorithm_files_500_reraises():
     with pytest.raises(mainnet.MainnetError):
         mainnet.fetch_algorithm_files("vehicle_routing", "fast_lane_v6",
                                       get_text=fake_get_text, get_json=gj)
+
+
+FUEL = 5000000000000
+
+
+def row(bid, player, algo, track, quality, hp, fuel=FUEL):
+    """One benchmark as /get-benchmarks returns it: a precommit and, once submitted, a benchmark.
+    `quality=None` models a precommit whose benchmark has not been submitted yet."""
+    pre = {"benchmark_id": bid,
+           "details": {"fuel_budget": fuel, "hyperparameters": hp, "rand_hash": "00" * 16},
+           "settings": {"player_id": player, "algorithm_id": algo, "track_id": track}}
+    bench = None if quality is None else {"id": bid,
+                                          "details": {"average_quality_by_bundle": quality}}
+    return pre, bench
+
+
+def benchmarks_get_json(rows_by_player, frauds=(), failing=()):
+    def gj(url):
+        if url.endswith("/get-block"):
+            return BLOCK
+        if "/get-opow?block_id=b1" in url:
+            return {"opow": [{"player_id": p} for p in rows_by_player]}
+        if "/get-benchmarks?block_id=b1&player_id=" in url:
+            player = url.split("player_id=", 1)[1]
+            if player in failing:
+                raise mainnet.MainnetError(f"HTTP 500 fetching {url}", status=500)
+            rows = rows_by_player[player]
+            ids = {pre["benchmark_id"] for pre, _ in rows}
+            return {"precommits": [pre for pre, _ in rows],
+                    "benchmarks": [b for _, b in rows if b is not None],
+                    "proofs": [],
+                    "frauds": [{"benchmark_id": f} for f in frauds if f in ids]}
+        raise AssertionError(url)
+    return gj
+
+
+def test_top_hyperparameters_takes_the_best_benchmark_of_this_algorithm_across_players():
+    gj = benchmarks_get_json({
+        "0xp1": [row("b1", "0xp1", "a2", "T1", [100, 100], {"x": 1}),
+                 row("b2", "0xp1", "a9", "T1", [900, 900], {"x": 9})],
+        "0xp2": [row("b3", "0xp2", "a2", "T1", [150, 150], {"x": 2})],
+    })
+    got = mainnet.top_hyperparameters("a2", ["T1"], FUEL, get_json=gj)
+    # mutation: dropping the algorithm_id filter picks b2 ({"x": 9}), another algorithm's keys
+    # mutation: reading only the first player's benchmarks picks b1 ({"x": 1})
+    assert got == {"T1": mainnet.TrackHyperparameters({"x": 2}, "b3", "0xp2", 150.0)}
+    assert got["T1"].source() == {"benchmark_id": "b3", "player_id": "0xp2", "mean_quality": 150.0}
+
+
+def test_top_hyperparameters_ignores_other_fuel_frauds_and_unsubmitted_benchmarks():
+    gj = benchmarks_get_json({"0xp1": [
+        row("ok", "0xp1", "a2", "T1", [100, 100], {"x": 1}),
+        row("fuel", "0xp1", "a2", "T1", [999, 999], {"x": 2}, fuel=20000000000),
+        row("fraud", "0xp1", "a2", "T1", [999, 999], {"x": 3}),
+        row("pending", "0xp1", "a2", "T1", None, {"x": 4}),
+        row("empty", "0xp1", "a2", "T1", [], {"x": 5}),
+    ]}, frauds=("fraud",))
+    got = mainnet.top_hyperparameters("a2", ["T1"], FUEL, get_json=gj)
+    # mutation: dropping the fuel filter picks "fuel", values tuned for a different budget
+    # mutation: dropping the fraud filter picks "fraud"
+    # mutation: treating a missing or empty quality list as eligible raises or picks it
+    assert got["T1"].benchmark_id == "ok" and got["T1"].hyperparameters == {"x": 1}
+
+
+def test_top_hyperparameters_ranks_by_mean_over_bundles():
+    gj = benchmarks_get_json({"0xp1": [
+        row("first_high", "0xp1", "a2", "T1", [100, 10], {"x": 1}),
+        row("mean_high", "0xp1", "a2", "T1", [60, 60], {"x": 2}),
+    ]})
+    got = mainnet.top_hyperparameters("a2", ["T1"], FUEL, get_json=gj)
+    # mutation: ranking by the first bundle or by max() picks first_high (mean 55 < 60)
+    assert got["T1"].benchmark_id == "mean_high" and got["T1"].mean_quality == 60.0
+
+
+@pytest.mark.parametrize("order", [("bb", "ba"), ("ba", "bb")])
+def test_top_hyperparameters_breaks_a_tie_on_the_lower_benchmark_id(order):
+    gj = benchmarks_get_json({"0xp1": [row(b, "0xp1", "a2", "T1", [70, 70], {"id": b})
+                                       for b in order]})
+    # mutation: keeping the first (or last) seen makes the choice depend on API order
+    assert mainnet.top_hyperparameters("a2", ["T1"], FUEL, get_json=gj)["T1"].benchmark_id == "ba"
+
+
+def test_top_hyperparameters_covers_every_track_and_keeps_empty_apart_from_null():
+    gj = benchmarks_get_json({"0xp1": [
+        row("e", "0xp1", "a2", "T_empty", [10, 10], {}),
+        row("n", "0xp1", "a2", "T_null", [10, 10], None),
+        row("other", "0xp1", "a2", "T_not_asked", [10, 10], {"x": 1}),
+    ]})
+    got = mainnet.top_hyperparameters("a2", ["T_empty", "T_null", "T_missing"], FUEL, get_json=gj)
+    # mutation: returning only tracks that had a benchmark raises KeyError downstream
+    assert set(got) == {"T_empty", "T_null", "T_missing"}
+    assert got["T_missing"] == mainnet.TrackHyperparameters(None, None, None, None)
+    # mutation: `hp or None` collapses {} (run with an empty map) into None (run without the flag)
+    assert got["T_empty"].hyperparameters == {} and got["T_empty"].hyperparameters is not None
+    assert got["T_null"].hyperparameters is None and got["T_null"].benchmark_id == "n"
+
+
+def test_top_hyperparameters_raises_when_one_player_cannot_be_read():
+    gj = benchmarks_get_json({"0xp1": [row("b1", "0xp1", "a2", "T1", [1, 1], {"x": 1})],
+                              "0xp2": []}, failing=("0xp2",))
+    # mutation: skipping a failed player chooses from a partial view without saying so
+    with pytest.raises(mainnet.MainnetError):
+        mainnet.top_hyperparameters("a2", ["T1"], FUEL, get_json=gj)
