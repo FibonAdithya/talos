@@ -5,7 +5,7 @@ from dataclasses import dataclass, asdict
 from statistics import mean
 
 from talos.challenges import BeatRule
-from talos.types import NonceResult
+from talos.types import NonceResult, NonceSet
 
 
 class ScoringError(ValueError):
@@ -89,3 +89,38 @@ def holdout_decision(baseline_training: list[NonceResult] | None, training: list
         return (True, "won") if beats(baseline_training, training, rule) else (False, "not_won")
     except ScoringError:
         return False, "not_won"
+
+
+def select(results: list[NonceResult], sets: list[NonceSet]) -> list[NonceResult]:
+    """The rows whose (track, nonce) fall inside one of `sets`, in input order. Strays are
+    dropped, not raised on; bundle_delta still raises on any mismatch that survives."""
+    wanted = {(s.track, n) for s in sets for n in s.nonces()}
+    return [r for r in results if (r.track, r.nonce) in wanted]
+
+
+def focus_sets(track: str | None, training: list[NonceSet],
+               holdout: list[NonceSet]) -> tuple[list[NonceSet], list[NonceSet]]:
+    """The nonce sets one iteration scores. Focused: training is the track's own training set;
+    held-out is the track's held-out set followed by every other track's TRAINING set, the
+    regression guard (already measured for the baseline). Unfocused: unchanged."""
+    if track is None:
+        return training, holdout
+    focus_tr = [s for s in training if s.track == track]
+    focus_ho = [s for s in holdout if s.track == track]
+    guards = [s for s in training if s.track != track]
+    return focus_tr, focus_ho + guards
+
+
+def beats_focused(baseline: list[NonceResult], candidate: list[NonceResult], rule: BeatRule,
+                  track: str) -> bool:
+    """Confirmation rule for a focused job: the focus track clears the margin with its own error
+    rate under the ceiling, and no guard track drops below -track_tolerance."""
+    d = bundle_delta(baseline, candidate)
+    by = {t.track: t for t in d.tracks}
+    if track not in by:
+        raise ScoringError(f"focus track {track!r} has no results")
+    focus = by[track]
+    guards_ok = all(t.rel_delta >= -rule.track_tolerance for t in d.tracks if t.track != track)
+    return (focus.rel_delta >= rule.margin
+            and focus.cand_errors / focus.n <= rule.error_ceiling
+            and guards_ok)
