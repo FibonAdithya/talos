@@ -92,7 +92,7 @@ hatch.
 `JobSpec` gains, after `track`:
 
 ```python
-baseline_algorithm: str | None = None                   # algorithm name the map belongs to
+baseline_algorithm: dict | None = None                  # {"name", "id", "adoption"} the map belongs to
 hyperparameters: dict[str, dict | None] | None = None   # track -> map; None = feature off
 hyperparameters_source: dict[str, dict] | None = None   # track -> {benchmark_id, player_id, mean_quality}
 ```
@@ -103,8 +103,12 @@ hyperparameters_source: dict[str, dict] | None = None   # track -> {benchmark_id
   asks mainnet for the top algorithm itself. If adoption changes between job
   start and the baseline run, or before a resume, the frozen map would belong
   to a different algorithm. When `spec.baseline_algorithm` is set,
-  `resolve_baseline` uses it instead of calling `top_algorithm`, and errors if
-  that algorithm is no longer on mainnet rather than silently switching.
+  `resolve_baseline` uses its name and adoption instead of calling
+  `top_algorithm`. It does not re-check adoption: the algorithm's code stays on
+  its monorepo branch, and the frozen map matches that code whatever mainnet
+  adoption has done since. Adoption is stored because `BaselineRecord` reports it.
+- `baseline_algorithm` is set whenever `--hyperparameters mainnet` found a top
+  algorithm, even if no track got a benchmark; it pins the algorithm either way.
 - A `job.json` without the keys loads with all three `None`, which behaves
   exactly as today (top algorithm resolved at baseline time, no flag on any run).
 - `redacted()` keeps all three: they are public mainnet data and contain no
@@ -137,7 +141,11 @@ hyperparameters_source: dict[str, dict] | None = None   # track -> {benchmark_id
 `json.dumps(..., sort_keys=True)` input. `None` and a map of all-`None`
 values must hash **differently from each other only if they run differently**;
 they run identically (no flag on any nonce), so both normalise to `None`
-before hashing. `{}` for a track does run differently and hashes differently.
+before hashing: normalisation drops `None` values and turns an empty map into
+`None`. `{}` for a track does run differently and hashes differently. The
+payload gains a `hyperparameters` key only when the normalised map is not
+`None`, so every baseline cache key computed before this change is unchanged
+and existing cached baselines stay valid.
 
 `resolve_baseline` passes the spec's map into the bench request. When
 `_require_scoreable` fails and hyperparameters were in use, the message adds:
@@ -145,8 +153,11 @@ before hashing. `{}` for a track does run differently and hashes differently.
 
 ## 7. CLI — `talos/cli.py`
 
-- `talos run --hyperparameters {mainnet,none}`, default `mainnet`.
-- The wizard asks `Hyperparameters (mainnet or none)` with default `mainnet`.
+- `talos run --hyperparameters {mainnet,none}`. Unset means: `mainnet` under
+  `--yes`, otherwise the wizard asks `Hyperparameters (mainnet or none)` with
+  default `mainnet`, after the track prompt.
+- On `--resume`, passing `--hyperparameters` at all is refused (exit 2): the
+  map is frozen in `job.json`, and a job cannot change what its baseline ran with.
 - On `mainnet`, after `top_algorithm` and before `write_spec`, call
   `top_hyperparameters(algorithm_id, info.tracks, info.max_fuel)`.
   If every track comes back all-`None`, store `hyperparameters=None` (feature
@@ -181,8 +192,10 @@ guard tracks also run with their own values.
 
 ## 9. Package — `talos/package.py`
 
-A `Hyperparameters` section after the score tables: per track, the JSON and
-its source (`benchmark_id`, `player_id`, mean quality), or `none`. The user
+When `spec.hyperparameters` is not `None`: a `## Hyperparameters` section in
+`README.md` listing per track the JSON and its source (`benchmark_id`,
+`player_id`, mean quality), or `none`; and `hyperparameters.json` holding
+`spec.hyperparameters` exactly, for pasting into a benchmarker config. The user
 submits benchmarks with these values; the package states that the measured
 improvement holds only with them.
 
