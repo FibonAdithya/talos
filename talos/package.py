@@ -7,7 +7,7 @@ from importlib import resources
 from pathlib import Path
 
 from talos.challenges import CHALLENGES
-from talos.scoring import ScoringError, beats, bundle_delta
+from talos.scoring import ScoringError, beats, bundle_delta, focus_sets, select
 from talos.state import JobSpec, JobState, JobStore
 from talos.types import NonceResult
 
@@ -44,6 +44,33 @@ def _diff(base: dict[str, str], cand: dict[str, str]) -> str:
     return "".join(out)
 
 
+def scores_sections(spec: JobSpec, state: JobState) -> list[tuple[str, str]]:
+    """(heading, table) pairs for scores.md and the evidence appendix. Focused jobs get the
+    track's training and held-out tables plus a guard table for the other tracks; unfocused
+    jobs keep the two plain headings."""
+    base, best = state.baseline, state.best
+    training_sets, holdout_sets = focus_sets(spec.track, spec.training, spec.holdout)
+    if spec.track is None:
+        out = [("Training nonces", scores_markdown(base.training, best.training))]
+        if best.holdout:
+            out.append(("Held-out nonces", scores_markdown(base.holdout, best.holdout)))
+        return out
+    t = spec.track
+    out = [(f"Training nonces (track {t})",
+            scores_markdown(select(base.training, training_sets), best.training))]
+    if best.holdout:
+        focus_ho = [s for s in holdout_sets if s.track == t]
+        guards = [s for s in holdout_sets if s.track != t]
+        out.append((f"Held-out nonces (track {t})",
+                    scores_markdown(select(base.holdout, focus_ho),
+                                    select(best.holdout, focus_ho))))
+        if guards:
+            out.append(("Regression guard (other tracks, training nonces)",
+                        scores_markdown(select(base.training, guards),
+                                        select(best.holdout, guards))))
+    return out
+
+
 def evidence_draft(spec: JobSpec, state: JobState) -> str:
     template = resources.files("talos.data").joinpath("evidence_template.md").read_text()
     # deviation from brief: also include outcome "won" (a winning iteration's hypothesis
@@ -60,12 +87,12 @@ def evidence_draft(spec: JobSpec, state: JobState) -> str:
         f"Talos hypothesis log; rewrite as a discrete method:\n{method}", 1)
     bench = ""
     if state.best and state.baseline:
+        focus = f" Optimised for track {spec.track}." if spec.track else ""
         bench = ("\n\n## TALOS BENCHMARK APPENDIX (auto-generated)\n\n"
                  f"Baseline: mainnet `{state.baseline.name}` at monorepo `{spec.monorepo_ref}`, "
-                 f"fuel {spec.fuel}, tracks {', '.join(spec.tracks)}.\n\n### Training nonces\n\n"
-                 + scores_markdown(state.baseline.training, state.best.training))
-        if state.best.holdout:
-            bench += "\n### Held-out nonces\n\n" + scores_markdown(state.baseline.holdout, state.best.holdout)
+                 f"fuel {spec.fuel}, tracks {', '.join(spec.tracks)}.{focus}\n")
+        for heading, table in scores_sections(spec, state):
+            bench += f"\n### {heading}\n\n{table}"
     return filled + bench
 
 
@@ -79,7 +106,9 @@ def _readme_no_candidate(spec: JobSpec, state: JobState) -> str:
 
 def _won_training(spec: JobSpec, state: JobState) -> bool:
     try:
-        return beats(state.baseline.training, state.best.training, CHALLENGES[spec.challenge].beat)
+        training_sets, _ = focus_sets(spec.track, spec.training, spec.holdout)
+        return beats(select(state.baseline.training, training_sets), state.best.training,
+                     CHALLENGES[spec.challenge].beat)
     except (ScoringError, KeyError):
         return False
 
@@ -90,6 +119,9 @@ def _readme(spec: JobSpec, state: JobState) -> str:
     head = ("# Talos hand-back\n\n"
             f"Challenge: {spec.challenge}. Baseline: mainnet `{state.baseline.name}`. "
             f"Status: {state.status}. Reason: {state.stop_reason}\n\n")
+    if spec.track:
+        head += (f"Optimised for track {spec.track}; the other tracks were re-scored on "
+                 "confirmation as a regression guard (see the last section of scores.md).\n\n")
     if confirmed:
         head += ("This candidate beat the baseline on both the training and the held-out nonce "
                  "sets. See scores.md.\n\n")
@@ -137,9 +169,7 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
         (pkg / name).parent.mkdir(parents=True, exist_ok=True)
         (pkg / name).write_text(text)
     (pkg / "diff_vs_baseline.patch").write_text(_diff(state.baseline.files, state.best.files))
-    scores = "# Training nonces\n\n" + scores_markdown(state.baseline.training, state.best.training)
-    if state.best.holdout:
-        scores += "\n# Held-out nonces\n\n" + scores_markdown(state.baseline.holdout, state.best.holdout)
+    scores = "\n".join(f"# {heading}\n\n{table}" for heading, table in scores_sections(spec, state))
     (pkg / "scores.md").write_text(scores)
     hyps = "\n".join(_hypothesis_line(h) for h in state.hypotheses)
     (pkg / "hypotheses.md").write_text("# Hypotheses\n\n" + hyps + "\n")

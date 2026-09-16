@@ -56,7 +56,10 @@ uv pip install --python .venv/bin/python -e '.[dev]'
 ### `talos setup`
 
 Run once. Asks first for the compute backend (`modal` or `c3`), then the provider kind, a
-model id (a sensible default is offered per provider), an API key for API providers
+model id (a sensible default is offered per provider; for `codex-cli` the wizard reads
+the catalog from `codex debug models`, prints the models your login accepts, and offers
+the first as the default; for `claude-cli` an alias such as `fable` works), an API key
+for API providers
 (nothing for CLI providers, beyond checking the binary is on `PATH` and running one
 trivial call to confirm a logged-in session), and a default mode (`single-shot` or
 `agentic`) for CLI providers. The Modal token id/secret prompt (create one at
@@ -76,6 +79,12 @@ Run per job. Prompts interactively for anything not given as a flag:
   first entry in the job's tacit knowledge.
 - `--mode {single-shot,agentic}` — overrides the configured mode for this run; `agentic`
   is only valid for a CLI provider.
+- `--track <name>` — one active track of the challenge to optimise (the interactive prompt
+  lists them; `all`, the default, means every track). Training scores that track only. When
+  a candidate wins on training, the confirmation job scores the track's held-out nonces plus
+  every other track's training nonces as a regression guard: no other track may get worse.
+  The model still sees and may edit every file; the flag narrows what is scored and what it
+  is told to target.
 - `--budget-usd`, `--budget-hours`, `--budget-iterations`, `--budget-compute-usd` — see
   Budget below.
 - `--resume <job_id>` — reloads `runs/<job_id>/job.json` and `state.json` and continues a
@@ -141,7 +150,8 @@ progress, including the best candidate found), `timeline.jsonl` (one JSON event 
 line), `tacit.md` (the direction and anything learned), and `iterations/<n>/` (each
 candidate's files and hypothesis). On exit, `runs/<job_id>/package/` holds: the best
 algorithm's files, `diff_vs_baseline.patch`, `scores.md` (per-nonce tables for baseline
-and candidate on training and held-out nonces), `hypotheses.md` (the full log with
+and candidate on training and held-out nonces; a focused job adds a regression-guard table
+for the other tracks), `hypotheses.md` (the full log with
 outcomes), `evidence_draft.md` (a partially filled-in TIG advance-evidence template), and
 `README.md` explaining how to submit — also zipped as `package.zip`.
 
@@ -172,7 +182,9 @@ a table shipped with Talos — not a billed amount.
 
 Compute spent by `talos compile` from the agentic sandbox is not counted against
 `--budget-compute-usd`; on C3 each of those is one job (about 12 minutes of overhead,
-MEASURED 2026-09-14) billed at the profile's rate.
+MEASURED 2026-09-14) billed at the profile's rate. A focused job's confirmation scores the
+other tracks' training nonces too, about a minute more per winning iteration on C3
+(ESTIMATE, unverified).
 
 ## Live smoke test
 

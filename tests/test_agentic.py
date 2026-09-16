@@ -212,3 +212,12 @@ def test_agent_env_passes_the_backend_through(monkeypatch):
     # mutation: dropping TALOS_BACKEND from the allowlist sends agentic C3 compiles to Modal;
     # widening the allowlist leaks keys into the sandbox
     assert env["TALOS_BACKEND"] == "c3" and "ANTHROPIC_API_KEY" not in env
+
+
+def test_claude_md_names_the_focus_track():
+    # mutation: the agentic goal line still says "every active track" for a focused job
+    c = ctx()
+    c.track, c.guard_tracks = "n=1", ["n=2"]
+    text = claude_md(c)
+    assert "n=1" in text and "n=2" in text and "regression guard" in text
+    assert "regression guard" not in claude_md(ctx())

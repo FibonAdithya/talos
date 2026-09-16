@@ -118,7 +118,7 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     monkeypatch.setattr(cli, "execute_job",
                         lambda spec, store, cfg, resume: seen.update(spec=spec, cfg=cfg) or 0)
     prompts = []
-    answers = iter(["knapsack", "go", "abc", "3", "4", "5", "agentic"])
+    answers = iter(["knapsack", "go", "abc", "3", "4", "5", "agentic", ""])
 
     def ask(prompt, default=None, secret=False):
         prompts.append(prompt)
@@ -130,7 +130,9 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     assert "hypergraph (GPU: L40S, ≈$1.95/h estimated)" in prompts[0]
     assert "knapsack" in prompts[0] and "knapsack (GPU" not in prompts[0]
     assert prompts.count("Iteration budget") == 2  # the typo was re-asked, not fatal
-    assert prompts[-1] == "Mode (single-shot or agentic)"
+    assert prompts[-2] == "Mode (single-shot or agentic)"
+    assert prompts[-1] == "Track to optimise (all, or one of: n=1)"
+    assert seen["spec"].track is None
     assert "agentic mode uses roughly 5-20x the tokens of single-shot" in captured.out
     assert seen["spec"].budget.iterations == 3 and seen["spec"].budget.hours == 4.0
     assert seen["spec"].budget.compute_usd == 5.0
@@ -869,3 +871,138 @@ def test_compile_refuses_an_unknown_backend(tmp_path, monkeypatch, capsys):
                         lambda *a, **k: _refuse_bench("bench built for an unknown backend"))
     assert cli.main(["compile", "--challenge", "knapsack"]) == 2
     assert "unknown backend 'aws'" in capsys.readouterr().err
+
+
+def _recording(answers):
+    prompts = []
+    inner = scripted(answers)
+    def ask(prompt, default=None, secret=False):
+        prompts.append((prompt, default))
+        return inner(prompt, default, secret)
+    return ask, prompts
+
+
+def test_setup_codex_offers_the_catalog_and_defaults_to_its_first_model(tmp_path, monkeypatch,
+                                                                          capsys):
+    # mutation: ignoring the catalog keeps the static default; defaulting to the last slug
+    # instead of the first picks gpt-5.5
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "list_codex_models", lambda: ["gpt-5.6-sol", "gpt-5.5"])
+    ask, prompts = _recording(["", "codex-cli", "", "", "ak", "as"])
+    rc = cli.main(["setup"], ask=ask)
+    assert rc == 0
+    assert json.loads((tmp_path / "talos.config.json").read_text())["model"] == "gpt-5.6-sol"
+    out = capsys.readouterr().out
+    assert "gpt-5.6-sol" in out and "gpt-5.5" in out
+    assert [d for p, d in prompts if p.startswith("Model")] == ["gpt-5.6-sol"]
+
+
+def test_setup_codex_falls_back_to_the_static_default_without_a_catalog(tmp_path, monkeypatch):
+    # mutation: the stale gpt-5-codex default is what the ChatGPT-account codex rejects
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "list_codex_models", lambda: [])
+    rc = cli.main(["setup"], ask=scripted(["", "codex-cli", "", "", "ak", "as"]))
+    assert rc == 0
+    assert json.loads((tmp_path / "talos.config.json").read_text())["model"] == "gpt-5.5"
+
+
+def test_setup_claude_cli_names_the_model_aliases_in_the_prompt(tmp_path, monkeypatch):
+    # mutation: dropping the alias hint leaves the user guessing at full model ids
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
+    ask, prompts = _recording(["", "claude-cli", "", "", "ak", "as"])
+    assert cli.main(["setup"], ask=ask) == 0
+    model_prompts = [p for p, d in prompts if p.startswith("Model")]
+    assert len(model_prompts) == 1 and "fable" in model_prompts[0] and "sonnet" in model_prompts[0]
+
+
+def test_run_track_flag_lands_in_the_spec(tmp_path, monkeypatch):
+    # mutation: parsing the flag but not storing it makes every focused job an all-tracks job
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = {}
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--yes", "--track", "n=1"])
+    assert rc == 0 and seen["spec"].track == "n=1"
+    # the nonce draw is unchanged: every track is still in the spec, so the baseline cache key is
+    assert [s.track for s in seen["spec"].training] == ["n=1"]
+
+
+def test_run_rejects_a_track_mainnet_does_not_have(tmp_path, monkeypatch, capsys):
+    # mutation: skipping validation starts a job whose focus set is empty
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: pytest.fail("must not start a job"))
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--yes", "--track", "n=9"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "n=9" in err and "n=1" in err
+    assert not (tmp_path / "runs").exists()  # validation runs before the run directory exists
+
+
+def test_resume_with_a_different_track_is_refused(tmp_path, monkeypatch, capsys):
+    # mutation: letting --track through on resume would score a job on sets its baseline
+    # comparison was never built for
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch, ["--track", "n=1"]) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert cli.main(["run", "--resume", run_dir.name, "--track", "n=2"]) == 2
+    assert "started with track" in capsys.readouterr().err
+
+
+def test_fake_run_with_a_track_wins_and_packages_per_track(tmp_path, monkeypatch, capsys):
+    # mutation: the whole focused path; the fake challenge has one track, so there is no guard
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    rc = fake_run(monkeypatch, ["--track", "n=1"])
+    out = capsys.readouterr().out
+    assert rc == 0 and "Status: won" in out
+    assert "track n=1 of 1 tracks" in out
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    scores = (run_dir / "package" / "scores.md").read_text()
+    assert "# Training nonces (track n=1)" in scores
+    assert "# Held-out nonces (track n=1)" in scores
+    assert "Regression guard" not in scores
+
+
+def test_run_track_all_on_the_flag_means_every_track(tmp_path, monkeypatch, capsys):
+    # The wizard's answer "all" and the README's "default all" must be spellable on the flag too.
+    # mutation: validating "all" against mainnet's tracks refuses it as an unknown track
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = {}
+    prompts = []
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+
+    def ask(prompt, default=None, secret=False):
+        prompts.append(prompt)
+        return default or ""
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--track", "all"], ask=ask)
+    assert rc == 0 and seen["spec"].track is None
+    assert not any(p.startswith("Track to optimise") for p in prompts)  # the flag answered it
+    assert "1 tracks, fuel 7" in capsys.readouterr().out
+
+
+def test_resume_of_a_focused_job_with_track_all_is_refused(tmp_path, monkeypatch, capsys):
+    # mutation: normalising "all" to None before the resume check lets it through as "no flag"
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch, ["--track", "n=1"]) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert cli.main(["run", "--resume", run_dir.name, "--track", "all"]) == 2
+    assert "started with track n=1" in capsys.readouterr().err

@@ -26,6 +26,7 @@ from talos.config import Config, ConfigError, ENV_KEYS, load, resolve_api_key, s
 from talos.mainnet import ChallengeInfo, MainnetError, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
+from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
 from talos.state import JobSpec, JobState, JobStore
 from talos.types import Usage
@@ -122,6 +123,29 @@ def bench_hardware_class(backend: str, challenge: str) -> str:
     return c3_hardware_class(spec) if backend == "c3" else hardware_class(spec)
 
 
+def _model_prompt(kind: str) -> tuple[str, str | None]:
+    """Prompt text and default for the model question. CLI providers know their own models:
+    codex publishes a catalog, claude accepts short aliases. The static default stands in when
+    the catalog cannot be read."""
+    default = DEFAULT_MODELS.get(kind) or None
+    if kind == "codex-cli":
+        models = list_codex_models()
+        if models:
+            print("Models your codex CLI accepts: " + ", ".join(models))
+            return "Model", models[0]
+    if kind == "claude-cli":
+        return "Model (an alias such as fable, opus or sonnet, or a full model id)", default
+    return "Model", default
+
+
+def _track_arg(answer: str | None) -> str | None:
+    """The focus track a flag or wizard answer names; None (every track) for no answer or
+    "all", which is how the wizard prompt and the README spell the default."""
+    if answer is None or answer.strip() in ("", "all"):
+        return None
+    return answer.strip()
+
+
 def cmd_setup(args, ask) -> int:
     root = Path.cwd()
     backend = ask(f"Compute backend ({' or '.join(BACKENDS)})", "modal")
@@ -135,7 +159,7 @@ def cmd_setup(args, ask) -> int:
     if kind not in KINDS or kind == "fake":
         print(f"unknown provider {kind!r}", file=sys.stderr)
         return 2
-    model = ask("Model", DEFAULT_MODELS.get(kind) or None)
+    model = ask(*_model_prompt(kind))
     api_base = ask("API base URL") if kind == "custom" else None
     api_key = None
     if kind in ("anthropic", "openai", "google", "openrouter", "custom"):
@@ -394,6 +418,10 @@ def cmd_run(args, ask) -> int:
             print(f"job {spec.job_id} was started in {spec.mode} mode; start a new job to "
                   f"change mode", file=sys.stderr)
             return 2
+        if args.track is not None and _track_arg(args.track) != spec.track:
+            print(f"job {spec.job_id} was started with track {spec.track or 'all'}; start a new "
+                  f"job to change track", file=sys.stderr)
+            return 2
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
         if _codex_refused(cfg):
             return 2
@@ -485,6 +513,14 @@ def cmd_run(args, ask) -> int:
             print(f"challenge table drift: mainnet says {info.id}/{info.is_gpu}, Talos has "
                   f"{cs.id}/{cs.is_gpu}; update talos/challenges.py", file=sys.stderr)
             return 1
+    track = _track_arg(args.track)
+    if args.track is None and not args.yes:
+        track = _track_arg(ask(f"Track to optimise (all, or one of: {', '.join(info.tracks)})",
+                               "all"))
+    if track is not None and track not in info.tracks:
+        print(f"unknown track {track!r} for {challenge}; active tracks: "
+              f"{', '.join(info.tracks)}", file=sys.stderr)
+        return 2
     rand_hash = new_rand_hash()
     training, holdout = draw_nonce_sets(info.tracks, rand_hash)
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
@@ -495,11 +531,13 @@ def cmd_run(args, ask) -> int:
     spec = JobSpec(job_id=job_id, challenge=challenge, direction=direction, provider=cfg.provider,
                    model=cfg.model, mode=cfg.mode, budget=budget, rand_hash=rand_hash,
                    tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
-                   created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id)
+                   created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
+                   track=track)
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
     (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n")
-    print(f"Job {job_id}: {len(info.tracks)} tracks, fuel {info.max_fuel}, budget {budget.to_dict()}")
+    scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
+    print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}")
     return execute_job(spec, store, cfg, resume=False)
 
 
@@ -562,6 +600,7 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--challenge")
     r.add_argument("--direction")
     r.add_argument("--direction-file")
+    r.add_argument("--track", help="one active track to optimise, or all (the default)")
     r.add_argument("--mode", choices=["single-shot", "agentic"])
     r.add_argument("--budget-usd", type=float)
     r.add_argument("--budget-hours", type=float)

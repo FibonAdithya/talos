@@ -50,6 +50,11 @@ progress.
    baseline cache key (`talos/challenges.py::hardware_class`,
    `talos/baseline.py::cache_key`); a cached baseline measured under different
    hardware or fuel is a different key, never a hit.
+   With `--track`, the loop slices both sides with the same `NonceSet` lists
+   (`talos/scoring.py::select`, `talos/scoring.py::focus_sets`); the guard compares
+   the other tracks' training nonces against the cached baseline training results
+   for those same nonces, and the confirmation rule is
+   `talos/scoring.py::beats_focused`.
 2. **The job's `rand_hash` lives in `job.json` and nowhere the agent can
    read.** It seeds every nonce; an LLM that sees it can tune to the exact
    nonces it is scored on. It is stripped from the spec the prompts see

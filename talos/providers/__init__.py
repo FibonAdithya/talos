@@ -32,7 +32,7 @@ DEFAULT_MODELS = {
     "openrouter": "anthropic/claude-opus-5",
     "custom": "",
     "claude-cli": "claude-opus-5",
-    "codex-cli": "gpt-5-codex",
+    "codex-cli": "gpt-5.5",
     "fake": "fake",
 }
 

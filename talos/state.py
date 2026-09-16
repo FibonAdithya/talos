@@ -32,6 +32,7 @@ class JobSpec:
     created_at: float
     monorepo_ref: str
     challenge_id: str
+    track: str | None = None  # one active track to optimise; None = all tracks
 
     def to_dict(self) -> dict:
         d = asdict(self)

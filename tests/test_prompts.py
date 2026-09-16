@@ -108,3 +108,20 @@ def test_distill_roundtrip():
     assert "Bigger tabu tenure" in user  # mutation: dropping the failure list from the prompt
     assert parse_distillation("LESSON: Prefer cheap moves early.") == "Prefer cheap moves early."
     assert parse_distillation("nothing useful") is None
+
+
+def test_focused_prompts_name_the_track_and_the_guards():
+    # mutation: dropping the track from the system prompt leaves the model optimising every
+    # track; dropping the guard list hides that the other tracks are re-scored
+    c = ctx(track="n_items=5000,budget=25", guard_tracks=["n_items=1000,budget=5"])
+    system, user = hypothesis_prompts(c)
+    assert "n_items=5000,budget=25" in system and "n_items=1000,budget=5" in system
+    assert "regression guard" in system
+    system2, user2 = edit_prompts(c, {"title": "t", "description": "d"})
+    assert "n_items=5000,budget=25" in (system2 + user2)
+
+
+def test_unfocused_prompts_do_not_mention_a_guard():
+    # mutation: emitting the focus sentence with an empty track changes every existing prompt
+    system, user = hypothesis_prompts(ctx())
+    assert "regression guard" not in system and "across every active track" in system

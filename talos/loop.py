@@ -17,7 +17,7 @@ from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts, di
                            edit_prompts, edit_repair_prompts, hypothesis_prompts,
                            parse_distillation, parse_hypothesis)
 from talos.providers import ProviderAuthError, ProviderError, ProviderRateLimited
-from talos.scoring import ScoringError, beats, bundle_delta
+from talos.scoring import ScoringError, beats, beats_focused, bundle_delta, focus_sets, select
 from talos.search_replace import format_misses
 from talos.state import Candidate, JobSpec, JobState, JobStore, TERMINAL
 from talos.types import Completion
@@ -132,10 +132,15 @@ class Loop:
         self._save()
         return c
 
+    def _focus(self) -> tuple[list, list]:
+        return focus_sets(self.spec.track, self.spec.training, self.spec.holdout)
+
     def _request(self, files: dict[str, str], baseline_training) -> EvalRequest:
-        return EvalRequest(challenge=self.spec.challenge, files=files, training=self.spec.training,
-                           holdout=self.spec.holdout, fuel=self.spec.fuel,
-                           baseline_training=baseline_training, rule=self.rule)
+        training, holdout = self._focus()
+        base = select(baseline_training, training) if baseline_training is not None else None
+        return EvalRequest(challenge=self.spec.challenge, files=files, training=training,
+                           holdout=holdout, fuel=self.spec.fuel, baseline_training=base,
+                           rule=self.rule)
 
     def _bench_evaluate(self, files: dict[str, str]) -> EvalResult:
         """pending_job carries the files BEFORE the call: a C3 job outlives this process, and a
@@ -220,7 +225,10 @@ class Loop:
                              baseline_name=self.state.baseline.name,
                              best_delta=self._best_delta(), failed_hypotheses=failed,
                              forced_tag=self._forced_tag(),
-                             is_gpu=CHALLENGES[self.spec.challenge].is_gpu)
+                             is_gpu=CHALLENGES[self.spec.challenge].is_gpu,
+                             track=self.spec.track,
+                             guard_tracks=([t for t in self.spec.tracks if t != self.spec.track]
+                                           if self.spec.track else []))
 
     # ── single-shot propose + edit ────────────────────────────────────
 
@@ -312,8 +320,9 @@ class Loop:
             (it_dir / name).parent.mkdir(parents=True, exist_ok=True)
             (it_dir / name).write_text(text)
         results = res.training
+        base_tr = select(self.state.baseline.training, self._focus()[0])
         try:
-            delta = bundle_delta(self.state.baseline.training, results)
+            delta = bundle_delta(base_tr, results)
         except ScoringError as e:
             record.update(outcome="failed:score", error=str(e))
             self._finish_iteration(n, record, improved=False)
@@ -329,7 +338,7 @@ class Loop:
         # spec §7.7: a candidate that beats the baseline on training becomes the best, whether or
         # not the held-out set goes on to confirm it. Confirming a candidate that is not best would
         # report "won" with different code in state.best.
-        wins = beats(self.state.baseline.training, results, self.rule)
+        wins = beats(base_tr, results, self.rule)
         improved = delta.mean_rel_delta > self._best_delta() or wins
         if improved:
             self.state.best = cand
@@ -359,9 +368,16 @@ class Loop:
             self._save()
             self._event("false_positive", error=f"held-out not scored ({reason})")
             return
+        _, holdout_sets = self._focus()
+        # The guard sets are TRAINING sets of the other tracks, so their baseline rows live in
+        # baseline.training; select() picks the right rows from both lists by (track, nonce).
+        base_ho = select(self.state.baseline.holdout + self.state.baseline.training, holdout_sets)
         try:
-            won = beats(self.state.baseline.holdout, ho, self.rule)
-            holdout_delta = bundle_delta(self.state.baseline.holdout, ho).to_dict()
+            if self.spec.track is None:
+                won = beats(base_ho, ho, self.rule)
+            else:
+                won = beats_focused(base_ho, ho, self.rule, self.spec.track)
+            holdout_delta = bundle_delta(base_ho, ho).to_dict()
         except ScoringError as e:
             # An unscoreable held-out run is not a win; it must not leave the job at "confirming".
             self.state.false_positives.append(cand.iteration)
