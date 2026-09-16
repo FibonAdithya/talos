@@ -14,6 +14,7 @@ from pathlib import Path
 
 from talos import inside
 from talos.challenges import BeatRule
+from talos.diagnostics import dead_new_functions, relevant
 from talos.scoring import holdout_decision
 from talos.types import NonceResult
 
@@ -32,8 +33,10 @@ def _run_one(task: tuple) -> dict:
 
 def _score(payload: dict, sets: list[dict], so: Path, ptx: Path | None, monorepo: Path,
            run, log, clock, t0: float, on_row, pool_factory=None) -> None:
+    timeouts = payload.get("timeouts") or {}
     tasks = [(payload["challenge_id"], ns["track"], ns["rand_hash"], n, str(so), payload["fuel"],
-              payload["nonce_timeout_s"], str(ptx) if ptx else None, str(monorepo))
+              timeouts.get(ns["track"], payload["nonce_timeout_s"]),
+              str(ptx) if ptx else None, str(monorepo))
              for ns in sets for n in range(ns["start"], ns["start"] + ns["count"])]
     workers = int(payload.get("workers", 1))
     # `_run_one` builds its own subprocess calls and ignores the injected runner, so the real
@@ -95,10 +98,19 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
                           + ("" if so.exists() else f"\nbuild produced no .so at {so}")}
         _atomic(results, out)
         return 0  # a compile error is a result, not a job failure
-    out["compile"] = {"ok": True, "output": build_out[-4000:],
+    out["compile"] = {"ok": True, "output": relevant(build_out)[-20000:],
                       "artifact_id": inside.content_hash(payload["files"],
                                                          payload["monorepo_ref"],
                                                          payload["dev_image_tag"])}
+    prior = payload.get("prior_functions")
+    dead = dead_new_functions(build_out, prior) if prior is not None else []
+    if dead:
+        # The change is not on the solve path; scoring it would repeat the prior result
+        # nonce for nonce. The client reads the names back out of the compile output.
+        out["holdout_reason"] = "dead_code"
+        _atomic(results, out)
+        log(f"[{int(clock() - t0)}s] dead new code, not scored: {dead}")
+        return 0
     # from here on the candidate has compiled: a job cut off mid-training must not still say
     # "not_compiled". The real decision overwrites this once training finishes.
     out["holdout_reason"] = "timeout"

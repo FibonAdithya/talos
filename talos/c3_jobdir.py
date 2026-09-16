@@ -16,7 +16,7 @@ from talos.inside import NONCE_TIMEOUT_S
 
 BUILD_ALLOWANCE_S = 1200
 TIME_CAP_S = 6 * 3600
-JOB_MODULES = ("__init__", "inside", "scoring", "types", "challenges", "c3_job")
+JOB_MODULES = ("__init__", "inside", "scoring", "types", "challenges", "diagnostics", "c3_job")
 _PKG = Path(__file__).resolve().parent
 
 
@@ -52,6 +52,7 @@ def payload(request: EvalRequest) -> dict:
             "baseline_training": ([r.to_dict() for r in request.baseline_training]
                                   if request.baseline_training is not None else None),
             "rule": asdict(request.rule), "monorepo_ref": MONOREPO_REF,
+            "prior_functions": request.prior_functions, "timeouts": request.timeouts,
             "workers": c3_workers(spec), "nonce_timeout_s": NONCE_TIMEOUT_S,
             "dev_image_tag": DEV_IMAGE_TAG}
 

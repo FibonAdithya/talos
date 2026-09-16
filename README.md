@@ -217,6 +217,29 @@ the loop stops when a candidate beats baseline on both, or the budget runs out. 
 [docs/ai/specs/2026-09-11-talos-design.md](docs/ai/specs/2026-09-11-talos-design.md)
 for the full design.
 
+Two guards sit between the build and the scoring, both added after a run that spent half
+its iterations on candidates that could not have scored. A candidate that compiles with a
+function it added that nothing calls (rustc's `never used` warning inside the candidate's
+own files) is not scored: the change is off the solve path, and scoring it repeats the
+baseline nonce for nonce. It gets the same fix rounds a compile error gets, then fails as
+`failed:dead_code`. And each candidate nonce runs under a per-track timeout of three times
+the baseline's slowest nonce on that track, never below 60 s and never above the flat 600 s
+the baseline itself ran under; a nonce over it is a `timeout` error, and enough of them
+fail the candidate through the error ceiling. TIG caps fuel, not seconds, so this is a
+research-economy cap, not a TIG rule: `Thresholds.runtime_ceiling` in `talos/loop.py` sets
+the multiplier and 0 disables it. The Modal score function takes the timeout as an
+argument, so after upgrading past this change run `talos setup` again on the Modal backend
+before the next run; the C3 job ships its own code and needs nothing. A client that reaches
+an older deploy stops at once with a message naming `talos setup`, not after retrying it as
+an outage.
+
+When the loop recalls failed attempts to the model, each line carries what the run measured:
+the mean delta, the worst track and its delta, the candidate's runtime relative to the
+baseline on its slowest track, and any rejection error. Compile-fix prompts see only the
+diagnostics that concern the candidate (errors anywhere, warnings only inside its files) and
+the exact file names to use, because the full build output is dominated by other algorithms'
+warnings and a fixer fed that has edited their paths instead.
+
 ## Licence
 
 GPLv3 (see `LICENSE`). `talos/search_replace.py` is lifted from

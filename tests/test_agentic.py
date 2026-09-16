@@ -14,10 +14,10 @@ from talos.prompts import PromptContext
 from talos.state import JobStore
 
 
-def ctx():
+def ctx(**kw):
     return PromptContext(challenge="knapsack", template_rs="pub fn solve_challenge(", direction="go",
                          tacit="- USER: go", files={"mod.rs": "fn a(){}", "ls.rs": "fn b(){}"},
-                         baseline_name="b", best_delta=0.0)
+                         baseline_name="b", best_delta=0.0, **kw)
 
 
 def test_prepare_worktree_layout(tmp_path):
@@ -221,3 +221,24 @@ def test_claude_md_names_the_focus_track():
     text = claude_md(c)
     assert "n=1" in text and "n=2" in text and "regression guard" in text
     assert "regression guard" not in claude_md(ctx())
+
+
+def test_agentic_prompt_describes_failed_attempts_with_their_numbers(tmp_path):
+    seen = {}
+
+    def run(cmd, **kw):
+        seen["prompt"] = cmd[-1]
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    loop = types.SimpleNamespace(store=JobStore(tmp_path), propose_and_edit=None,
+                                 _check_budget=lambda: None, _event=lambda *a, **k: None)
+    attach_agentic(loop, "claude-cli", "m", timeout_s=1, run=run)
+    failed = [{"title": "Dynamic greedy", "outcome": "failed:score", "mean_rel_delta": -0.0005,
+               "worst_track": "n_items=5000,budget=10", "worst_rel_delta": -0.0037,
+               "runtime_ratio": 14.07}]
+    with pytest.raises(AgenticError):
+        loop.propose_and_edit(ctx(failed_hypotheses=failed))
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    # mutation: joining titles alone drops the per-track delta and the runtime ratio
+    assert "Dynamic greedy" in seen["prompt"] and "14.1x" in seen["prompt"]
+    assert "n_items=5000,budget=10" in seen["prompt"]

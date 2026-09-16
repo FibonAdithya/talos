@@ -203,7 +203,7 @@ def test_lookup_is_cached_after_a_successful_hydrate(monkeypatch):
 
         def starmap(self, args):
             return [{"track": t, "nonce": n, "ok": True, "quality": 1, "runtime_ms": 1,
-                     "error": None} for (_a, t, _h, n, _f) in args]
+                     "error": None} for (_a, t, _h, n, _f, _to) in args]
 
     def from_name(app_name, name):
         lookups.append(name)
@@ -234,7 +234,7 @@ def test_modal_evaluate_skips_holdout_on_a_loss_and_charges_each_call(monkeypatc
         def starmap(self, args):
             starmaps.append(len(args))
             return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1000,
-                     "error": None} for (_a, t, _h, n, _f) in args]
+                     "error": None} for (_a, t, _h, n, _f, _to) in args]
 
     mod = types.ModuleType("modal")
     mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
@@ -247,3 +247,102 @@ def test_modal_evaluate_skips_holdout_on_a_loss_and_charges_each_call(monkeypatc
     assert b.cost_mark() > 0
     r2 = b.evaluate(req(baseline=base(50)))
     assert starmaps == [3, 3, 3] and r2.holdout_reason == "won" and len(r2.holdout) == 3
+
+
+DEAD_WARNING = ("warning: function `polish` is never used\n"
+                "   --> tig-algorithms/src/knapsack/talos_cand/mod.rs:3:4\n")
+
+
+def test_fake_bench_reports_dead_new_code_without_scoring():
+    scored = []
+    fb = FakeBench(lambda ch, files, ns: scored.append(ns) or [100] * ns.count,
+                   compile_output=lambda files: DEAD_WARNING)
+    r = req(baseline=base(100))
+    r.prior_functions = {"mod.rs": ["x"]}
+    out = fb.evaluate(r)
+    # mutation: scoring the dead candidate anyway costs the loop a full C3 job for a no-op
+    assert out.compile.ok and out.holdout_reason == "dead_code" and out.training == []
+    assert scored == []
+    # a request without prior_functions (the baseline measurement) is never checked
+    assert fb.evaluate(req(baseline=base(100))).holdout_reason == "not_won"
+
+
+def test_modal_evaluate_stops_after_a_build_with_dead_new_code(monkeypatch):
+    starmaps = []
+
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": DEAD_WARNING}
+
+        def starmap(self, args):
+            starmaps.append(len(args))
+            return []
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    r = req(baseline=base(100))
+    r.prior_functions = {"mod.rs": ["x"]}
+    out = ModalBench().evaluate(r)
+    # mutation: starmapping the nonces before the check spends Modal time on a no-op
+    assert out.holdout_reason == "dead_code" and out.training == [] and starmaps == []
+
+
+def test_modal_starmap_carries_the_per_track_timeout(monkeypatch):
+    from talos.inside import NONCE_TIMEOUT_S
+    timeouts = []
+
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": "ok"}
+
+        def starmap(self, args):
+            timeouts.extend(a[5] for a in args)
+            return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1,
+                     "error": None} for (_a, t, _h, n, _f, _to) in args]
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    r = req(baseline=base(100))
+    r.timeouts = {"t": 42}
+    ModalBench().evaluate(r)
+    # mutation: a flat NONCE_TIMEOUT_S in the starmap args ignores the loop's per-track cap
+    assert timeouts == [42, 42, 42]
+    timeouts.clear()
+    ModalBench().evaluate(req(baseline=base(100)))
+    assert timeouts == [NONCE_TIMEOUT_S] * 3
+
+
+def test_a_stale_deploy_is_reported_at_once_not_retried_as_an_outage(monkeypatch):
+    # The PR that added timeout_s to score_nonce needs `talos setup` re-run on Modal. Without
+    # this check a client talking to the old deploy retried the TypeError for the whole
+    # 900 s window and then reported "Modal unreachable". mutation: treating the TypeError
+    # like a transport error brings the 17 retries and the wrong diagnosis back
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": "ok"}
+
+        def starmap(self, args):
+            raise TypeError("score_nonce() takes 5 positional arguments but 6 were given")
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    clock, sleeps = FakeClock(), []
+    b = ModalBench(clock=clock, sleep=recording_sleep(clock, sleeps))
+    with pytest.raises(BenchUnavailable, match="talos setup"):
+        b.evaluate(req(baseline=base(100)))
+    assert sleeps == []

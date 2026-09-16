@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import resources
 
+from talos.diagnostics import relevant
+
 STRATEGY_TAGS = ["construction", "local_search", "metaheuristic", "constraint_relaxation",
                  "decomposition", "hybrid", "data_structure", "parameter_tuning"]
 
@@ -59,6 +61,20 @@ def focus_sentence(ctx: PromptContext) -> str:
             f"worse: confine changes to the code path that serves \"{ctx.track}\".")
 
 
+def describe_attempt(h: dict) -> str:
+    """One line per failed attempt, with what the run measured: a title plus the outcome told
+    the model nothing about a +0.14% track, a -0.37% track and a 14x runtime."""
+    line = f"- {h.get('title', '')} [{h.get('outcome', '')}]"
+    if "mean_rel_delta" in h:
+        line += (f" mean {h['mean_rel_delta']:+.2%}, worst track {h.get('worst_track', '?')} "
+                 f"{h.get('worst_rel_delta', 0.0):+.2%}")
+        if "runtime_ratio" in h:
+            line += f", runtime {h['runtime_ratio']:.1f}x baseline"
+    if h.get("error"):
+        line += f": {str(h['error'])[:200]}"
+    return line
+
+
 def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
     scope = f"on track \"{ctx.track}\"" if ctx.track else "across every active track"
     focus = (focus_sentence(ctx) + "\n\n") if ctx.track else ""
@@ -78,8 +94,7 @@ def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
     if ctx.tacit.strip():
         parts.append(f"Tacit knowledge (lessons so far):\n{ctx.tacit}")
     if ctx.failed_hypotheses:
-        lines = "\n".join(f"- {h.get('title', '')} [{h.get('outcome', '')}]"
-                          for h in ctx.failed_hypotheses)
+        lines = "\n".join(describe_attempt(h) for h in ctx.failed_hypotheses)
         parts.append("Already tried against this exact code and did NOT help; do not repeat:\n"
                      + lines)
     if ctx.forced_tag:
@@ -106,10 +121,32 @@ def compile_fix_prompts(ctx: PromptContext, files: dict[str, str],
                         compiler_output: str) -> tuple[str, str]:
     system = (f"You are fixing a Rust compile error in a TIG \"{ctx.challenge}\" solver.\n\n"
               f"{SEARCH_REPLACE_FORMAT}\n\n{_rust_rules()}")
-    user = (f"The build failed with:\n```\n{compiler_output[-6000:]}\n```\n\n"
+    # 12000 holds the eight errors of run 20260916-095103 iteration 5; 6000 showed the last few.
+    user = (f"The build failed with:\n```\n{relevant(compiler_output)[-12000:]}\n```\n\n"
+            f"{_file_names_line(files)}\n\n"
             f"Current files:\n{_files_block(files)}\n\nEmit edit blocks that fix the build "
             f"without abandoning the intended change.")
     return system, user
+
+
+def dead_code_fix_prompts(ctx: PromptContext, files: dict[str, str],
+                          names: list[str]) -> tuple[str, str]:
+    """The build succeeded but the functions the edit added are never called, so the change is
+    not on the solve path. Same contract as compile_fix_prompts."""
+    system = (f"You are completing an unfinished edit to a Rust solver for the TIG "
+              f"\"{ctx.challenge}\" solver.\n\n{SEARCH_REPLACE_FORMAT}\n\n{_rust_rules()}")
+    listed = "\n".join(f"- {n}" for n in names)
+    user = (f"The build succeeded, but these functions the edit added are never called, so the "
+            f"change cannot affect the score:\n{listed}\n\n{_file_names_line(files)}\n\n"
+            f"Current files:\n{_files_block(files)}\n\nEmit edit blocks that call them from "
+            f"the solve path as the hypothesis intended (or remove them if the hypothesis is "
+            f"already implemented without them).")
+    return system, user
+
+
+def _file_names_line(files: dict[str, str]) -> str:
+    return ("The only files you may edit, and the names to use in SEARCH headers: "
+            + ", ".join(sorted(files)) + ". Other algorithms in the build output are not yours.")
 
 
 def edit_repair_prompts(ctx: PromptContext, files: dict[str, str],
@@ -125,8 +162,7 @@ def edit_repair_prompts(ctx: PromptContext, files: dict[str, str],
 def distill_prompts(ctx: PromptContext, failed: list[dict]) -> tuple[str, str]:
     system = ("You distill one reusable lesson from failed optimisation attempts. Reply with "
               "exactly one line starting with \"LESSON: \" or the single word NONE.")
-    lines = "\n".join(f"- {h.get('title', '')}: {h.get('description', '')} "
-                      f"[{h.get('outcome', '')}]" for h in failed)
+    lines = "\n".join(f"{describe_attempt(h)}\n  {h.get('description', '')}" for h in failed)
     user = (f"Challenge: {ctx.challenge}. Direction: {ctx.direction}\n\nFailed attempts:\n"
             f"{lines}\n\nWhat general lesson, independent of these exact constants, should "
             f"guide the next attempts?")

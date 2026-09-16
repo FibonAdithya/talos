@@ -55,6 +55,10 @@ progress.
    the other tracks' training nonces against the cached baseline training results
    for those same nonces, and the confirmation rule is
    `talos/scoring.py::beats_focused`.
+   The one deliberate asymmetry is the per-nonce timeout: the baseline runs under the
+   flat `talos/inside.py::NONCE_TIMEOUT_S`, a candidate under the tighter per-track cap
+   from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a `timeout` error,
+   never a quality, so it can only fail a candidate, never flatter one.
 2. **The job's `rand_hash` lives in `job.json` and nowhere the agent can
    read.** It seeds every nonce; an LLM that sees it can tune to the exact
    nonces it is scored on. It is stripped from the spec the prompts see
@@ -75,7 +79,11 @@ progress.
 4. **An edit outside the algorithm files fails the whole iteration; its
    in-scope blocks are never applied either.** `talos/edits.py::apply_edit_response`
    reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration
-   on any of them, including in a compile-fix round. With `codex-cli` the
+   on any of them, including in a compile-fix round. The only spelling accepted
+   besides the bare file name is the candidate's own directory, with or without the
+   directories above it (`.../talos_cand/<name>`, `talos_cand/<name>`;
+   `talos/edits.py::_resolve`), because that is how the compiler prints it; another
+   algorithm's directory with the same basename is still rejected. With `codex-cli` the
    sandbox settings are ignored, so `talos/agentic.py::read_back` is the only
    enforcement, which is why agentic codex is opt-in behind
    `TALOS_ALLOW_CODEX_AGENTIC`.

@@ -36,3 +36,32 @@ def test_miss_reported_not_guessed():
     # the block never touched the file
     out = apply_edit_response(FILES, blk("mod.rs", "fn zzz() {}", "fn zzz() { 1 }"))
     assert out.applied == 0 and len(out.misses) == 1 and out.misses[0].reason == "not_found"
+
+
+def test_candidate_path_spelled_with_the_monorepo_prefix_is_in_scope():
+    # The compiler prints `tig-algorithms/src/knapsack/talos_cand/track2.rs`, and a fix response
+    # copies that spelling. It names the candidate's own file, so it is in scope.
+    # mutation: matching only the bare name rejects the block and fails the iteration
+    out = apply_edit_response(FILES, blk("tig-algorithms/src/knapsack/talos_cand/mod.rs",
+                                         "fn a() {}", "fn a() { 1 }"))
+    assert out.applied == 1 and not out.rejected
+    assert out.files["mod.rs"].startswith("fn a() { 1 }")
+
+
+def test_another_algorithm_dir_with_the_same_basename_stays_rejected():
+    # mutation: resolving by basename lets an edit to knap_quality_opt_v11/mod.rs land on
+    # the candidate's mod.rs
+    out = apply_edit_response(FILES, blk("tig-algorithms/src/knapsack/knap_quality_opt_v11/mod.rs",
+                                         "fn a() {}", "fn a() { 1 }"))
+    assert out.applied == 0
+    assert out.rejected == ["tig-algorithms/src/knapsack/knap_quality_opt_v11/mod.rs"]
+
+
+def test_candidate_path_without_the_leading_directories_is_in_scope():
+    # `talos_cand/mod.rs` can only denote the candidate's own file. mutation: requiring the
+    # slash before the algorithm name rejects it and fails the iteration
+    out = apply_edit_response(FILES, blk("talos_cand/mod.rs", "fn a() {}", "fn a() { 1 }"))
+    assert out.applied == 1 and not out.rejected
+    # a directory that merely ends in the name is someone else's
+    out = apply_edit_response(FILES, blk("old_talos_cand/mod.rs", "fn a() {}", "fn a() { 1 }"))
+    assert out.applied == 0 and out.rejected == ["old_talos_cand/mod.rs"]

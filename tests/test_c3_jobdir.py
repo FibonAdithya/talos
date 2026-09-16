@@ -62,7 +62,8 @@ def test_write_job_dir_contents_and_secrecy(tmp_path):
     d = c3_jobdir.write_job_dir(tmp_path / "job", req(), "3")
     names = sorted(p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file())
     assert names == [".c3", "job.sh", "payload.json", "talos/__init__.py", "talos/c3_job.py",
-                     "talos/challenges.py", "talos/inside.py", "talos/scoring.py", "talos/types.py"]
+                     "talos/challenges.py", "talos/diagnostics.py", "talos/inside.py",
+                     "talos/scoring.py", "talos/types.py"]
     assert stat.S_IMODE((d / "job.sh").stat().st_mode) & stat.S_IXUSR
     assert MONOREPO_REF in (d / "job.sh").read_text()
     p = json.loads((d / "payload.json").read_text())
@@ -100,3 +101,20 @@ def test_a_compile_only_request_gets_the_one_nonce_floor_and_empty_sets(tmp_path
     assert f'time: "{floor}"' in (d / ".c3").read_text() and floor == "00:23:00"
     p = json.loads((d / "payload.json").read_text())
     assert p["training"] == [] and p["holdout"] == [] and p["baseline_training"] is None
+
+
+def test_payload_carries_the_prior_function_names(tmp_path):
+    # mutation: dropping prior_functions from the payload leaves the job unable to tell a
+    # function the candidate added from one the baseline already had
+    r = req()
+    r.prior_functions = {"mod.rs": ["solve"]}
+    assert c3_jobdir.payload(r)["prior_functions"] == {"mod.rs": ["solve"]}
+    assert c3_jobdir.payload(req())["prior_functions"] is None
+
+
+def test_payload_carries_per_track_timeouts(tmp_path):
+    # mutation: dropping timeouts from the payload leaves the job on the flat 600 s cap
+    r = req()
+    r.timeouts = {"t": 42}
+    assert c3_jobdir.payload(r)["timeouts"] == {"t": 42}
+    assert c3_jobdir.payload(req())["timeouts"] is None

@@ -3,6 +3,7 @@ step so the run can be resumed. No network code here beyond calling the provider
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import time
 from dataclasses import dataclass
@@ -13,11 +14,15 @@ from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, EvalResul
 from talos.budget import BudgetExhausted, exhausted
 from talos.challenges import CHALLENGES
 from talos.edits import EditError, EditOutcome, apply_edit_response
-from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts, distill_prompts,
-                           edit_prompts, edit_repair_prompts, hypothesis_prompts,
+from talos.diagnostics import dead_new_functions, defined_functions
+from talos.inside import NONCE_TIMEOUT_S
+from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
+                           dead_code_fix_prompts, distill_prompts, edit_prompts,
+                           edit_repair_prompts, hypothesis_prompts,
                            parse_distillation, parse_hypothesis)
 from talos.providers import ProviderAuthError, ProviderError, ProviderRateLimited
-from talos.scoring import ScoringError, beats, beats_focused, bundle_delta, focus_sets, select
+from talos.scoring import (ScoringError, beats, beats_focused, bundle_delta, focus_sets,
+                           runtime_ratio, select)
 from talos.search_replace import format_misses
 from talos.state import Candidate, JobSpec, JobState, JobStore, TERMINAL
 from talos.types import Completion
@@ -32,6 +37,12 @@ class Thresholds:
     edit_repair_rounds: int = 1
     rate_limit_wait_s: int = 30
     rate_limit_max_waits: int = 20
+    # A candidate nonce may run this many times the baseline's slowest nonce on its track,
+    # but never less than runtime_floor_s and never more than the flat NONCE_TIMEOUT_S the
+    # baseline ran under. 0 disables the guard. TIG itself caps fuel, not seconds; this is a
+    # research-economy cap: one 14x-slower candidate ate a third of a 4 h budget.
+    runtime_ceiling: float = 3.0
+    runtime_floor_s: int = 60
 
 
 class Interrupted(Exception):
@@ -138,9 +149,22 @@ class Loop:
     def _request(self, files: dict[str, str], baseline_training) -> EvalRequest:
         training, holdout = self._focus()
         base = select(baseline_training, training) if baseline_training is not None else None
+        prior = {name: defined_functions(text) for name, text in self._current_files().items()}
         return EvalRequest(challenge=self.spec.challenge, files=files, training=training,
                            holdout=holdout, fuel=self.spec.fuel, baseline_training=base,
-                           rule=self.rule)
+                           rule=self.rule, prior_functions=prior,
+                           timeouts=self._timeouts(baseline_training))
+
+    def _timeouts(self, baseline_training) -> dict[str, int] | None:
+        if self.t.runtime_ceiling <= 0 or not baseline_training:
+            return None
+        slowest: dict[str, int] = {}
+        for r in baseline_training:
+            slowest[r.track] = max(slowest.get(r.track, 0), r.runtime_ms)
+        return {track: min(NONCE_TIMEOUT_S,
+                           max(self.t.runtime_floor_s,
+                               math.ceil(self.t.runtime_ceiling * ms / 1000)))
+                for track, ms in slowest.items()}
 
     def _bench_evaluate(self, files: dict[str, str]) -> EvalResult:
         """pending_job carries the files BEFORE the call: a C3 job outlives this process, and a
@@ -293,10 +317,15 @@ class Loop:
         it_dir = self.store.iteration_dir(n)
         res = self._bench_evaluate(files)
         for _ in range(self.t.compile_fix_rounds):
-            if res.compile.ok:
+            dead = self._dead_code(res)
+            if res.compile.ok and not dead:
                 break
-            self._event("compile_failed", output=res.compile.output[-2000:])
-            system, user = compile_fix_prompts(ctx, files, res.compile.output)
+            if dead:
+                self._event("dead_code", names=dead)
+                system, user = dead_code_fix_prompts(ctx, files, dead)
+            else:
+                self._event("compile_failed", output=res.compile.output[-2000:])
+                system, user = compile_fix_prompts(ctx, files, res.compile.output)
             try:
                 fixed = apply_edit_response(files, self._llm(system, user).text)
             except EditError:
@@ -316,6 +345,11 @@ class Loop:
             record.update(outcome="failed:compile")
             self._finish_iteration(n, record, improved=False)
             return
+        dead = self._dead_code(res)
+        if dead:
+            record.update(outcome="failed:dead_code", error=f"never called: {dead}")
+            self._finish_iteration(n, record, improved=False)
+            return
         for name, text in files.items():
             (it_dir / name).parent.mkdir(parents=True, exist_ok=True)
             (it_dir / name).write_text(text)
@@ -329,8 +363,14 @@ class Loop:
             return
         cand = Candidate(iteration=n, files=files, artifact_id=res.compile.artifact_id,
                          training=results, delta=delta.to_dict(), hypothesis=hypothesis)
+        worst = min(delta.tracks, key=lambda t: t.rel_delta)
+        # What the next prompt's recall block says about this attempt, beyond its outcome.
+        record.update(mean_rel_delta=delta.mean_rel_delta, worst_track=worst.track,
+                      worst_rel_delta=delta.worst_rel_delta,
+                      runtime_ratio=runtime_ratio(base_tr, results))
         self._event("scored", mean_rel_delta=delta.mean_rel_delta,
-                    worst_rel_delta=delta.worst_rel_delta, error_rate=delta.error_rate)
+                    worst_rel_delta=delta.worst_rel_delta, error_rate=delta.error_rate,
+                    runtime_ratio=record["runtime_ratio"])
         if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a failure
             record.update(outcome="failed:runtime", error_rate=delta.error_rate)
             self._finish_iteration(n, record, improved=False)
@@ -351,6 +391,14 @@ class Loop:
         self._finish_iteration(n, record, improved=improved)
         if wins:
             self._confirm(cand, res.holdout, res.holdout_reason)
+
+    def _dead_code(self, res: EvalResult) -> list[str]:
+        """The bench stopped after the build because the edit's new functions are never called.
+        The names come back out of the compile output, which every backend keeps."""
+        if not res.compile.ok or res.holdout_reason != "dead_code":
+            return []
+        prior = {name: defined_functions(text) for name, text in self._current_files().items()}
+        return dead_new_functions(res.compile.output, prior) or ["<unnamed>"]
 
     def _confirm(self, cand: Candidate, ho, reason: str) -> None:
         """The held-out results come back from the same evaluate call that scored training: the

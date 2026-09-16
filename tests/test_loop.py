@@ -663,3 +663,83 @@ def test_focused_context_names_track_and_guards(tmp_path):
     loop2, *_ = make(tmp_path / "b", [hyp("a"), edit(5)], two_tracks=True)
     ctx2 = loop2._context()
     assert ctx2.track is None and ctx2.guard_tracks == []
+
+
+DEAD_WARNING = ("warning: function `polish` is never used\n"
+                "   --> tig-algorithms/src/knapsack/talos_cand/mod.rs:3:4\n")
+
+
+def add_polish(k, call):
+    body = f"let k = {k};" + (" polish();" if call else "")
+    return ("<<<<<<< SEARCH mod.rs\nfn solve() { let k = 1; }\n=======\n"
+            f"fn polish() {{}}\nfn solve() {{ {body} }}\n>>>>>>> REPLACE\n")
+
+
+def dead_if_uncalled(files):
+    src = files["mod.rs"]
+    return DEAD_WARNING if "fn polish" in src and "polish();" not in src else "ok"
+
+
+def test_dead_new_code_gets_a_fix_round_before_scoring(tmp_path):
+    # mutation: treating a dead_code result like a scored one records failed:score for a
+    # candidate whose change was never on the solve path
+    wire = "<<<<<<< SEARCH mod.rs\nlet k = 2; }\n=======\nlet k = 2; polish(); }\n>>>>>>> REPLACE\n"
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), add_polish(2, call=False), wire], budget=b)
+    fb._compile_output = dead_if_uncalled
+    st = loop.run()
+    assert st.status == "won"
+    assert len(fb.calls) == 2
+    events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
+    dead = [e for e in events if e["kind"] == "dead_code"]
+    assert [e["names"] for e in dead] == [["mod.rs: polish"]]
+    # the request tells the bench which functions the edited code already had
+    assert fb.calls[0].prior_functions == {"mod.rs": ["solve"]}
+
+
+def test_dead_new_code_after_the_fix_rounds_fails_the_iteration(tmp_path):
+    # mutation: falling through to scoring after the rounds run out scores the no-op after all
+    still_dead = "<<<<<<< SEARCH mod.rs\nlet k = 2;\n=======\nlet k = 3;\n>>>>>>> REPLACE\n"
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), add_polish(2, call=False), still_dead],
+                               budget=b, thresholds=Thresholds(compile_fix_rounds=1))
+    fb._compile_output = dead_if_uncalled
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] == "failed:dead_code"
+    assert "polish" in st.hypotheses[0]["error"]
+    assert len(fb.calls) == 2
+
+
+def test_a_scored_record_carries_the_numbers_the_next_prompt_needs(tmp_path):
+    # mutation: recording only the outcome leaves the recall block with titles alone
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(2)], budget=b,
+                               scores=lambda ch, files, ns: [100] * ns.count)
+    fb._runtime_ms = 3
+    st = loop.run()
+    rec = st.hypotheses[0]
+    assert rec["outcome"] == "failed:score"
+    assert rec["mean_rel_delta"] == pytest.approx(0.0) and rec["worst_track"] == "t"
+    assert rec["worst_rel_delta"] == pytest.approx(0.0)
+    assert rec["runtime_ratio"] == pytest.approx(3.0)  # baseline rows run 1 ms
+
+
+def test_candidate_timeouts_follow_the_baseline_runtime_per_track(tmp_path):
+    # iteration 2 of run 20260916-095103 ran 395 s per nonce against a 28 s baseline under a
+    # flat 600 s timeout and ate a third of the hours budget. mutation: a flat timeout, or a
+    # ratio without the floor, sends 600 or 3 seconds for a 1 ms baseline track
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(2)], budget=b, two_tracks=True)
+    loop.state.baseline.training[0].runtime_ms = 100_000  # track "t"; track "u" stays at 1 ms
+    loop.run()
+    assert fb.calls[0].timeouts == {"t": 300, "u": 60}
+    # the ceiling never exceeds the flat timeout the baseline itself ran under
+    loop2, fp2, fb2, store2 = make(tmp_path / "b", [hyp("a"), edit(2)], budget=b)
+    loop2.state.baseline.training[0].runtime_ms = 10_000_000
+    loop2.run()
+    assert fb2.calls[0].timeouts == {"t": 600}
+    # a zero ceiling disables the guard
+    loop3, fp3, fb3, store3 = make(tmp_path / "c", [hyp("a"), edit(2)], budget=b,
+                                   thresholds=Thresholds(runtime_ceiling=0.0))
+    loop3.run()
+    assert fb3.calls[0].timeouts is None

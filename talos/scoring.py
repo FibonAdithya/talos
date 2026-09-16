@@ -72,6 +72,20 @@ def bundle_delta(baseline: list[NonceResult], candidate: list[NonceResult]) -> B
                        error_rate=errors / total)
 
 
+def runtime_ratio(baseline: list[NonceResult], candidate: list[NonceResult]) -> float:
+    """Mean candidate runtime over mean baseline runtime on the candidate's slowest track
+    relative to the baseline, so one track running 14x slower is not hidden by four that did
+    not change. Tracks whose baseline runtime is zero are skipped; no track leaves 1.0."""
+    b, c = _by_track(baseline), _by_track(candidate)
+    ratios = []
+    for track in b.keys() & c.keys():
+        bm = mean(r.runtime_ms for r in b[track].values())
+        if bm <= 0:
+            continue
+        ratios.append(mean(r.runtime_ms for r in c[track].values()) / bm)
+    return max(ratios) if ratios else 1.0
+
+
 def beats(baseline: list[NonceResult], candidate: list[NonceResult], rule: BeatRule) -> bool:
     d = bundle_delta(baseline, candidate)
     return (d.mean_rel_delta >= rule.margin

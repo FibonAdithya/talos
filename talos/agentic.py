@@ -11,7 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from talos.prompts import PromptContext, STRATEGY_TAGS, _rust_rules, focus_sentence
+from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, describe_attempt,
+                           focus_sentence)
 
 
 class AgenticError(ValueError):
@@ -217,8 +218,8 @@ def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
         prompt = ("Read CLAUDE.md (or AGENTS.md), then make one improvement to the solver under "
                   "algorithm/, check it with `talos compile`, and write .talos/hypothesis.json.")
         if ctx.failed_hypotheses:
-            prompt += "\nAlready tried and failed against this code: " + "; ".join(
-                h.get("title", "") for h in ctx.failed_hypotheses)
+            prompt += "\nAlready tried and failed against this code:\n" + "\n".join(
+                describe_attempt(h) for h in ctx.failed_hypotheses)
         if ctx.forced_tag:
             prompt += f"\nYou have stagnated: use strategy_tag \"{ctx.forced_tag}\"."
         loop._check_budget()
