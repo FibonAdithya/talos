@@ -49,12 +49,24 @@ def _files_block(files: dict[str, str]) -> str:
     return "\n\n".join(f"--- {name} ---\n{text}" for name, text in sorted(files.items()))
 
 
+def focus_sentence(ctx: PromptContext) -> str:
+    """The target sentence for a focused job; empty when the job optimises every track."""
+    if ctx.track is None:
+        return ""
+    guards = ", ".join(ctx.guard_tracks) or "none"
+    return (f"Optimise for track \"{ctx.track}\" only. The other active tracks ({guards}) are "
+            f"re-scored as a regression guard when a candidate wins, and none of them may get "
+            f"worse: confine changes to the code path that serves \"{ctx.track}\".")
+
+
 def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
+    scope = f"on track \"{ctx.track}\"" if ctx.track else "across every active track"
+    focus = (focus_sentence(ctx) + "\n\n") if ctx.track else ""
     system = (
         f"You are a research engineer improving a Rust solver for the TIG challenge "
         f"\"{ctx.challenge}\". The goal is to beat the current mainnet state of the art on "
         f"TIG's own benchmark: higher verifier quality per nonce under a fixed fuel budget, "
-        f"across every active track.\n\n"
+        f"{scope}.\n\n{focus}"
         f"The solver must keep this contract (template.rs):\n```rust\n{ctx.template_rs}\n```\n\n"
         f"Propose ONE specific change. Reply with a JSON object with keys \"title\" "
         f"(short), \"description\" (what to change and why it should raise quality), and "
@@ -82,9 +94,11 @@ def edit_prompts(ctx: PromptContext, hypothesis: dict) -> tuple[str, str]:
         f"You are editing a Rust solver for the TIG challenge \"{ctx.challenge}\".\n\n"
         f"{SEARCH_REPLACE_FORMAT}\n\n{_rust_rules()}"
     )
+    focus = focus_sentence(ctx)
     user = (f"Implement this hypothesis:\nTitle: {hypothesis['title']}\n"
             f"Description: {hypothesis['description']}\n\n"
-            f"Current algorithm source files:\n{_files_block(ctx.files)}")
+            + (focus + "\n\n" if focus else "")
+            + f"Current algorithm source files:\n{_files_block(ctx.files)}")
     return system, user
 
 
