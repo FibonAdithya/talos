@@ -56,7 +56,10 @@ uv pip install --python .venv/bin/python -e '.[dev]'
 ### `talos setup`
 
 Run once. Asks first for the compute backend (`modal` or `c3`), then the provider kind, a
-model id (a sensible default is offered per provider), an API key for API providers
+model id (a sensible default is offered per provider; for `codex-cli` the wizard reads
+the catalog from `codex debug models`, prints the models your login accepts, and offers
+the first as the default; for `claude-cli` an alias such as `fable` works), an API key
+for API providers
 (nothing for CLI providers, beyond checking the binary is on `PATH` and running one
 trivial call to confirm a logged-in session), and a default mode (`single-shot` or
 `agentic`) for CLI providers. The Modal token id/secret prompt (create one at

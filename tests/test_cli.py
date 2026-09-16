@@ -869,3 +869,51 @@ def test_compile_refuses_an_unknown_backend(tmp_path, monkeypatch, capsys):
                         lambda *a, **k: _refuse_bench("bench built for an unknown backend"))
     assert cli.main(["compile", "--challenge", "knapsack"]) == 2
     assert "unknown backend 'aws'" in capsys.readouterr().err
+
+
+def _recording(answers):
+    prompts = []
+    inner = scripted(answers)
+    def ask(prompt, default=None, secret=False):
+        prompts.append((prompt, default))
+        return inner(prompt, default, secret)
+    return ask, prompts
+
+
+def test_setup_codex_offers_the_catalog_and_defaults_to_its_first_model(tmp_path, monkeypatch,
+                                                                          capsys):
+    # mutation: ignoring the catalog keeps the static default; defaulting to the last slug
+    # instead of the first picks gpt-5.5
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "list_codex_models", lambda: ["gpt-5.6-sol", "gpt-5.5"])
+    ask, prompts = _recording(["", "codex-cli", "", "", "ak", "as"])
+    rc = cli.main(["setup"], ask=ask)
+    assert rc == 0
+    assert json.loads((tmp_path / "talos.config.json").read_text())["model"] == "gpt-5.6-sol"
+    out = capsys.readouterr().out
+    assert "gpt-5.6-sol" in out and "gpt-5.5" in out
+    assert [d for p, d in prompts if p.startswith("Model")] == ["gpt-5.6-sol"]
+
+
+def test_setup_codex_falls_back_to_the_static_default_without_a_catalog(tmp_path, monkeypatch):
+    # mutation: the stale gpt-5-codex default is what the ChatGPT-account codex rejects
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "list_codex_models", lambda: [])
+    rc = cli.main(["setup"], ask=scripted(["", "codex-cli", "", "", "ak", "as"]))
+    assert rc == 0
+    assert json.loads((tmp_path / "talos.config.json").read_text())["model"] == "gpt-5.5"
+
+
+def test_setup_claude_cli_names_the_model_aliases_in_the_prompt(tmp_path, monkeypatch):
+    # mutation: dropping the alias hint leaves the user guessing at full model ids
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
+    ask, prompts = _recording(["", "claude-cli", "", "", "ak", "as"])
+    assert cli.main(["setup"], ask=ask) == 0
+    model_prompts = [p for p, d in prompts if p.startswith("Model")]
+    assert len(model_prompts) == 1 and "fable" in model_prompts[0] and "sonnet" in model_prompts[0]

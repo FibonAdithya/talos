@@ -2,6 +2,7 @@ import io
 import json
 import types
 import urllib.error
+from pathlib import Path
 
 import httpx2
 import pytest
@@ -12,7 +13,7 @@ from talos.providers.fake import FakeProvider
 from talos.providers.openai_compat import OpenAICompat
 from talos.providers.pricing import estimate_cost
 from talos.providers.claude_cli import ClaudeCli
-from talos.providers.codex_cli import CodexCli
+from talos.providers.codex_cli import CodexCli, list_codex_models
 from talos.types import Usage
 
 
@@ -210,3 +211,49 @@ def test_anthropic_provider_maps_errors_and_prices_usage():
     err = anthropic.AuthenticationError("bad", response=resp, body=None)
     with pytest.raises(ProviderAuthError):
         AnthropicProvider("claude-opus-5", "k", client=client(err)).complete("s", "u")
+
+
+def _codex_catalog(*entries):
+    return json.dumps({"models": [
+        {"slug": s, "visibility": v, "priority": p} for s, v, p in entries]})
+
+
+def _run_returning(stdout, returncode=0):
+    def run(cmd, **kw):
+        assert cmd == ["codex", "debug", "models"]
+        return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+    return run
+
+
+def test_codex_list_models_keeps_visible_entries_in_priority_order():
+    # mutation: dropping the visibility filter leaks gpt-reserve; dropping the sort returns
+    # catalog order, which puts gpt-5.5 first here
+    run = _run_returning(_codex_catalog(("gpt-5.5", "list", 12), ("gpt-reserve", "hide", 3),
+                                        ("gpt-5.6-sol", "list", 4)))
+    assert list_codex_models(run=run) == ["gpt-5.6-sol", "gpt-5.5"]
+
+
+@pytest.mark.parametrize("run", [
+    _run_returning("", returncode=1),
+    _run_returning("not json"),
+    _run_returning(json.dumps({"models": "oops"})),
+    lambda cmd, **kw: (_ for _ in ()).throw(FileNotFoundError("codex")),
+])
+def test_codex_list_models_is_empty_when_the_catalog_is_unavailable(run):
+    # mutation: letting any of these raise breaks `talos setup` on a machine without codex
+    assert list_codex_models(run=run) == []
+
+
+def test_codex_cli_sends_the_prompt_on_stdin_not_argv(tmp_path):
+    # Linux caps one argv element at 128 KiB (MAX_ARG_STRLEN); a knapsack prompt carrying five
+    # ~100 KB track files failed with "[Errno 7] Argument list too long" on 2026-09-16.
+    # mutation: putting the prompt back in argv makes the longest element ~200 KB
+    seen = {}
+    def run(cmd, **kw):
+        seen["cmd"], seen["input"] = cmd, kw.get("input")
+        Path(cmd[cmd.index("-o") + 1]).write_text("ok")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    big = "x" * 200_000
+    CodexCli(model="gpt-5.5", run=run).complete("SYS", big)
+    assert max(len(a) for a in seen["cmd"]) < 131072
+    assert seen["cmd"][-1] == "-" and "SYS" in seen["input"] and big in seen["input"]

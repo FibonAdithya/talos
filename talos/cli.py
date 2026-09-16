@@ -26,6 +26,7 @@ from talos.config import Config, ConfigError, ENV_KEYS, load, resolve_api_key, s
 from talos.mainnet import ChallengeInfo, MainnetError, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
+from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
 from talos.state import JobSpec, JobState, JobStore
 from talos.types import Usage
@@ -122,6 +123,21 @@ def bench_hardware_class(backend: str, challenge: str) -> str:
     return c3_hardware_class(spec) if backend == "c3" else hardware_class(spec)
 
 
+def _model_prompt(kind: str) -> tuple[str, str | None]:
+    """Prompt text and default for the model question. CLI providers know their own models:
+    codex publishes a catalog, claude accepts short aliases. The static default stands in when
+    the catalog cannot be read."""
+    default = DEFAULT_MODELS.get(kind) or None
+    if kind == "codex-cli":
+        models = list_codex_models()
+        if models:
+            print("Models your codex CLI accepts: " + ", ".join(models))
+            return "Model", models[0]
+    if kind == "claude-cli":
+        return "Model (an alias such as fable, opus or sonnet, or a full model id)", default
+    return "Model", default
+
+
 def cmd_setup(args, ask) -> int:
     root = Path.cwd()
     backend = ask(f"Compute backend ({' or '.join(BACKENDS)})", "modal")
@@ -135,7 +151,7 @@ def cmd_setup(args, ask) -> int:
     if kind not in KINDS or kind == "fake":
         print(f"unknown provider {kind!r}", file=sys.stderr)
         return 2
-    model = ask("Model", DEFAULT_MODELS.get(kind) or None)
+    model = ask(*_model_prompt(kind))
     api_base = ask("API base URL") if kind == "custom" else None
     api_key = None
     if kind in ("anthropic", "openai", "google", "openrouter", "custom"):
