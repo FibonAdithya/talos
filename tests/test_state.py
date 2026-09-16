@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -75,3 +76,16 @@ def test_pending_job_roundtrips_and_defaults_to_none(tmp_path):
     assert store.load().pending_job == st.pending_job
     (tmp_path / "state.json").write_text(json.dumps({**st.to_dict(), "pending_job": None}))
     assert store.load().pending_job is None
+
+
+def test_spec_track_round_trips_and_defaults_to_none(tmp_path):
+    # mutation: dropping the `.get` default in from_dict makes every job.json written before
+    # the field existed unresumable; dropping the field loses the focus on resume
+    focused = replace(spec(), track="n=1")
+    store = JobStore(tmp_path)
+    store.write_spec(focused)
+    assert store.read_spec().track == "n=1"
+    old = spec().to_dict()
+    del old["track"]
+    assert JobSpec.from_dict(old).track is None
+    assert spec().track is None

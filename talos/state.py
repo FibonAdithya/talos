@@ -32,6 +32,7 @@ class JobSpec:
     created_at: float
     monorepo_ref: str
     challenge_id: str
+    track: str | None = None  # one active track to optimise; None = all tracks
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -44,6 +45,7 @@ class JobSpec:
         d["budget"] = Budget(**d["budget"])
         d["training"] = [NonceSet(**n) for n in d["training"]]
         d["holdout"] = [NonceSet(**n) for n in d["holdout"]]
+        d["track"] = d.get("track")
         return cls(**d)
 
     def redacted(self) -> dict:
