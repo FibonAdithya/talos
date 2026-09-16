@@ -333,7 +333,7 @@ def test_baseline_is_budget_checked_before_the_first_bench_call(tmp_path):
     loop.state.baseline = None
     calls_before = len(fb.calls)
     mainnet = types.SimpleNamespace(
-        top_algorithm=lambda ch: ("base", 1),
+        top_algorithm=lambda ch: ("base", "base_id", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
         fetch_template=lambda ch: "pub fn solve_challenge(")
     with pytest.raises(BudgetExhausted) as ei:
@@ -353,7 +353,7 @@ def test_baseline_compute_cost_is_charged_before_the_next_check(tmp_path):
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
     loop.state.baseline = None
     mainnet = types.SimpleNamespace(
-        top_algorithm=lambda ch: ("base", 1),
+        top_algorithm=lambda ch: ("base", "base_id", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
         fetch_template=lambda ch: "pub fn solve_challenge(")
     loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
@@ -371,7 +371,7 @@ def test_baseline_and_best_dirs_are_written(tmp_path):
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)])
     loop.state.baseline = None
     mainnet = types.SimpleNamespace(
-        top_algorithm=lambda ch: ("base", 1),
+        top_algorithm=lambda ch: ("base", "base_id", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
         fetch_template=lambda ch: "pub fn solve_challenge(")
     loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
@@ -588,7 +588,7 @@ def test_measure_baseline_keeps_a_stored_baseline_job_record(tmp_path):
         return real(request)
     fb.evaluate = evaluate
     mainnet = types.SimpleNamespace(
-        top_algorithm=lambda ch: ("base", 1),
+        top_algorithm=lambda ch: ("base", "base_id", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
         fetch_template=lambda ch: "pub fn solve_challenge(")
     loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)

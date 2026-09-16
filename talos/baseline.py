@@ -53,7 +53,7 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
     top = mainnet.top_algorithm(challenge)
     if top is None:
         raise BaselineError(f"no adopted, compiled algorithm found on mainnet for {challenge}")
-    name, adoption = top
+    name, _algorithm_id, adoption = top
     template = mainnet.fetch_template(challenge)
     key = cache_key(challenge, MONOREPO_REF, name, training, holdout, fuel, hardware_class)
     cache_file = Path(cache_dir) / challenge / f"{key}.json"

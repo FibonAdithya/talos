@@ -797,7 +797,7 @@ def _refuse_bench(why):
 
 def _stub_mainnet(monkeypatch):
     """Everything resolve_baseline reads from mainnet, so a test never hits the network."""
-    monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("fake_base", 1))
+    monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("fake_base", "c003_a000", 1))
     monkeypatch.setattr("talos.mainnet.fetch_template", lambda ch: "pub fn solve_challenge(")
     monkeypatch.setattr("talos.mainnet.fetch_algorithm_files",
                         lambda ch, name: {"mod.rs": "fn solve() {}\n"})

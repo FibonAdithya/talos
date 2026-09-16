@@ -70,8 +70,9 @@ def fetch_challenge_info(name: str, get_json=_get_json) -> ChallengeInfo:
     raise MainnetError(f"challenge {name!r} not found on mainnet")
 
 
-def top_algorithm(name: str, get_json=_get_json) -> tuple[str, int] | None:
-    """(algorithm_name, adoption) of the highest-adoption compiled algorithm, or None."""
+def top_algorithm(name: str, get_json=_get_json) -> tuple[str, str, int] | None:
+    """(algorithm_name, algorithm_id, adoption) of the highest-adoption compiled algorithm, or
+    None. The id is what a benchmark's precommit names its algorithm by."""
     block_id = _block_id(get_json)
     challenges = get_json(f"{MAINNET_API}/get-challenges?block_id={block_id}")
     algos = get_json(f"{MAINNET_API}/get-algorithms?block_id={block_id}")
@@ -81,7 +82,7 @@ def top_algorithm(name: str, get_json=_get_json) -> tuple[str, int] | None:
         raise MainnetError(f"challenge {name!r} not found on mainnet")
     compiled = {b["algorithm_id"]: bool((b.get("details") or {}).get("compile_success"))
                 for b in algos.get("binarys", [])}
-    best: tuple[str, int] | None = None
+    best: tuple[str, str, int] | None = None
     for algo in algos.get("codes", []):
         details = algo.get("details") or {}
         if details.get("challenge_id") != cid or not compiled.get(algo["id"]):
@@ -91,8 +92,8 @@ def top_algorithm(name: str, get_json=_get_json) -> tuple[str, int] | None:
         except (TypeError, ValueError):
             adoption = 0
         algo_name = details.get("name")
-        if adoption > 0 and algo_name and (best is None or adoption > best[1]):
-            best = (algo_name, adoption)
+        if adoption > 0 and algo_name and (best is None or adoption > best[2]):
+            best = (algo_name, algo["id"], adoption)
     return best
 
 

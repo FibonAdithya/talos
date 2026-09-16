@@ -60,7 +60,9 @@ def test_challenge_info_unknown_name_raises():
 def test_top_algorithm_skips_uncompiled_and_other_challenges():
     # mutation: dropping the compile_success filter picks "broken" (adoption 90)
     # mutation: dropping the challenge filter picks "other" (adoption 99)
-    assert mainnet.top_algorithm("vehicle_routing", get_json=fake_get_json) == ("fast_lane_v6", 50)
+    # mutation: returning the name where the id belongs gives precommit matching nothing to match
+    assert mainnet.top_algorithm("vehicle_routing", get_json=fake_get_json) == (
+        "fast_lane_v6", "a2", 50)
 
 
 def test_top_algorithm_none_when_no_adoption():

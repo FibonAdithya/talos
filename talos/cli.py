@@ -248,7 +248,7 @@ def _fake_script(system: str, user: str) -> str:
 
 
 FAKE_MAINNET = types.SimpleNamespace(
-    top_algorithm=lambda ch: ("fake_base", 1),
+    top_algorithm=lambda ch: ("fake_base", "c003_a000", 1),
     fetch_algorithm_files=lambda ch, name: {"mod.rs": "fn solve() { let k = 1; }\n"},
     fetch_template=lambda ch: "pub fn solve_challenge(")
 

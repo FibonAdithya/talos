@@ -12,7 +12,7 @@ TR = [NonceSet("t", "ab" * 32, 0, 2)]
 HO = [NonceSet("t", "ab" * 32, 1_000_000, 2)]
 
 
-def fake_mainnet(top=("algo_x", 55)):
+def fake_mainnet(top=("algo_x", "algo_x_id", 55)):
     return types.SimpleNamespace(
         top_algorithm=lambda ch, **kw: top,
         fetch_algorithm_files=lambda ch, name, **kw: {"mod.rs": f"// {name}"},
