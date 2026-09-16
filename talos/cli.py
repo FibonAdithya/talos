@@ -410,6 +410,10 @@ def cmd_run(args, ask) -> int:
             print(f"job {spec.job_id} was started in {spec.mode} mode; start a new job to "
                   f"change mode", file=sys.stderr)
             return 2
+        if args.track and args.track != spec.track:
+            print(f"job {spec.job_id} was started with track {spec.track or 'all'}; start a new "
+                  f"job to change track", file=sys.stderr)
+            return 2
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
         if _codex_refused(cfg):
             return 2
@@ -501,6 +505,14 @@ def cmd_run(args, ask) -> int:
             print(f"challenge table drift: mainnet says {info.id}/{info.is_gpu}, Talos has "
                   f"{cs.id}/{cs.is_gpu}; update talos/challenges.py", file=sys.stderr)
             return 1
+    track = args.track
+    if track is None and not args.yes:
+        answer = ask(f"Track to optimise (all, or one of: {', '.join(info.tracks)})", "all")
+        track = None if answer.strip() in ("", "all") else answer.strip()
+    if track is not None and track not in info.tracks:
+        print(f"unknown track {track!r} for {challenge}; active tracks: "
+              f"{', '.join(info.tracks)}", file=sys.stderr)
+        return 2
     rand_hash = new_rand_hash()
     training, holdout = draw_nonce_sets(info.tracks, rand_hash)
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
@@ -511,11 +523,13 @@ def cmd_run(args, ask) -> int:
     spec = JobSpec(job_id=job_id, challenge=challenge, direction=direction, provider=cfg.provider,
                    model=cfg.model, mode=cfg.mode, budget=budget, rand_hash=rand_hash,
                    tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
-                   created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id)
+                   created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
+                   track=track)
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
     (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n")
-    print(f"Job {job_id}: {len(info.tracks)} tracks, fuel {info.max_fuel}, budget {budget.to_dict()}")
+    scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
+    print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}")
     return execute_job(spec, store, cfg, resume=False)
 
 
@@ -578,6 +592,7 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--challenge")
     r.add_argument("--direction")
     r.add_argument("--direction-file")
+    r.add_argument("--track", help="one active track to optimise; default all tracks")
     r.add_argument("--mode", choices=["single-shot", "agentic"])
     r.add_argument("--budget-usd", type=float)
     r.add_argument("--budget-hours", type=float)
