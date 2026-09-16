@@ -1,4 +1,5 @@
 import zipfile
+from dataclasses import replace
 
 from talos.budget import Budget, Spend
 from talos.package import build_package, evidence_draft, scores_markdown
@@ -129,3 +130,46 @@ def test_readme_does_not_deny_a_training_win_that_was_never_confirmed(tmp_path):
     loser_text = (build_package(spec_l, st_l, store_l) / "README.md").read_text()
     assert "did not beat the baseline on training" in loser_text
     assert "beat the baseline on the training nonces" not in loser_text
+
+
+def make_focused(tmp_path):
+    """Two tracks t and u; the job focuses t; the candidate's held-out carries t's held-out rows
+    and u's training rows (the guard), exactly as the loop stores them."""
+    spec, st, store = make(tmp_path)
+    spec = replace(spec, tracks=["t", "u"], track="t",
+                   training=[NonceSet("t", HASH, 0, 2), NonceSet("u", HASH, 0, 2)],
+                   holdout=[NonceSet("t", HASH, 1_000_000, 2), NonceSet("u", HASH, 1_000_000, 2)])
+    st.baseline.training += [NonceResult("u", 0, True, 50, 1), NonceResult("u", 1, True, 50, 1)]
+    st.baseline.holdout += [NonceResult("u", 1_000_000, True, 50, 1),
+                            NonceResult("u", 1_000_001, True, 50, 1)]
+    st.best.holdout += [NonceResult("u", 0, True, 50, 1), NonceResult("u", 1, True, 49, 1)]
+    (tmp_path / "job.json").unlink()
+    store.write_spec(spec)
+    return spec, st, store
+
+
+def test_focused_package_splits_scores_into_track_and_guard_sections(tmp_path):
+    # mutation: comparing the whole baseline against the single-track candidate raises a
+    # ScoringError and prints "(no bundle delta" instead of the delta; dropping the guard
+    # section hides the u regression the confirmation saw
+    spec, st, store = make_focused(tmp_path)
+    pkg = build_package(spec, st, store)
+    scores = (pkg / "scores.md").read_text()
+    assert "# Training nonces (track t)" in scores
+    assert "# Held-out nonces (track t)" in scores
+    assert "# Regression guard (other tracks, training nonces)" in scores
+    assert "(no bundle delta" not in scores
+    guard = scores.split("# Regression guard")[1]
+    assert "| u | 1 | 50 | 49 | - |" in guard
+    readme = (pkg / "README.md").read_text()
+    assert "Optimised for track t" in readme and "regression guard" in readme
+    evidence = (pkg / "evidence_draft.md").read_text()
+    assert "Optimised for track t" in evidence and "Regression guard" in evidence
+
+
+def test_unfocused_package_keeps_todays_headings(tmp_path):
+    # mutation: the focus headings leaking into unfocused packages
+    spec, st, store = make(tmp_path)
+    scores = (build_package(spec, st, store) / "scores.md").read_text()
+    assert "# Training nonces\n" in scores and "(track" not in scores
+    assert "Regression guard" not in scores
