@@ -223,3 +223,74 @@ def test_the_pool_path_passes_run_one_positional_tuples_and_sorts_the_rows(tmp_p
     # mutation: dropping the sort in `scored` writes the rows in completion order, and the
     # loop's nonce-by-nonce comparison against the baseline then lines up the wrong pairs
     assert [(x["track"], x["nonce"]) for x in r["training"]] == [("t", 0), ("t", 1)]
+
+
+DEAD_WARNING = ("warning: function `polish` is never used\n"
+                "   --> tig-algorithms/src/knapsack/talos_cand/mod.rs:3:4\n")
+
+
+def test_a_dead_new_function_ends_the_job_after_the_build(tmp_path):
+    # iteration 7 of run 20260916-095103 compiled, its new function was never called, and
+    # 25 minutes of scoring reproduced the baseline exactly.
+    # mutation: scoring anyway, or reporting the reason as not_won, hides the no-op
+    mono, work, art = setup(tmp_path)
+    payload = json.loads((work / "payload.json").read_text())
+    payload["prior_functions"] = {"mod.rs": ["x"]}
+    (work / "payload.json").write_text(json.dumps(payload))
+    run = fake_run()
+    real = run
+
+    def with_warning(cmd, **kw):
+        r = real(cmd, **kw)
+        if cmd[0] == "build_algorithm":
+            r.stderr = DEAD_WARNING
+        return r
+    rc = c3_job.main(workdir=work, artifacts_dir=art, run=with_warning, monorepo=mono,
+                     log=lambda *a: None)
+    assert rc == 0
+    out = json.loads((art / "results.json").read_text())
+    assert out["compile"]["ok"] is True
+    assert out["holdout_reason"] == "dead_code" and out["training"] == []
+    assert out["started"]["training"] is False
+    assert "polish" in out["compile"]["output"]
+    assert not any(c[0] == "tig-runtime" for c in run.calls)
+
+
+def test_a_dead_function_the_prior_code_already_had_is_scored(tmp_path):
+    # mutation: ignoring prior_functions fails every candidate edited from a baseline that
+    # carries its own dead code
+    mono, work, art = setup(tmp_path)
+    payload = json.loads((work / "payload.json").read_text())
+    payload["prior_functions"] = {"mod.rs": ["x", "polish"]}
+    (work / "payload.json").write_text(json.dumps(payload))
+    real = fake_run()
+
+    def with_warning(cmd, **kw):
+        r = real(cmd, **kw)
+        if cmd[0] == "build_algorithm":
+            r.stderr = DEAD_WARNING
+        return r
+    c3_job.main(workdir=work, artifacts_dir=art, run=with_warning, monorepo=mono,
+                log=lambda *a: None)
+    out = json.loads((art / "results.json").read_text())
+    assert out["started"]["training"] is True and len(out["training"]) == 2
+
+
+def test_per_track_timeouts_reach_each_nonce_task(tmp_path, monkeypatch):
+    from talos import inside
+    mono, work, art = setup(tmp_path, n=2, baseline_q=200)
+    payload = json.loads((work / "payload.json").read_text())
+    payload["timeouts"] = {"t": 42}
+    (work / "payload.json").write_text(json.dumps(payload))
+    seen = []
+
+    def stub(task):
+        seen.append(task)
+        return {"track": task[1], "nonce": task[3], "ok": True, "quality": 120,
+                "runtime_ms": 5, "error": None}
+    monkeypatch.setattr(c3_job, "_run_one", stub)
+    c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(), monorepo=mono,
+                log=lambda *a: None, pool_factory=FakePool)
+    # mutation: reading nonce_timeout_s alone ignores the per-track cap the loop computed
+    assert {t[6] for t in seen} == {42}
+    assert inside.NONCE_TIMEOUT_S != 42

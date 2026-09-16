@@ -1,7 +1,8 @@
 import pytest
 
 from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts, distill_prompts,
-                           edit_prompts, edit_repair_prompts, hypothesis_prompts,
+                           describe_attempt, edit_prompts, edit_repair_prompts,
+                           hypothesis_prompts,
                            parse_distillation, parse_hypothesis)
 
 
@@ -125,3 +126,35 @@ def test_unfocused_prompts_do_not_mention_a_guard():
     # mutation: emitting the focus sentence with an empty track changes every existing prompt
     system, user = hypothesis_prompts(ctx())
     assert "regression guard" not in system and "across every active track" in system
+
+
+def test_compile_fix_prompt_names_the_files_and_filters_foreign_warnings():
+    # The model in iteration 3 of run 20260916-095103 addressed the candidate's files by the
+    # path the compiler printed, and in iterations 1 and 5 by another algorithm's directory
+    # that dominated the warning spam. mutation: dropping the file-name line or the filter
+    # brings both back
+    foreign = ("warning: unused variable: `x`\n"
+               "  --> tig-algorithms/src/knapsack/knap_quality_opt_v11/track1.rs:1:1\n\n")
+    err = ("error[E0308]: mismatched types\n"
+           "  --> tig-algorithms/src/knapsack/talos_cand/track1.rs:5:5\n")
+    _, user = compile_fix_prompts(ctx(), {"track1.rs": "fn x(){}", "mod.rs": ""}, foreign + err)
+    assert "knap_quality_opt_v11" not in user
+    assert err in user
+    assert "mod.rs, track1.rs" in user
+
+
+def test_failed_attempt_lines_carry_the_numbers_and_the_error():
+    # A title plus "failed:score" told the model nothing about iteration 2's +0.14% on one
+    # track, -0.37% on another, and 14x runtime. mutation: dropping any field silences it
+    scored = {"title": "Dynamic greedy", "outcome": "failed:score", "mean_rel_delta": -0.00049,
+              "worst_track": "n_items=5000,budget=10", "worst_rel_delta": -0.00374,
+              "runtime_ratio": 14.07}
+    line = describe_attempt(scored)
+    assert line.startswith("- Dynamic greedy [failed:score]")
+    assert "-0.05%" in line and "n_items=5000,budget=10" in line and "-0.37%" in line
+    assert "14.1x" in line
+    edit = {"title": "Beam", "outcome": "failed:edit",
+            "error": "edit outside the algorithm files rejected: ['x/track2.rs']"}
+    assert "rejected: ['x/track2.rs']" in describe_attempt(edit)
+    _, user = hypothesis_prompts(ctx(failed_hypotheses=[scored, edit]))
+    assert "14.1x" in user and "rejected: ['x/track2.rs']" in user

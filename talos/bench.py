@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from talos.challenges import CHALLENGES, BeatRule
+from talos.diagnostics import dead_new_functions
+from talos.inside import NONCE_TIMEOUT_S
 from talos.scoring import holdout_decision
 from talos.types import CompileResult, NonceResult, NonceSet
 
@@ -17,7 +19,7 @@ CPU_USD_PER_CORE_SECOND = 0.0000131
 MEM_USD_PER_GIB_SECOND = 0.00000222
 GPU_USD_PER_SECOND = {"L40S": 0.000542}
 
-HOLDOUT_REASONS = ("won", "not_won", "forced", "not_compiled", "timeout")
+HOLDOUT_REASONS = ("won", "not_won", "forced", "not_compiled", "timeout", "dead_code")
 
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -32,6 +34,16 @@ class BenchUnavailable(Exception):
     pass
 
 
+def timeout_for(timeouts: dict[str, int] | None, track: str) -> int:
+    return NONCE_TIMEOUT_S if timeouts is None else timeouts.get(track, NONCE_TIMEOUT_S)
+
+
+def dead_code(request: "EvalRequest", compile_output: str) -> list[str]:
+    if request.prior_functions is None:
+        return []
+    return dead_new_functions(compile_output, request.prior_functions)
+
+
 @dataclass
 class EvalRequest:
     challenge: str
@@ -41,12 +53,21 @@ class EvalRequest:
     fuel: int
     baseline_training: list[NonceResult] | None  # None = score held-out unconditionally
     rule: BeatRule
+    # `fn` names per file in the code the candidate was edited from. A candidate that compiles
+    # with a never-used function absent from here is not scored (holdout_reason "dead_code"):
+    # its change is off the solve path and scoring it repeats the prior result. None = skip
+    # the check (the baseline measurement, `talos compile`).
+    prior_functions: dict[str, list[str]] | None = None
+    # Per-track cap on one nonce's runtime, in seconds. None = the flat NONCE_TIMEOUT_S the
+    # baseline ran under. The loop derives it from the baseline's measured runtime so a
+    # candidate many times slower fails fast instead of holding the job for its full length.
+    timeouts: dict[str, int] | None = None
 
 
 @dataclass
 class EvalResult:
     compile: CompileResult
-    training: list[NonceResult]          # empty when compile.ok is False
+    training: list[NonceResult]          # empty when compile.ok is False or dead code stopped it
     holdout: list[NonceResult] | None    # None when not scored
     holdout_reason: str
 
@@ -146,9 +167,9 @@ class ModalBench:
         return CompileResult(ok=out["ok"], artifact_id=out.get("artifact_id"), output=out["output"])
 
     def _score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
-              fuel: int) -> list[NonceResult]:
-        args = [(artifact_id, ns.track, ns.rand_hash, n, fuel) for ns in nonce_sets
-                for n in ns.nonces()]
+              fuel: int, timeouts: dict[str, int] | None) -> list[NonceResult]:
+        args = [(artifact_id, ns.track, ns.rand_hash, n, fuel, timeout_for(timeouts, ns.track))
+                for ns in nonce_sets for n in ns.nonces()]
         rows = self._with_retry(
             lambda: list(self._fn(f"score_nonce_{challenge}").starmap(args)))
         results = [NonceResult.from_dict(r) for r in rows]
@@ -159,12 +180,16 @@ class ModalBench:
         c = self._compile(request.challenge, request.files)
         if not c.ok:
             return EvalResult(c, [], None, "not_compiled")
-        tr = (self._score(request.challenge, c.artifact_id, request.training, request.fuel)
+        if dead_code(request, c.output):
+            return EvalResult(c, [], None, "dead_code")
+        tr = (self._score(request.challenge, c.artifact_id, request.training, request.fuel,
+                          request.timeouts)
               if request.training else [])
         go, reason = holdout_decision(request.baseline_training, tr, request.rule)
         ho = None
         if go:
-            ho = (self._score(request.challenge, c.artifact_id, request.holdout, request.fuel)
+            ho = (self._score(request.challenge, c.artifact_id, request.holdout, request.fuel,
+                              request.timeouts)
                   if request.holdout else [])
         return EvalResult(c, tr, ho, reason)
 
@@ -183,9 +208,12 @@ class FakeBench:
 
     def __init__(self, scores: Callable[[str, dict[str, str], NonceSet], list[int | None]],
                  compile_ok: Callable[[dict[str, str]], bool] = lambda files: True,
-                 usd_per_nonce: float = 0.01):
+                 usd_per_nonce: float = 0.01,
+                 compile_output: Callable[[dict[str, str]], str] = lambda files: "ok"):
         self._scores = scores
         self._compile_ok = compile_ok
+        self._compile_output = compile_output
+        self._runtime_ms = 1
         self._usd_per_nonce = usd_per_nonce
         self._cost = 0.0
         self.calls: list[EvalRequest] = []
@@ -198,13 +226,16 @@ class FakeBench:
                                             output="error[E0308]: mismatched types"),
                               [], None, "not_compiled")
         art = hashlib.sha256(repr(sorted(request.files.items())).encode()).hexdigest()[:16]
+        comp = CompileResult(ok=True, artifact_id=art, output=self._compile_output(request.files))
+        if dead_code(request, comp.output):
+            return EvalResult(comp, [], None, "dead_code")
         tr = self._score(request.challenge, request.files, request.training)
         go, reason = holdout_decision(request.baseline_training, tr, request.rule)
         ho = None
         if go:
             self.holdout_runs += 1
             ho = self._score(request.challenge, request.files, request.holdout)
-        return EvalResult(CompileResult(ok=True, artifact_id=art, output="ok"), tr, ho, reason)
+        return EvalResult(comp, tr, ho, reason)
 
     def _score(self, challenge, files, nonce_sets) -> list[NonceResult]:
         out: list[NonceResult] = []
@@ -216,9 +247,10 @@ class FakeBench:
             for n, q in zip(ns.nonces(), qs):
                 self._cost += self._usd_per_nonce
                 if q is None:
-                    out.append(NonceResult(ns.track, n, False, None, 1, "no_solution"))
+                    out.append(NonceResult(ns.track, n, False, None, self._runtime_ms,
+                                           "no_solution"))
                 else:
-                    out.append(NonceResult(ns.track, n, True, q, 1, None))
+                    out.append(NonceResult(ns.track, n, True, q, self._runtime_ms, None))
         return out
 
     def request_stop(self) -> None:

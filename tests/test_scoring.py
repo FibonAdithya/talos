@@ -1,7 +1,8 @@
 import pytest
 
 from talos.challenges import BeatRule
-from talos.scoring import ScoringError, beats, beats_focused, bundle_delta, focus_sets, select
+from talos.scoring import (ScoringError, beats, beats_focused, bundle_delta, focus_sets,
+                           runtime_ratio, select)
 from talos.types import NonceResult, NonceSet
 
 
@@ -138,3 +139,17 @@ def test_beats_focused_on_a_single_track_equals_beats():
         cand = [R("t1", 0, q), R("t1", 1, q)]
         assert beats_focused(base, cand, RULE, "t1") == beats(base, cand, RULE)
     assert beats_focused(base, [R("t1", 0, 201), R("t1", 1, 201)], RULE, "t1")
+
+
+def test_runtime_ratio_is_the_slowest_track_relative_to_baseline():
+    # iteration 2 of run 20260916-095103 ran 14x slower on one track and the model never
+    # heard. mutation: averaging across tracks hides a single slow track behind fast ones
+    def T(track, nonce, ms):
+        return NonceResult(track=track, nonce=nonce, ok=True, quality=1, runtime_ms=ms)
+    base = [T("a", 0, 10), T("a", 1, 10), T("b", 0, 100), T("b", 1, 100)]
+    cand = [T("a", 0, 10), T("a", 1, 10), T("b", 0, 1400), T("b", 1, 1400)]
+    assert runtime_ratio(base, cand) == pytest.approx(14.0)
+    assert runtime_ratio(base, base) == pytest.approx(1.0)
+    # a baseline track with no measured runtime cannot be a divisor
+    zero = [T("a", 0, 0), T("a", 1, 0)]
+    assert runtime_ratio(zero, [T("a", 0, 5), T("a", 1, 5)]) == pytest.approx(1.0)
