@@ -203,7 +203,7 @@ def test_lookup_is_cached_after_a_successful_hydrate(monkeypatch):
 
         def starmap(self, args):
             return [{"track": t, "nonce": n, "ok": True, "quality": 1, "runtime_ms": 1,
-                     "error": None} for (_a, t, _h, n, _f, _to) in args]
+                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
 
     def from_name(app_name, name):
         lookups.append(name)
@@ -234,7 +234,7 @@ def test_modal_evaluate_skips_holdout_on_a_loss_and_charges_each_call(monkeypatc
         def starmap(self, args):
             starmaps.append(len(args))
             return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1000,
-                     "error": None} for (_a, t, _h, n, _f, _to) in args]
+                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
 
     mod = types.ModuleType("modal")
     mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
@@ -306,7 +306,7 @@ def test_modal_starmap_carries_the_per_track_timeout(monkeypatch):
         def starmap(self, args):
             timeouts.extend(a[5] for a in args)
             return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1,
-                     "error": None} for (_a, t, _h, n, _f, _to) in args]
+                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
 
     mod = types.ModuleType("modal")
     mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
@@ -320,3 +320,44 @@ def test_modal_starmap_carries_the_per_track_timeout(monkeypatch):
     timeouts.clear()
     ModalBench().evaluate(req(baseline=base(100)))
     assert timeouts == [NONCE_TIMEOUT_S] * 3
+
+
+def test_hyperparameters_for_a_track():
+    from talos.bench import hyperparameters_for
+    hp = {"t": {"x": 1}, "u": None, "e": {}}
+    assert hyperparameters_for(hp, "t") == {"x": 1}
+    # mutation: `or None` would turn a track's {} into None
+    assert hyperparameters_for(hp, "e") == {}
+    assert hyperparameters_for(hp, "u") is None and hyperparameters_for(hp, "missing") is None
+    assert hyperparameters_for(None, "t") is None
+
+
+def test_modal_starmap_carries_each_tracks_hyperparameters(monkeypatch):
+    seen = []
+
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": "ok"}
+
+        def starmap(self, args):
+            seen.extend((a[1], a[6]) for a in args)
+            return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1,
+                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    two = [NonceSet("t", "ab" * 32, 0, 1), NonceSet("u", "ab" * 32, 0, 1)]
+    r = req(training=two, holdout=[])
+    r.hyperparameters = {"t": {"x": 1}, "u": None}
+    ModalBench().evaluate(r)
+    # mutation: dropping the element from the args runs every nonce without hyperparameters
+    # mutation: passing the whole map instead of the track's entry hands tig-runtime {"t": ...}
+    assert seen == [("t", {"x": 1}), ("u", None)]
+    seen.clear()
+    ModalBench().evaluate(req(training=two, holdout=[]))
+    assert seen == [("t", None), ("u", None)]
