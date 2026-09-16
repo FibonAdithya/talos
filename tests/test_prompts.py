@@ -96,11 +96,11 @@ def test_compile_fix_and_repair_prompts_carry_inputs():
 
 
 def test_compile_fix_prompts_truncates_compiler_output():
-    # mutation: dropping the `[-6000:]` slice blows the prompt budget on long build logs
+    # mutation: dropping the `[-12000:]` slice blows the prompt budget on long build logs
     # distinct head/tail content (not a repeated char) so substring checks are discriminating
-    long_output = "A" * 4000 + "B" * 6000
+    long_output = "A" * 4000 + "B" * 12000
     _, user = compile_fix_prompts(ctx(), {"mod.rs": "fn x(){}"}, long_output)
-    assert long_output[-6000:] in user
+    assert long_output[-12000:] in user
     assert "A" * 4000 not in user
 
 
@@ -158,3 +158,14 @@ def test_failed_attempt_lines_carry_the_numbers_and_the_error():
     assert "rejected: ['x/track2.rs']" in describe_attempt(edit)
     _, user = hypothesis_prompts(ctx(failed_hypotheses=[scored, edit]))
     assert "14.1x" in user and "rejected: ['x/track2.rs']" in user
+
+
+def test_compile_fix_prompt_shows_every_error_of_a_build_the_size_of_iteration_5():
+    # iteration 5 of run 20260916-095103 failed with 8 errors; its filtered output would run
+    # to about 9 KB, and a 6000-character window shows the fixer only the last few.
+    # mutation: a window under the size of eight rustc errors drops the first ones
+    errs = "".join(f"error[E0308]: mismatched types (site {i})\n"
+                   f"   --> tig-algorithms/src/knapsack/talos_cand/track1.rs:{i}:5\n"
+                   "    |\n" + f"{i:<3} | " + "x" * 900 + "\n\n" for i in range(8))
+    _, user = compile_fix_prompts(ctx(), {"track1.rs": "fn x(){}"}, errs)
+    assert all(f"(site {i})" in user for i in range(8))

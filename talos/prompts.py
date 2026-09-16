@@ -121,7 +121,8 @@ def compile_fix_prompts(ctx: PromptContext, files: dict[str, str],
                         compiler_output: str) -> tuple[str, str]:
     system = (f"You are fixing a Rust compile error in a TIG \"{ctx.challenge}\" solver.\n\n"
               f"{SEARCH_REPLACE_FORMAT}\n\n{_rust_rules()}")
-    user = (f"The build failed with:\n```\n{relevant(compiler_output)[-6000:]}\n```\n\n"
+    # 12000 holds the eight errors of run 20260916-095103 iteration 5; 6000 showed the last few.
+    user = (f"The build failed with:\n```\n{relevant(compiler_output)[-12000:]}\n```\n\n"
             f"{_file_names_line(files)}\n\n"
             f"Current files:\n{_files_block(files)}\n\nEmit edit blocks that fix the build "
             f"without abandoning the intended change.")

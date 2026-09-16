@@ -229,7 +229,9 @@ fail the candidate through the error ceiling. TIG caps fuel, not seconds, so thi
 research-economy cap, not a TIG rule: `Thresholds.runtime_ceiling` in `talos/loop.py` sets
 the multiplier and 0 disables it. The Modal score function takes the timeout as an
 argument, so after upgrading past this change run `talos setup` again on the Modal backend
-before the next run; the C3 job ships its own code and needs nothing.
+before the next run; the C3 job ships its own code and needs nothing. A client that reaches
+an older deploy stops at once with a message naming `talos setup`, not after retrying it as
+an outage.
 
 When the loop recalls failed attempts to the model, each line carries what the run measured:
 the mean delta, the worst track and its delta, the candidate's runtime relative to the
