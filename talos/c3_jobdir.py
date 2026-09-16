@@ -53,6 +53,7 @@ def payload(request: EvalRequest) -> dict:
                                   if request.baseline_training is not None else None),
             "rule": asdict(request.rule), "monorepo_ref": MONOREPO_REF,
             "prior_functions": request.prior_functions, "timeouts": request.timeouts,
+            "hyperparameters": request.hyperparameters,
             "workers": c3_workers(spec), "nonce_timeout_s": NONCE_TIMEOUT_S,
             "dev_image_tag": DEV_IMAGE_TAG}
 
