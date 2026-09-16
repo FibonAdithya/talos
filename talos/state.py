@@ -45,7 +45,6 @@ class JobSpec:
         d["budget"] = Budget(**d["budget"])
         d["training"] = [NonceSet(**n) for n in d["training"]]
         d["holdout"] = [NonceSet(**n) for n in d["holdout"]]
-        d["track"] = d.get("track")
         return cls(**d)
 
     def redacted(self) -> dict:
