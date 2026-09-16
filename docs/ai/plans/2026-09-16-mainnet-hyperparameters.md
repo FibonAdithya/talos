@@ -21,7 +21,8 @@
 - No line over 100 characters. ruff does not check it. After each task run:
   `"$PY" -c "import sys,pathlib; [print(p,i+1,len(l)) for p in sys.argv[1:] for i,l in enumerate(pathlib.Path(p).read_text().splitlines()) if len(l)>100]" <changed .py files>` and expect no output.
 - `"$PY" -m ruff check .` passes after every task.
-- Every new test has a `# mutation:` comment naming the code change it catches (repo convention). After a task's tests pass, apply that mutation, confirm the named test fails under `.superpowers/sdd/t.sh`, then restore with `git checkout -- <file>` (the file must have no other uncommitted change at that point) and re-run to green.
+- Every new test has a `# mutation:` comment naming the code change it catches (repo convention). **Order override (audit 2026-09-16): in every task, run the Commit step BEFORE the Mutation-check step**, whatever the step numbering says. Restoring with `git checkout -- <file>` before the commit would discard the task's whole implementation. So: tests green → line-length, ruff, full suite → commit → apply each mutation, confirm the named test fails under `.superpowers/sdd/t.sh`, restore with `git checkout -- <file>` → after the last one, `git status --short` shows no modified tracked file and the task's test file is green again.
+- Shell variables do not persist between separate Bash calls. Set `PY=/home/fibonadithya/TIG/Talos/.venv/bin/python` in the same call that uses `"$PY"`.
 - `rand_hash` never enters a prompt, event, package file or exception message. The mainnet benchmark's own `rand_hash` is never read into Talos state.
 - `None` and `{}` are different hyperparameters: `{}` is passed to `tig-runtime` as `{}`. Never write `if hp:` for a single track's map; use `is None`.
 - Commit per task with explicit paths (never `git add -A`, `git add .`, `git commit -a`). Run `git status --short` first. Commit messages follow the repo style `area: what changed` and end with
@@ -502,8 +503,8 @@ Expected: PASS.
 
 | mutation | failing test |
 |---|---|
-| `if hyperparameters is None` → build `hp_args` with `if not hyperparameters` | `..._to_the_runtime_only[hp1]` |
-| drop `separators=(",", ":")` | `..._to_the_runtime_only[hp0]` |
+| `if hyperparameters is None` → build `hp_args` with `if not hyperparameters` | `..._to_the_runtime_only[hp1-flag1]` |
+| drop `separators=(",", ":")` | `..._to_the_runtime_only[hp0-flag0]` |
 | `hp_args = ["--hyperparameters", json.dumps(hyperparameters, separators=(",", ":"))]` unconditionally | `test_run_nonce_without_hyperparameters_passes_no_flag` |
 
 - [ ] **Step 6: Line-length check, ruff, guarded full suite**
@@ -1602,7 +1603,8 @@ def test_run_hyperparameters_none_reads_nothing_from_mainnet(tmp_path, monkeypat
     assert "hyperparameters: none" in capsys.readouterr().out
 
 
-def test_run_with_no_matching_benchmark_pins_the_algorithm_but_no_map(tmp_path, monkeypatch):
+def test_run_with_no_matching_benchmark_pins_the_algorithm_but_no_map(tmp_path, monkeypatch,
+                                                                      capsys):
     monkeypatch.chdir(tmp_path)
     _cli_config(tmp_path)
     monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
@@ -1615,6 +1617,10 @@ def test_run_with_no_matching_benchmark_pins_the_algorithm_but_no_map(tmp_path, 
     assert seen["spec"].hyperparameters is None and seen["spec"].hyperparameters_source is None
     assert seen["spec"].baseline_algorithm == {"name": "fake_base", "id": "c003_a000",
                                                "adoption": 1}
+    # mutation: printing the plain "hyperparameters: none" hides that mainnet was asked and had
+    # no benchmark of this algorithm at this fuel (spec §7: "say so")
+    out = capsys.readouterr().out
+    assert "hyperparameters: none (no mainnet benchmark of fake_base at fuel 7)" in out
 
 
 def test_run_reports_a_hyperparameters_fetch_failure_and_creates_nothing(tmp_path, monkeypatch,
@@ -1736,7 +1742,10 @@ In `cmd_run`, after the `unknown track` check and before `rand_hash = new_rand_h
 ```python
     choice = args.hyperparameters
     if choice is None:
-        choice = "mainnet" if args.yes else ask("Hyperparameters (mainnet or none)", "mainnet")
+        # A blank answer is the default, as `_track_arg` treats a blank track answer: the wizard
+        # test's raw `ask` returns "" rather than the default.
+        choice = ("mainnet" if args.yes
+                  else ask("Hyperparameters (mainnet or none)", "mainnet").strip() or "mainnet")
     if choice not in ("mainnet", "none"):
         print(f"unknown hyperparameters choice {choice!r}; use mainnet or none", file=sys.stderr)
         return 2
@@ -1760,7 +1769,10 @@ Add to the `JobSpec(...)` call, after `track=track`:
 Replace the final `print(f"Job {job_id}: ...")` with:
 
 ```python
-    if hyperparameters is None:
+    if hyperparameters is None and algorithm is not None:
+        hp_line = (f"hyperparameters: none (no mainnet benchmark of {algorithm['name']} "
+                   f"at fuel {info.max_fuel})")
+    elif hyperparameters is None:
         hp_line = "hyperparameters: none"
     else:
         used = sum(1 for v in hyperparameters.values() if v is not None)
@@ -1788,6 +1800,8 @@ Expected: PASS, all of them.
 | in `_mainnet_hyperparameters`, pass `name` instead of `algorithm_id` to `top_hyperparameters` | `test_run_pins_the_top_algorithm_and_its_hyperparameters` |
 | drop `baseline_algorithm=algorithm` from `JobSpec(...)` | same, and `..._no_matching_benchmark_pins_the_algorithm_but_no_map` |
 | `if not found:` block removed | `test_run_with_no_matching_benchmark_pins_the_algorithm_but_no_map` |
+| delete the `if hyperparameters is None and algorithm is not None:` branch (falls to plain `none`) | same |
+| in the wizard, drop `or "mainnet"` after `.strip()` | `test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo` |
 | `except MainnetError` removed | `test_run_reports_a_hyperparameters_fetch_failure_and_creates_nothing` |
 | `choice = "mainnet"` unconditionally | `test_run_hyperparameters_none_reads_nothing_from_mainnet`, `test_wizard_hyperparameters_answer_none_and_a_bad_answer` |
 | remove the resume refusal | `test_resume_refuses_a_hyperparameters_flag` |
