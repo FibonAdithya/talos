@@ -107,7 +107,7 @@ hyperparameters_source: dict[str, dict] | None = None   # track -> {benchmark_id
   that algorithm is no longer on mainnet rather than silently switching.
 - A `job.json` without the keys loads with all three `None`, which behaves
   exactly as today (top algorithm resolved at baseline time, no flag on any run).
-- `redacted()` keeps both: they are public mainnet data and contain no
+- `redacted()` keeps all three: they are public mainnet data and contain no
   `rand_hash`. The mainnet benchmark's own `rand_hash` is never stored.
 
 ## 5. Runtime
@@ -208,6 +208,7 @@ improvement holds only with them.
 | `run_nonce` argv has no `--hyperparameters` when `None` | always passing the flag |
 | `run_nonce` sends the flag to `tig-runtime` and not `tig-verifier` | flag appended to both |
 | C3 `_score` gives each track its own map (two tracks, different maps) | using one map for all tracks |
+| C3 `request_hash` differs when only the map differs | map left out of `payload()` (a resume would reattach to a job run without it) |
 | Modal bench starmap args carry the track's map | argument dropped in `bench.py` |
 | `cache_key` differs between `None` and `{"t": {}}` and between two different maps; equal for `None` and `{"t": None}` | key ignores the map; normalisation missing |
 | old `job.json` without the keys loads with `None` | missing dataclass default |
