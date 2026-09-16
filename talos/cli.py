@@ -138,6 +138,14 @@ def _model_prompt(kind: str) -> tuple[str, str | None]:
     return "Model", default
 
 
+def _track_arg(answer: str | None) -> str | None:
+    """The focus track a flag or wizard answer names; None (every track) for no answer or
+    "all", which is how the wizard prompt and the README spell the default."""
+    if answer is None or answer.strip() in ("", "all"):
+        return None
+    return answer.strip()
+
+
 def cmd_setup(args, ask) -> int:
     root = Path.cwd()
     backend = ask(f"Compute backend ({' or '.join(BACKENDS)})", "modal")
@@ -410,7 +418,7 @@ def cmd_run(args, ask) -> int:
             print(f"job {spec.job_id} was started in {spec.mode} mode; start a new job to "
                   f"change mode", file=sys.stderr)
             return 2
-        if args.track and args.track != spec.track:
+        if args.track is not None and _track_arg(args.track) != spec.track:
             print(f"job {spec.job_id} was started with track {spec.track or 'all'}; start a new "
                   f"job to change track", file=sys.stderr)
             return 2
@@ -505,10 +513,10 @@ def cmd_run(args, ask) -> int:
             print(f"challenge table drift: mainnet says {info.id}/{info.is_gpu}, Talos has "
                   f"{cs.id}/{cs.is_gpu}; update talos/challenges.py", file=sys.stderr)
             return 1
-    track = args.track
-    if track is None and not args.yes:
-        answer = ask(f"Track to optimise (all, or one of: {', '.join(info.tracks)})", "all")
-        track = None if answer.strip() in ("", "all") else answer.strip()
+    track = _track_arg(args.track)
+    if args.track is None and not args.yes:
+        track = _track_arg(ask(f"Track to optimise (all, or one of: {', '.join(info.tracks)})",
+                               "all"))
     if track is not None and track not in info.tracks:
         print(f"unknown track {track!r} for {challenge}; active tracks: "
               f"{', '.join(info.tracks)}", file=sys.stderr)
@@ -592,7 +600,7 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--challenge")
     r.add_argument("--direction")
     r.add_argument("--direction-file")
-    r.add_argument("--track", help="one active track to optimise; default all tracks")
+    r.add_argument("--track", help="one active track to optimise, or all (the default)")
     r.add_argument("--mode", choices=["single-shot", "agentic"])
     r.add_argument("--budget-usd", type=float)
     r.add_argument("--budget-hours", type=float)

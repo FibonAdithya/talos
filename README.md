@@ -80,10 +80,11 @@ Run per job. Prompts interactively for anything not given as a flag:
 - `--mode {single-shot,agentic}` — overrides the configured mode for this run; `agentic`
   is only valid for a CLI provider.
 - `--track <name>` — one active track of the challenge to optimise (the interactive prompt
-  lists them; default all). Training scores that track only. When a candidate wins on
-  training, the confirmation job scores the track's held-out nonces plus every other track's
-  training nonces as a regression guard: no other track may get worse. The model still sees
-  and may edit every file; the flag narrows what is scored and what it is told to target.
+  lists them; `all`, the default, means every track). Training scores that track only. When
+  a candidate wins on training, the confirmation job scores the track's held-out nonces plus
+  every other track's training nonces as a regression guard: no other track may get worse.
+  The model still sees and may edit every file; the flag narrows what is scored and what it
+  is told to target.
 - `--budget-usd`, `--budget-hours`, `--budget-iterations`, `--budget-compute-usd` — see
   Budget below.
 - `--resume <job_id>` — reloads `runs/<job_id>/job.json` and `state.json` and continues a

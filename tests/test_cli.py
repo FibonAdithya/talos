@@ -975,3 +975,34 @@ def test_fake_run_with_a_track_wins_and_packages_per_track(tmp_path, monkeypatch
     assert "# Training nonces (track n=1)" in scores
     assert "# Held-out nonces (track n=1)" in scores
     assert "Regression guard" not in scores
+
+
+def test_run_track_all_on_the_flag_means_every_track(tmp_path, monkeypatch, capsys):
+    # The wizard's answer "all" and the README's "default all" must be spellable on the flag too.
+    # mutation: validating "all" against mainnet's tracks refuses it as an unknown track
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = {}
+    prompts = []
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+
+    def ask(prompt, default=None, secret=False):
+        prompts.append(prompt)
+        return default or ""
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--track", "all"], ask=ask)
+    assert rc == 0 and seen["spec"].track is None
+    assert not any(p.startswith("Track to optimise") for p in prompts)  # the flag answered it
+    assert "1 tracks, fuel 7" in capsys.readouterr().out
+
+
+def test_resume_of_a_focused_job_with_track_all_is_refused(tmp_path, monkeypatch, capsys):
+    # mutation: normalising "all" to None before the resume check lets it through as "no flag"
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch, ["--track", "n=1"]) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert cli.main(["run", "--resume", run_dir.name, "--track", "all"]) == 2
+    assert "started with track n=1" in capsys.readouterr().err
