@@ -14,20 +14,24 @@ from talos.types import NonceResult, NonceSet
 HASH = "ab" * 32
 TR = [NonceSet("t", HASH, 0, 4)]
 HO = [NonceSet("t", HASH, 1_000_000, 4)]
+TR2 = [NonceSet("t", HASH, 0, 4), NonceSet("u", HASH, 0, 4)]
+HO2 = [NonceSet("t", HASH, 1_000_000, 4), NonceSet("u", HASH, 1_000_000, 4)]
 BASE_FILES = {"mod.rs": "fn solve() { let k = 1; }\n"}
 
 
-def spec(budget=None):
+def spec(budget=None, track=None, two_tracks=False):
+    tracks = ["t", "u"] if two_tracks else ["t"]
     return JobSpec(job_id="j", challenge="knapsack", direction="go", provider="fake", model="m",
                    mode="single-shot",
                    budget=budget or Budget(usd=None, hours=None, iterations=20, compute_usd=None),
-                   rand_hash=HASH, tracks=["t"], training=TR, holdout=HO, fuel=1, created_at=0.0,
-                   monorepo_ref="r", challenge_id="c003")
+                   rand_hash=HASH, tracks=tracks, training=TR2 if two_tracks else TR,
+                   holdout=HO2 if two_tracks else HO, fuel=1, created_at=0.0,
+                   monorepo_ref="r", challenge_id="c003", track=track)
 
 
-def baseline(q=100, holdout_n=4):
-    tr = [NonceResult("t", n, True, q, 1) for n in range(4)]
-    ho = [NonceResult("t", 1_000_000 + n, True, q, 1) for n in range(holdout_n)]
+def baseline(q=100, holdout_n=4, tracks=("t",)):
+    tr = [NonceResult(t, n, True, q, 1) for t in tracks for n in range(4)]
+    ho = [NonceResult(t, 1_000_000 + n, True, q, 1) for t in tracks for n in range(holdout_n)]
     return BaselineRecord(name="base", adoption=1, artifact_id="base-art", files=BASE_FILES,
                           training=tr, holdout=ho)
 
@@ -49,12 +53,13 @@ def quality_from_files(challenge, files, ns):
     return [100 + k - 1 for _ in ns.nonces()]  # k=1 -> 100 (baseline parity)
 
 
-def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=None, holdout_n=4):
+def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=None, holdout_n=4,
+         track=None, two_tracks=False):
     store = JobStore(tmp_path)
-    sp = spec(budget)
+    sp = spec(budget, track=track, two_tracks=two_tracks)
     store.write_spec(sp)
     st = JobState.fresh(Spend(started_at=0.0))
-    st.baseline = baseline(holdout_n=holdout_n)
+    st.baseline = baseline(holdout_n=holdout_n, tracks=("t", "u") if two_tracks else ("t",))
     st.status = "researching"
     st.best = None
     fb = FakeBench(scores)
@@ -601,3 +606,60 @@ def test_bench_cancelled_stops_the_run_as_cancelled(tmp_path):
     fb.evaluate = evaluate
     st = loop.run()
     assert st.status == "cancelled" and "job_x" in st.stop_reason
+
+
+def test_focused_request_narrows_training_and_guards_holdout(tmp_path):
+    # mutation: forgetting the guard sends only t's held-out set; sending the whole baseline
+    # makes the in-job holdout decision raise a nonce mismatch on every iteration
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], track="t", two_tracks=True)
+    loop.run()
+    req = fb.calls[0]
+    assert req.training == [TR2[0]]
+    assert req.holdout == [HO2[0], TR2[1]]
+    assert {(r.track, r.nonce) for r in req.baseline_training} == {("t", n) for n in range(4)}
+
+
+def test_focused_win_is_confirmed_on_the_track_and_the_guard(tmp_path):
+    # mutation: comparing the guard rows against the baseline's held-out rows (wrong nonces)
+    # raises a ScoringError and records a false positive instead of the win
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], track="t", two_tracks=True)
+    st = loop.run()
+    assert st.status == "won" and st.confirmed == [1]
+    assert {r.track for r in st.best.holdout} == {"t", "u"}
+
+
+def test_focused_guard_regression_is_a_false_positive(tmp_path):
+    # mutation: confirming on the focus track alone declares a win that broke track u
+    def scores(challenge, files, ns):
+        import re
+        k = int(re.search(r"let k = (\d+);", files["mod.rs"]).group(1))
+        if ns.track == "u" and k != 1:
+            return [90 for _ in ns.nonces()]  # the edit regresses the other track
+        return [100 + k - 1 for _ in ns.nonces()]
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], scores, b, track="t",
+                               two_tracks=True)
+    st = loop.run()
+    assert st.status == "exhausted" and st.false_positives == [1] and st.confirmed == []
+    events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
+    fp_event = next(e for e in events if e["kind"] == "false_positive")
+    assert fp_event["holdout"]["worst_rel_delta"] < 0
+
+
+def test_unfocused_request_is_unchanged(tmp_path):
+    # mutation: the focus path leaking into unfocused jobs changes every existing request
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], two_tracks=True)
+    loop.run()
+    req = fb.calls[0]
+    assert req.training == TR2 and req.holdout == HO2
+    assert len(req.baseline_training) == 8
+
+
+def test_focused_context_names_track_and_guards(tmp_path):
+    # mutation: dropping either field leaves the model aiming at every track
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], track="t", two_tracks=True)
+    ctx = loop._context()
+    assert ctx.track == "t" and ctx.guard_tracks == ["u"]
+    loop2, *_ = make(tmp_path / "b", [hyp("a"), edit(5)], two_tracks=True)
+    ctx2 = loop2._context()
+    assert ctx2.track is None and ctx2.guard_tracks == []

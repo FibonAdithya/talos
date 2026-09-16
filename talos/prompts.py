@@ -41,6 +41,8 @@ class PromptContext:
     failed_hypotheses: list[dict] = field(default_factory=list)
     forced_tag: str | None = None
     is_gpu: bool = False
+    track: str | None = None
+    guard_tracks: list[str] = field(default_factory=list)
 
 
 def _files_block(files: dict[str, str]) -> str:
