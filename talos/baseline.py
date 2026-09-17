@@ -17,13 +17,28 @@ class BaselineError(RuntimeError):
     pass
 
 
+def effective_hyperparameters(hp: dict[str, dict | None] | None) -> dict[str, dict] | None:
+    """The per-track map as it changes a run. A track mapped to None runs exactly as a track with
+    no entry, so both normalise away; a map with nothing left is None. A track's {} is kept: it is
+    passed to tig-runtime and is not the same input as no flag."""
+    if hp is None:
+        return None
+    kept = {track: v for track, v in hp.items() if v is not None}
+    return kept or None  # the whole map, not a track's value: empty means "no flag anywhere"
+
+
 def cache_key(challenge: str, monorepo_ref: str, name: str, training: list[NonceSet],
-              holdout: list[NonceSet], fuel: int, hardware_class: str) -> str:
+              holdout: list[NonceSet], fuel: int, hardware_class: str,
+              hyperparameters: dict[str, dict | None] | None = None) -> str:
     h = hashlib.sha256()
     payload = {"challenge": challenge, "ref": monorepo_ref, "name": name, "fuel": fuel,
                "hw": hardware_class,
                "training": [(n.track, n.rand_hash, n.start, n.count) for n in training],
                "holdout": [(n.track, n.rand_hash, n.start, n.count) for n in holdout]}
+    effective = effective_hyperparameters(hyperparameters)
+    if effective is not None:
+        # Only when present, so a key computed before hyperparameters existed is unchanged.
+        payload["hyperparameters"] = effective
     h.update(json.dumps(payload, sort_keys=True).encode())
     return h.hexdigest()[:24]
 
@@ -49,13 +64,20 @@ def _require_scoreable(challenge: str, fuel: int, label: str, nonce_sets: list[N
 
 def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[NonceSet],
                      fuel: int, bench, cache_dir: Path, hardware_class: str, rule,
-                     mainnet=_mainnet, log=lambda msg: None) -> tuple[BaselineRecord, str]:
-    top = mainnet.top_algorithm(challenge)
-    if top is None:
-        raise BaselineError(f"no adopted, compiled algorithm found on mainnet for {challenge}")
-    name, _algorithm_id, adoption = top
+                     mainnet=_mainnet, log=lambda msg: None, algorithm: dict | None = None,
+                     hyperparameters: dict[str, dict | None] | None = None,
+                     ) -> tuple[BaselineRecord, str]:
+    if algorithm is not None:
+        # Pinned at job start with the hyperparameters, which belong to this algorithm's code.
+        name, adoption = algorithm["name"], algorithm["adoption"]
+    else:
+        top = mainnet.top_algorithm(challenge)
+        if top is None:
+            raise BaselineError(f"no adopted, compiled algorithm found on mainnet for {challenge}")
+        name, _algorithm_id, adoption = top
     template = mainnet.fetch_template(challenge)
-    key = cache_key(challenge, MONOREPO_REF, name, training, holdout, fuel, hardware_class)
+    key = cache_key(challenge, MONOREPO_REF, name, training, holdout, fuel, hardware_class,
+                    hyperparameters)
     cache_file = Path(cache_dir) / challenge / f"{key}.json"
     if cache_file.exists():
         try:
@@ -68,15 +90,22 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
     files = mainnet.fetch_algorithm_files(challenge, name)
     log(f"baseline {name} (adoption {adoption}): compiling and scoring {len(files)} file(s)")
     r = bench.evaluate(EvalRequest(challenge=challenge, files=files, training=training,
-                                   holdout=holdout, fuel=fuel, baseline_training=None, rule=rule))
+                                   holdout=holdout, fuel=fuel, baseline_training=None, rule=rule,
+                                   hyperparameters=hyperparameters))
     if not r.compile.ok:
         raise BaselineError(f"baseline {name} failed to compile; likely dev-image drift at "
                             f"{MONOREPO_REF}.\n{r.compile.output[-4000:]}")
     if r.holdout is None:
         raise BaselineError(f"baseline {name}: held-out set was not scored ({r.holdout_reason})")
     tr, ho = r.training, r.holdout
-    _require_scoreable(challenge, fuel, "training", training, tr)
-    _require_scoreable(challenge, fuel, "held-out", holdout, ho)
+    try:
+        _require_scoreable(challenge, fuel, "training", training, tr)
+        _require_scoreable(challenge, fuel, "held-out", holdout, ho)
+    except BaselineError as e:
+        if effective_hyperparameters(hyperparameters) is None:
+            raise
+        raise BaselineError(f"{e}. The baseline ran with mainnet hyperparameters; start a new job "
+                            f"with --hyperparameters none to rule them out") from None
     rec = BaselineRecord(name=name, adoption=adoption,
                          artifact_id=r.compile.artifact_id, files=files,
                          training=tr, holdout=ho)

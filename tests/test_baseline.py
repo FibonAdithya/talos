@@ -123,6 +123,55 @@ def test_baseline_forces_the_holdout_run(tmp_path):
     assert fb.calls[0].baseline_training is None and len(rec.holdout) == 2
 
 
+def test_cache_key_without_hyperparameters_is_unchanged_from_before_they_existed():
+    # Value computed at 267f6fc with the pre-change cache_key. Existing cached baselines stay hits.
+    # mutation: always putting "hyperparameters": None in the hashed payload changes this key
+    key = cache_key("knapsack", "ref", "algo", TR, HO, 5, "cpu4-mem8192")
+    assert key == "776fde051d7068800fc50361"
+
+
+def test_cache_key_follows_what_the_hyperparameters_change_at_runtime():
+    k = lambda hp: cache_key("knapsack", "ref", "algo", TR, HO, 5, "cpu4-mem8192", hp)  # noqa: E731
+    plain = k(None)
+    # tracks mapped to None run exactly as tracks without an entry, and as no map at all
+    assert plain == k({}) == k({"t": None})
+    # mutation: ignoring the map serves a baseline measured without it to a job that uses it
+    assert k({"t": {"x": 1}}) not in (plain, k({"t": {"x": 2}}))
+    # mutation: `if v` instead of `is not None` drops {} and collides it with running flagless
+    assert k({"t": {}}) != plain
+
+
+def test_a_pinned_algorithm_is_measured_instead_of_asking_mainnet(tmp_path):
+    def no_top(ch, **kw):
+        raise AssertionError("top_algorithm must not be called for a pinned algorithm")
+    mn = fake_mainnet()
+    mn.top_algorithm = no_top
+    fb = FakeBench(lambda ch, files, ns: [10 for _ in ns.nonces()])
+    hp = {"t": {"x": 1}}
+    rec, _ = resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192", rule=BeatRule(),
+                              mainnet=mn, algorithm={"name": "pinned", "id": "p1", "adoption": 7},
+                              hyperparameters=hp)
+    # mutation: calling top_algorithm again measures whatever tops mainnet now, not the algorithm
+    # the frozen map belongs to
+    assert (rec.name, rec.adoption, rec.files) == ("pinned", 7, {"mod.rs": "// pinned"})
+    # mutation: not passing the map measures the baseline without it while candidates use it
+    assert fb.calls[0].hyperparameters == hp
+
+
+def test_an_unscoreable_baseline_with_hyperparameters_suggests_running_without(tmp_path):
+    fb = FakeBench(lambda ch, files, ns: [None for _ in ns.nonces()])
+    with pytest.raises(BaselineError) as ei:
+        resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192", rule=BeatRule(),
+                         mainnet=fake_mainnet(), hyperparameters={"t": {"x": 1}})
+    # mutation: dropping the hint leaves the user guessing whether the map broke the algorithm
+    assert "--hyperparameters none" in str(ei.value)
+    with pytest.raises(BaselineError) as plain:
+        resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192", rule=BeatRule(),
+                         mainnet=fake_mainnet(), hyperparameters={"t": None})
+    # mutation: hinting whenever the argument is not None blames a map that passed nothing
+    assert "--hyperparameters none" not in str(plain.value)
+
+
 def test_hardware_class_separates_cpu_memory_and_gpu():
     # mutation: f"cpu{cpu}" alone lets a memory change reuse a cached baseline measured with a
     # different memory (and a different price per second)
