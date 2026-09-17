@@ -152,6 +152,10 @@ _AGENT_ENV_ALLOWLIST = frozenset({
     "CLAUDE_CONFIG_DIR", "CODEX_HOME",
     # the sandbox runs `talos compile`, which has no talos.config.json to read the backend from
     "TALOS_BACKEND",
+    # ...nor .talos/secrets.json to read a C3 API key from. The key is as reachable as the Modal
+    # token in ~/.modal.toml or a `c3 login` session under HOME: claude-cli's permissions let the
+    # agent run `talos compile` and read only the worktree; opt-in codex can read either.
+    "C3_API_KEY",
 })
 
 _TRANSCRIPT_CAP = 200_000

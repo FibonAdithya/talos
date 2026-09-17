@@ -9,7 +9,8 @@ import pytest
 from talos import cli
 from talos.bench import BenchCancelled, EvalResult
 from talos.challenges import DEV_IMAGE_TAG
-from talos.config import Config, ConfigError, load, resolve_api_key, save
+from talos.config import (Config, ConfigError, load, resolve_api_key, resolve_c3_api_key,
+                          save)
 from talos.mainnet import MainnetError, TrackHyperparameters
 from talos.types import CompileResult
 
@@ -467,7 +468,7 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
                                                 output="compiler says"), [], None,
                                   "not_compiled" if not ok else "forced")
 
-        def make(backend, run_dir, pending):
+        def make(backend, run_dir, pending, c3_api_key=None):
             seen["backend"] = backend
             return B()
         return make
@@ -597,9 +598,9 @@ def test_setup_c3_skips_modal_and_writes_backend(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "validate_provider", lambda p: None)
     monkeypatch.setattr(cli, "deploy_bench",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("deployed")))
-    monkeypatch.setattr(cli, "check_c3", lambda run=None: 9.89)
-    # prompts: backend, provider, model, api key — no Modal token prompts
-    rc = cli.main(["setup"], ask=scripted(["c3", "anthropic", "", "sk-test"]))
+    monkeypatch.setattr(cli, "check_c3", lambda run=None, api_key=None: 9.89)
+    # prompts: backend, provider, model, api key, C3 key (blank) — no Modal token prompts
+    rc = cli.main(["setup"], ask=scripted(["c3", "anthropic", "", "sk-test", ""]))
     assert rc == 0
     cfg = json.loads((tmp_path / "talos.config.json").read_text())
     # mutation: not persisting the backend makes every run go to Modal after a C3 setup
@@ -622,7 +623,7 @@ def test_setup_c3_fails_when_the_session_has_expired(tmp_path, monkeypatch, caps
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "validate_provider", lambda p: None)
     monkeypatch.setattr(cli, "subprocess", types.SimpleNamespace(run=_c3_runner(whoami_rc=1)))
-    rc = cli.main(["setup"], ask=scripted(["c3", "anthropic", "", "sk-test"]))
+    rc = cli.main(["setup"], ask=scripted(["c3", "anthropic", "", "sk-test", ""]))
     # mutation: ignoring whoami's exit code writes a config whose first run fails 20 min later
     assert rc == 1 and "c3 login" in capsys.readouterr().err
     assert not (tmp_path / "talos.config.json").exists()
@@ -636,7 +637,7 @@ def test_setup_c3_without_the_c3_binary_reports_it_instead_of_tracebacking(tmp_p
     def missing(cmd, **kw):
         raise FileNotFoundError(2, "No such file or directory", "c3")
     monkeypatch.setattr(cli, "subprocess", types.SimpleNamespace(run=missing))
-    rc = cli.main(["setup"], ask=scripted(["c3", "anthropic", "", "sk-test"]))
+    rc = cli.main(["setup"], ask=scripted(["c3", "anthropic", "", "sk-test", ""]))
     # mutation: cmd_setup catches ConfigError only, so a FileNotFoundError escaping check_c3
     # tracebacks out of the wizard and throws away every answer already typed
     assert rc == 1
@@ -1147,3 +1148,201 @@ def test_fake_run_carries_hyperparameters_into_the_package(tmp_path, monkeypatch
     # exercising none of this feature
     assert job["hyperparameters"] == {"n=1": {"fake_boost": 1}}
     assert "## Hyperparameters" in (run_dir / "package" / "README.md").read_text()
+
+
+def test_save_keeps_the_llm_key_and_the_c3_key_side_by_side(tmp_path, monkeypatch):
+    monkeypatch.delenv("C3_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    save(tmp_path, Config(provider="anthropic", model="m", mode="single-shot", api_base=None,
+                          backend="c3"), "sk-1", c3_api_key="c3_key_1")
+    sec = tmp_path / ".talos" / "secrets.json"
+    # mutation: writing {"api_key": ...} alone drops the C3 key on every setup
+    assert json.loads(sec.read_text()) == {"api_key": "sk-1", "c3_api_key": "c3_key_1"}
+    assert stat.S_IMODE(sec.stat().st_mode) == 0o600
+    cfg = load(tmp_path)
+    assert resolve_api_key(cfg) == "sk-1" and resolve_c3_api_key(cfg) == "c3_key_1"
+
+
+def test_save_writes_a_c3_key_for_a_cli_provider(tmp_path, monkeypatch):
+    # mutation: gating the secrets write on the LLM key never stores a claude-cli user's C3 key
+    monkeypatch.delenv("C3_API_KEY", raising=False)
+    save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
+                          backend="c3"), None, c3_api_key="c3_key_1")
+    assert json.loads((tmp_path / ".talos" / "secrets.json").read_text()) == {
+        "c3_api_key": "c3_key_1"}
+    assert resolve_c3_api_key(load(tmp_path)) == "c3_key_1"
+
+
+def test_resolve_c3_api_key_prefers_file_then_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("C3_API_KEY", "from-env")
+    save(tmp_path, Config(provider="anthropic", model="m", mode="single-shot", api_base=None,
+                          backend="c3"), "sk-1", c3_api_key="from-file")
+    # mutation: env first lets a stale shell variable override the key setup just checked
+    assert resolve_c3_api_key(load(tmp_path)) == "from-file"
+    save(tmp_path, Config(provider="anthropic", model="m", mode="single-shot", api_base=None,
+                          backend="c3"), "sk-1")
+    assert resolve_c3_api_key(load(tmp_path)) == "from-env"
+    assert resolve_c3_api_key(None) == "from-env"  # `talos compile` in a dir with no config
+    monkeypatch.setenv("C3_API_KEY", "")
+    # mutation: returning the empty string sets C3_API_KEY="" and c3 rejects a login session
+    assert resolve_c3_api_key(load(tmp_path)) is None and resolve_c3_api_key(None) is None
+
+
+def test_check_c3_passes_the_api_key_in_the_environment_not_argv(monkeypatch):
+    monkeypatch.setenv("PATH", "/some/bin")
+    seen = []
+    inner = _c3_runner()
+
+    def run(cmd, **kw):
+        seen.append((cmd, kw.get("env")))
+        return inner(cmd, **kw)
+    cli.check_c3(run=run, api_key="c3_key_secret")
+    # mutation: dropping env= leaves the CLI on an expired login session; a bare
+    # {"C3_API_KEY": k} without os.environ loses PATH and HOME
+    assert [c[0][1] for c in seen] == ["whoami", "balance"]
+    assert all(env["C3_API_KEY"] == "c3_key_secret" and env["PATH"] == "/some/bin"
+               for _, env in seen)
+    assert all("c3_key_secret" not in " ".join(cmd) for cmd, _ in seen)
+    seen.clear()
+    cli.check_c3(run=run)
+    # mutation: always passing an env copy would still work, but setting C3_API_KEY=None
+    # or "" breaks a login-session user; with no key the child inherits the environment as is
+    assert all(env is None for _, env in seen)
+
+
+def test_check_c3_failure_names_the_api_key_option():
+    with pytest.raises(ConfigError) as excinfo:
+        cli.check_c3(run=_c3_runner(whoami_rc=1), api_key="c3_key_secret")
+    msg = str(excinfo.value)
+    # mutation: the old message sends an API-key user to `c3 login`, which they chose not to use
+    assert "API key" in msg and "c3_key_secret" not in msg
+
+
+def test_setup_c3_checks_and_stores_the_c3_api_key(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    checked = []
+    monkeypatch.setattr(cli, "check_c3", lambda run=None, api_key=None: checked.append(api_key))
+    rc = cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", "c3_key_1"]))
+    assert rc == 0
+    # mutation: checking the login session instead of the typed key accepts a revoked key
+    assert checked == ["c3_key_1"]
+    assert json.loads((tmp_path / ".talos" / "secrets.json").read_text()) == {
+        "c3_api_key": "c3_key_1"}
+
+
+def test_setup_c3_rejected_key_writes_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+
+    def rejected(run=None, api_key=None):
+        raise ConfigError("C3 login check failed: Invalid or revoked API key")
+    monkeypatch.setattr(cli, "check_c3", rejected)
+    rc = cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", "c3_key_bad"]))
+    # mutation: saving before the check leaves a revoked key on disk
+    assert rc == 1 and "revoked" in capsys.readouterr().err
+    assert not (tmp_path / ".talos").exists()
+
+
+def test_setup_modal_does_not_ask_for_a_c3_key(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
+    ask, prompts = _recording(["", "anthropic", "", "sk-test", "ak-1", "as-1"])
+    assert cli.main(["setup"], ask=ask) == 0
+    # mutation: asking on every backend puts a C3 prompt in a Modal user's wizard
+    assert not any("C3" in p for p, _ in prompts)
+
+
+def test_execute_job_gives_the_c3_key_to_the_bench_and_the_sandbox(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # setenv before delenv: execute_job writes both into os.environ, and delenv of an unset
+    # variable records nothing to undo, so the key would leak into every later test
+    for var in ("C3_API_KEY", "TALOS_BACKEND"):
+        monkeypatch.setenv(var, "")
+        monkeypatch.delenv(var)
+    save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
+                          backend="c3"), None, c3_api_key="c3_key_1")
+    monkeypatch.setattr(cli, "image_available", lambda ch, fetch=None: True)
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    _stub_mainnet(monkeypatch)
+    seen = {}
+
+    class B(_RefusingBench):
+        def evaluate(self, request):
+            seen["env"] = os.environ.get("C3_API_KEY")
+            raise BenchCancelled("stop")
+
+    def make(backend, run_dir, pending, c3_api_key=None):
+        seen["bench_key"] = c3_api_key
+        return B("unreachable")
+    monkeypatch.setattr(cli, "make_bench", make)
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "1", "--yes"])
+    # mutation: not passing the key runs every job on the login session; not exporting it
+    # leaves `talos compile` in the agentic sandbox with no credential
+    assert rc == 1 and seen == {"bench_key": "c3_key_1", "env": "c3_key_1"}
+
+
+def test_compile_uses_the_c3_key_from_the_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("C3_API_KEY", raising=False)
+    monkeypatch.delenv("TALOS_BACKEND", raising=False)
+    save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
+                          backend="c3"), None, c3_api_key="c3_key_1")
+    (tmp_path / "algorithm").mkdir()
+    (tmp_path / "algorithm" / "mod.rs").write_text("fn solve() {}\n")
+    seen = {}
+
+    class B:
+        def evaluate(self, request):
+            return EvalResult(CompileResult(ok=True, artifact_id="a1", output="ok"), [], None,
+                              "forced")
+
+    def make(backend, run_dir, pending, c3_api_key=None):
+        seen["key"] = c3_api_key
+        return B()
+    monkeypatch.setattr(cli, "make_bench", make)
+    assert cli.main(["compile", "--challenge", "knapsack"]) == 0
+    # mutation: ignoring the config makes a direct `talos compile` fall back to `c3 login`
+    assert seen["key"] == "c3_key_1"
+
+
+def test_make_bench_hands_the_c3_key_to_c3bench(tmp_path):
+    from talos.bench import PendingJobStore
+    runs = []
+
+    def run(cmd, **kw):
+        runs.append(kw.get("env"))
+        raise FileNotFoundError(2, "no c3", "c3")
+    b = cli.make_bench("c3", tmp_path, PendingJobStore.memory(), c3_api_key="c3_key_1")
+    b._run = run
+    with pytest.raises(Exception):
+        b._c3("squeue", "--json")
+    # mutation: make_bench accepting the key but not forwarding it
+    assert runs[0]["C3_API_KEY"] == "c3_key_1"
+
+
+def test_setup_with_no_keys_left_removes_the_old_secrets(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("C3_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    checked = []
+    monkeypatch.setattr(cli, "check_c3", lambda run=None, api_key=None: checked.append(api_key))
+    assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", "c3_old"])) == 0
+    assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", ""])) == 0
+    # mutation: skipping the write when no key was given leaves the old c3_api_key on disk, so
+    # a run uses a key the user just chose to drop, after setup checked the login session
+    assert checked == ["c3_old", None]
+    assert resolve_c3_api_key(load(tmp_path)) is None
+    assert not (tmp_path / ".talos" / "secrets.json").exists()
+
+
+def test_check_c3_failure_with_the_key_from_the_environment_names_the_api_key(monkeypatch):
+    monkeypatch.setenv("C3_API_KEY", "c3_key_env")
+    with pytest.raises(ConfigError) as excinfo:
+        cli.check_c3(run=_c3_runner(whoami_rc=1))
+    msg = str(excinfo.value)
+    # mutation: keying the hint on the argument alone sends a C3_API_KEY user to `c3 login`
+    assert "check the C3 API key" in msg and "c3_key_env" not in msg
