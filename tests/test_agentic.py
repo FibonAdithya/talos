@@ -168,6 +168,19 @@ def test_attach_agentic_timeout_is_agentic_error_and_talos_is_on_path(tmp_path, 
     with pytest.raises(AgenticError):
         loop.propose_and_edit(ctx())
     assert seen["env"]["CLAUDE_CONFIG_DIR"] == "/tmp/cc" and seen["env"]["CODEX_HOME"] == "/tmp/ch"
+    # mutation: without these, a Windows claude or codex cannot find its login under the user
+    # profile, and Node cannot start at all without SYSTEMROOT
+    windows = {"SYSTEMROOT": r"C:\Windows", "USERPROFILE": r"C:\Users\u",
+               "APPDATA": r"C:\Users\u\AppData\Roaming",
+               "LOCALAPPDATA": r"C:\Users\u\AppData\Local",
+               "PATHEXT": ".COM;.EXE;.BAT;.CMD", "COMSPEC": r"C:\Windows\system32\cmd.exe",
+               "TEMP": r"C:\Temp", "TMP": r"C:\Temp", "HOMEDRIVE": "C:", "HOMEPATH": r"\Users\u",
+               "USERNAME": "u", "SYSTEMDRIVE": "C:", "WINDIR": r"C:\Windows"}
+    for k, v in windows.items():
+        monkeypatch.setenv(k, v)
+    with pytest.raises(AgenticError):
+        loop.propose_and_edit(ctx())
+    assert {k: seen["env"].get(k) for k in windows} == windows
     shutil.rmtree(loop._agentic_wt, ignore_errors=True)
 
 
@@ -179,7 +192,7 @@ def test_run_agent_caps_transcript_length(tmp_path):
     def run(cmd, **kw):
         return subprocess.CompletedProcess(cmd, 0, stdout=huge, stderr=huge)
 
-    _run_agent(["claude"], wt, 10, run)
+    _run_agent(["claude"], wt, "p", 10, run)
     # mutation: forgetting the cap lets a runaway agent transcript blow up disk and git history
     assert len((wt / ".talos" / "agent_stdout.txt").read_text()) == 200_000
     assert len((wt / ".talos" / "agent_stderr.txt").read_text()) == 200_000
@@ -227,7 +240,7 @@ def test_agentic_prompt_describes_failed_attempts_with_their_numbers(tmp_path):
     seen = {}
 
     def run(cmd, **kw):
-        seen["prompt"] = cmd[-1]
+        seen["prompt"] = kw["input"]
         raise subprocess.TimeoutExpired(cmd, 1)
 
     loop = types.SimpleNamespace(store=JobStore(tmp_path), propose_and_edit=None,

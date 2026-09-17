@@ -49,7 +49,8 @@ def test_setup_writes_config_and_0600_secret(tmp_path, monkeypatch):
     assert json.loads(sec.read_text()) == {"api_key": "sk-test"}
     # mutation: os.open creates a NEW file 0600 and chmod repairs a pre-existing one, so only
     # widening the open mode AND dropping the chmod fails this (either alone is covered by the other)
-    assert stat.S_IMODE(sec.stat().st_mode) == 0o600
+    if os.name != "nt":  # Windows has no owner-only mode bits; chmod there sets read-only alone
+        assert stat.S_IMODE(sec.stat().st_mode) == 0o600
     assert calls == ["deploy"]
 
 
@@ -457,6 +458,8 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
     (tmp_path / "algorithm").mkdir()
     (tmp_path / "algorithm" / "mod.rs").write_text("fn solve() {}\n")
     (tmp_path / "algorithm" / "notes.txt").write_text("ignore me\n")
+    (tmp_path / "algorithm" / "sub").mkdir()
+    (tmp_path / "algorithm" / "sub" / "helper.rs").write_text("fn help() {}\n")
     seen = {}
 
     def stub(ok):
@@ -476,7 +479,9 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
     monkeypatch.delenv("TALOS_BACKEND", raising=False)
     assert cli.main(["compile", "--challenge", "knapsack"]) == 1  # no config here: modal
     assert seen["backend"] == "modal"
-    assert seen["challenge"] == "knapsack" and list(seen["files"]) == ["mod.rs"]
+    # mutation: str(relative_to) keys a nested file `sub\\helper.rs` on Windows, which the Linux
+    # side stages as one file with a backslash in its name
+    assert seen["challenge"] == "knapsack" and sorted(seen["files"]) == ["mod.rs", "sub/helper.rs"]
     # mutation: a compile that ships nonce sets pays for scoring the agent did not ask for
     assert seen["training"] == [] and seen["holdout"] == []
     assert "compiler says" in capsys.readouterr().out
@@ -1158,7 +1163,8 @@ def test_save_keeps_the_llm_key_and_the_c3_key_side_by_side(tmp_path, monkeypatc
     sec = tmp_path / ".talos" / "secrets.json"
     # mutation: writing {"api_key": ...} alone drops the C3 key on every setup
     assert json.loads(sec.read_text()) == {"api_key": "sk-1", "c3_api_key": "c3_key_1"}
-    assert stat.S_IMODE(sec.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(sec.stat().st_mode) == 0o600
     cfg = load(tmp_path)
     assert resolve_api_key(cfg) == "sk-1" and resolve_c3_api_key(cfg) == "c3_key_1"
 

@@ -206,7 +206,8 @@ class Loop:
         self._write_files(self.store.run_dir / "baseline", rec.files)
         (self.store.run_dir / "baseline" / "results.json").write_text(json.dumps(
             {"training": [r.to_dict() for r in rec.training],
-             "holdout": [r.to_dict() for r in rec.holdout]}, indent=1))
+             "holdout": [r.to_dict() for r in rec.holdout]}, indent=1),
+            encoding="utf-8", newline="\n")
         self._event("baseline_ready", name=rec.name, adoption=rec.adoption)
 
     @staticmethod
@@ -219,7 +220,7 @@ class Loop:
         for name, text in files.items():
             p = directory / name
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(text)
+            p.write_text(text, encoding="utf-8", newline="\n")
 
     # ── context ───────────────────────────────────────────────────────
 
@@ -309,7 +310,8 @@ class Loop:
             self._finish_iteration(n, record, improved=False)
             return
         record.update(hypothesis)
-        (it_dir / "hypothesis.json").write_text(json.dumps(hypothesis))
+        (it_dir / "hypothesis.json").write_text(json.dumps(hypothesis),
+                                                encoding="utf-8", newline="\n")
         self.state.pending_job = {"purpose": n, "hypothesis": hypothesis, "files": files}
         self._save()
         self._score_candidate(n, ctx, record, hypothesis, files)
@@ -356,7 +358,7 @@ class Loop:
             return
         for name, text in files.items():
             (it_dir / name).parent.mkdir(parents=True, exist_ok=True)
-            (it_dir / name).write_text(text)
+            (it_dir / name).write_text(text, encoding="utf-8", newline="\n")
         results = res.training
         base_tr = select(self.state.baseline.training, self._focus()[0])
         try:
@@ -492,7 +494,8 @@ class Loop:
         lesson = parse_distillation(text)
         if lesson:
             self.state.tacit = (self.state.tacit.rstrip() + f"\n- LLM: {lesson}\n").lstrip()
-            (self.store.run_dir / "tacit.md").write_text(self.state.tacit)
+            (self.store.run_dir / "tacit.md").write_text(self.state.tacit,
+                                                         encoding="utf-8", newline="\n")
             self._save()
             self._event("distilled", lesson=lesson)
 

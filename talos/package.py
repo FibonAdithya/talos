@@ -73,7 +73,8 @@ def scores_sections(spec: JobSpec, state: JobState) -> list[tuple[str, str]]:
 
 
 def evidence_draft(spec: JobSpec, state: JobState) -> str:
-    template = resources.files("talos.data").joinpath("evidence_template.md").read_text()
+    template = (resources.files("talos.data").joinpath("evidence_template.md")
+                .read_text(encoding="utf-8"))
     # deviation from brief: also include outcome "won" (a winning iteration's hypothesis
     # record carries outcome "won", not "improved" — see JobState.confirmed, Task 11)
     winners = [h for h in state.hypotheses if h.get("outcome") in ("improved", "won")]
@@ -176,24 +177,30 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
         shutil.rmtree(pkg)
     pkg.mkdir()
     if state.best is None:
-        (pkg / "README.md").write_text(_readme_no_candidate(spec, state))
+        (pkg / "README.md").write_text(_readme_no_candidate(spec, state),
+                                       encoding="utf-8", newline="\n")
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
     if state.baseline is None:
-        (pkg / "README.md").write_text("# Talos hand-back\n\nNo candidate was produced.\n")
+        (pkg / "README.md").write_text("# Talos hand-back\n\nNo candidate was produced.\n",
+                                       encoding="utf-8", newline="\n")
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
     for name, text in state.best.files.items():
         (pkg / name).parent.mkdir(parents=True, exist_ok=True)
-        (pkg / name).write_text(text)
-    (pkg / "diff_vs_baseline.patch").write_text(_diff(state.baseline.files, state.best.files))
+        (pkg / name).write_text(text, encoding="utf-8", newline="\n")
+    (pkg / "diff_vs_baseline.patch").write_text(_diff(state.baseline.files, state.best.files),
+                                                encoding="utf-8", newline="\n")
     scores = "\n".join(f"# {heading}\n\n{table}" for heading, table in scores_sections(spec, state))
-    (pkg / "scores.md").write_text(scores)
+    (pkg / "scores.md").write_text(scores, encoding="utf-8", newline="\n")
     hyps = "\n".join(_hypothesis_line(h) for h in state.hypotheses)
-    (pkg / "hypotheses.md").write_text("# Hypotheses\n\n" + hyps + "\n")
-    (pkg / "evidence_draft.md").write_text(evidence_draft(spec, state))
-    (pkg / "README.md").write_text(_readme(spec, state))
+    (pkg / "hypotheses.md").write_text("# Hypotheses\n\n" + hyps + "\n",
+                                       encoding="utf-8", newline="\n")
+    (pkg / "evidence_draft.md").write_text(evidence_draft(spec, state),
+                                           encoding="utf-8", newline="\n")
+    (pkg / "README.md").write_text(_readme(spec, state), encoding="utf-8", newline="\n")
     if spec.hyperparameters is not None:
-        (pkg / "hyperparameters.json").write_text(json.dumps(spec.hyperparameters, indent=1))
+        (pkg / "hyperparameters.json").write_text(json.dumps(spec.hyperparameters, indent=1),
+                                                  encoding="utf-8", newline="\n")
     shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
     return pkg

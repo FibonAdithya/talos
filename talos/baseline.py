@@ -81,7 +81,7 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
     cache_file = Path(cache_dir) / challenge / f"{key}.json"
     if cache_file.exists():
         try:
-            rec = BaselineRecord.from_dict(json.loads(cache_file.read_text()))
+            rec = BaselineRecord.from_dict(json.loads(cache_file.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             log(f"baseline {name}: cache file {cache_file} is corrupt; re-measuring")
         else:

@@ -23,8 +23,18 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Talos runs on the user's own machine, so the gate runs on each OS a user might have.
+    # fail-fast off: one OS failing must not cancel the runs that say whether the others pass.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    # bash on every OS (Git Bash on Windows), so the install step's shell syntax works there too.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -41,4 +51,5 @@ jobs:
           if grep -q '^\[project\]' pyproject.toml 2>/dev/null; then python -m pip install -e .; fi
 
       - name: Run the gate
-        run: make check
+        # setup-python provides `python` on every OS, but no `python3` on Windows.
+        run: make check PYTHON=python

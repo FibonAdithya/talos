@@ -28,7 +28,7 @@ other than the algorithm files shown."""
 
 @lru_cache(maxsize=1)
 def _rust_rules() -> str:
-    return resources.files("talos.data").joinpath("rust_rules.md").read_text()
+    return resources.files("talos.data").joinpath("rust_rules.md").read_text(encoding="utf-8")
 
 
 @dataclass

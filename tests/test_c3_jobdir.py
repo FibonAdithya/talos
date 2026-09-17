@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 
 from talos import c3_jobdir
@@ -64,7 +65,11 @@ def test_write_job_dir_contents_and_secrecy(tmp_path):
     assert names == [".c3", "job.sh", "payload.json", "talos/__init__.py", "talos/c3_job.py",
                      "talos/challenges.py", "talos/diagnostics.py", "talos/inside.py",
                      "talos/scoring.py", "talos/types.py"]
-    assert stat.S_IMODE((d / "job.sh").stat().st_mode) & stat.S_IXUSR
+    if os.name != "nt":  # Windows has no execute bit to set
+        assert stat.S_IMODE((d / "job.sh").stat().st_mode) & stat.S_IXUSR
+    # mutation: text-mode writes on Windows end lines in CRLF, and bash in the Linux container
+    # then fails on `/bin/bash\r`
+    assert b"\r" not in (d / "job.sh").read_bytes() and b"\r" not in (d / ".c3").read_bytes()
     assert MONOREPO_REF in (d / "job.sh").read_text()
     p = json.loads((d / "payload.json").read_text())
     assert p["challenge"] == "knapsack" and p["challenge_id"] == "c003" and p["fuel"] == 7

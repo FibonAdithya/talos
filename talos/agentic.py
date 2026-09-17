@@ -11,6 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from talos.executables import argv0
 from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, describe_attempt,
                            focus_sentence, hyperparameters_block)
 
@@ -93,19 +94,22 @@ def prepare_worktree(ctx: PromptContext, parent: Path | None = None) -> Path:
     wt = Path(tempfile.mkdtemp(prefix="talos-agentic-", dir=parent))
     (wt / "algorithm").mkdir(parents=True)
     (wt / ".talos").mkdir()
-    (wt / ".talos" / "hypothesis.json").write_text("{}\n")  # agent must Edit, Write is denied
+    # agent must Edit, Write is denied
+    (wt / ".talos" / "hypothesis.json").write_text("{}\n", encoding="utf-8", newline="\n")
     (wt / ".claude").mkdir()
     for name, text in ctx.files.items():
         p = wt / "algorithm" / name
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text)
+        p.write_text(text, encoding="utf-8", newline="\n")
     (wt / "CHALLENGE.md").write_text(f"# {ctx.challenge} solver contract (template.rs)\n\n"
-                                     f"```rust\n{ctx.template_rs}\n```\n")
-    (wt / "tacit.md").write_text(ctx.tacit)
+                                     f"```rust\n{ctx.template_rs}\n```\n",
+                                     encoding="utf-8", newline="\n")
+    (wt / "tacit.md").write_text(ctx.tacit, encoding="utf-8", newline="\n")
     md = claude_md(ctx)
-    (wt / "CLAUDE.md").write_text(md)
-    (wt / "AGENTS.md").write_text(md)
-    (wt / ".claude" / "settings.json").write_text(json.dumps(sandbox_settings(wt), indent=1))
+    (wt / "CLAUDE.md").write_text(md, encoding="utf-8", newline="\n")
+    (wt / "AGENTS.md").write_text(md, encoding="utf-8", newline="\n")
+    (wt / ".claude" / "settings.json").write_text(json.dumps(sandbox_settings(wt), indent=1),
+                                                  encoding="utf-8", newline="\n")
     return wt
 
 
@@ -113,10 +117,10 @@ def read_back(worktree: Path, ctx: PromptContext) -> tuple[dict, dict[str, str]]
     """spec §9: an edit outside the algorithm files fails the iteration in both modes. For codex,
     which ignores .claude/settings.json, this scope check is the ONLY enforcement of that rule."""
     hp = worktree / ".talos" / "hypothesis.json"
-    if not hp.exists() or hp.read_text().strip() in ("", "{}"):
+    if not hp.exists() or hp.read_text(encoding="utf-8").strip() in ("", "{}"):
         raise AgenticError("agent did not fill in .talos/hypothesis.json")
     try:
-        h = json.loads(hp.read_text())
+        h = json.loads(hp.read_text(encoding="utf-8"))
         hypothesis = {"title": str(h["title"])[:200], "description": str(h["description"])[:4000],
                       "strategy_tag": h.get("strategy_tag") if h.get("strategy_tag") in STRATEGY_TAGS else "hybrid"}
     except (json.JSONDecodeError, KeyError, TypeError) as e:
@@ -129,7 +133,7 @@ def read_back(worktree: Path, ctx: PromptContext) -> tuple[dict, dict[str, str]]
     missing = set(ctx.files) - on_disk
     if missing:
         raise AgenticError(f"agent deleted algorithm files: {sorted(missing)}")
-    files = {name: (algo_dir / name).read_text() for name in ctx.files}
+    files = {name: (algo_dir / name).read_text(encoding="utf-8") for name in ctx.files}
     if files == ctx.files:
         raise AgenticError("agent changed no algorithm file")
     return hypothesis, files
@@ -156,6 +160,11 @@ _AGENT_ENV_ALLOWLIST = frozenset({
     # token in ~/.modal.toml or a `c3 login` session under HOME: claude-cli's permissions let the
     # agent run `talos compile` and read only the worktree; opt-in codex can read either.
     "C3_API_KEY",
+    # Windows's equivalents of the basics above. Node, which claude and codex run on, fails to
+    # start without SYSTEMROOT; both CLIs keep their login under USERPROFILE/APPDATA; an npm
+    # `.cmd` wrapper needs COMSPEC and PATHEXT. None of these is set on Linux or macOS.
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME",
+    "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
 })
 
 _TRANSCRIPT_CAP = 200_000
@@ -170,27 +179,34 @@ def _agent_env() -> dict[str, str]:
     return env
 
 
-def _run_agent(cmd: list[str], wt: Path, timeout_s: int, run) -> None:
+def _run_agent(cmd: list[str], wt: Path, prompt: str, timeout_s: int, run) -> None:
+    """The prompt goes on stdin, not argv: on Windows an npm-installed CLI is a `.cmd` wrapper
+    that cmd.exe runs, and cmd.exe cuts an argument at its first newline."""
     try:
-        r = run(cmd, cwd=wt, capture_output=True, text=True, timeout=timeout_s, env=_agent_env())
+        r = run(cmd, cwd=wt, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=timeout_s, env=_agent_env())
     except FileNotFoundError:
         raise AgenticError(f"{cmd[0]} CLI not found on PATH") from None
     except subprocess.TimeoutExpired:
         raise AgenticError(f"{cmd[0]} timed out after {timeout_s}s") from None
-    (wt / ".talos" / "agent_stdout.txt").write_text((r.stdout or "")[-_TRANSCRIPT_CAP:])
-    (wt / ".talos" / "agent_stderr.txt").write_text((r.stderr or "")[-_TRANSCRIPT_CAP:])
+    (wt / ".talos" / "agent_stdout.txt").write_text((r.stdout or "")[-_TRANSCRIPT_CAP:],
+                                                    encoding="utf-8", newline="\n")
+    (wt / ".talos" / "agent_stderr.txt").write_text((r.stderr or "")[-_TRANSCRIPT_CAP:],
+                                                    encoding="utf-8", newline="\n")
     if r.returncode != 0:
         raise AgenticError(f"{cmd[0]} exited {r.returncode}: {(r.stderr or '')[-500:]}")
 
 
 def _run_claude(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
-    _run_agent(["claude", "-p", "--model", model, "--settings", str(wt / ".claude" / "settings.json"),
-                "--permission-mode", "dontAsk", prompt], wt, timeout_s, run)
+    _run_agent([argv0("claude"), "-p", "--model", model,
+                "--settings", str(wt / ".claude" / "settings.json"),
+                "--permission-mode", "dontAsk"], wt, prompt, timeout_s, run)
 
 
 def _run_codex(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
-    _run_agent(["codex", "exec", "-m", model, "--sandbox", "workspace-write",
-                "--skip-git-repo-check", prompt], wt, timeout_s, run)
+    # "-" makes codex read the prompt from stdin
+    _run_agent([argv0("codex"), "exec", "-m", model, "--sandbox", "workspace-write",
+                "--skip-git-repo-check", "-"], wt, prompt, timeout_s, run)
 
 
 def _copy_transcript(wt: Path, loop) -> None:

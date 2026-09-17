@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from talos.executables import argv0
 from talos.providers import ProviderAuthError, ProviderError
 from talos.types import Completion, Usage
 
@@ -26,10 +27,11 @@ class CodexCli:
             out = Path(td) / "last.md"
             # "-" makes codex read the prompt from stdin. As an argv element the prompt would hit
             # the kernel's 128 KiB per-argument cap: a challenge's algorithm files alone exceed it.
-            cmd = ["codex", "exec", "-m", self.model, "--skip-git-repo-check", "-o", str(out), "-"]
+            cmd = [argv0("codex"), "exec", "-m", self.model, "--skip-git-repo-check",
+                   "-o", str(out), "-"]
             try:
-                r = self._run(cmd, input=prompt, capture_output=True, text=True,
-                              timeout=self.timeout_s, cwd=td)
+                r = self._run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=self.timeout_s, cwd=td)
             except FileNotFoundError:
                 raise ProviderAuthError("codex CLI not found on PATH") from None
             except subprocess.TimeoutExpired:
@@ -39,7 +41,7 @@ class CodexCli:
                 if "login" in err.lower() or "auth" in err.lower():
                     raise ProviderAuthError(f"codex CLI not logged in: {err}")
                 raise ProviderError(f"codex CLI failed: {err}")
-            text = out.read_text() if out.exists() else r.stdout
+            text = out.read_text(encoding="utf-8") if out.exists() else r.stdout
         return Completion(text=text, usage=Usage())
 
 
@@ -48,7 +50,8 @@ def list_codex_models(run=subprocess.run, timeout_s: int = 60) -> list[str]:
     read (no binary, non-zero exit, unparseable output): setup then falls back to the static
     default rather than failing."""
     try:
-        r = run(["codex", "debug", "models"], capture_output=True, text=True, timeout=timeout_s)
+        r = run([argv0("codex"), "debug", "models"], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout_s)
         if r.returncode != 0:
             return []
         models = json.loads(r.stdout)["models"]
