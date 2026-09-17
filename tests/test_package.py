@@ -34,13 +34,17 @@ def make(tmp_path, status="won"):
 
 def test_package_contents_and_no_hash(tmp_path):
     spec, st, store = make(tmp_path)
+    # so the hash-grep below also covers hyperparameters.json and the README section
+    spec = replace(spec, hyperparameters={"t": {"x": 1}},
+                   hyperparameters_source={"t": {"benchmark_id": "b1", "player_id": "p1",
+                                                 "mean_quality": 1.0}})
     st.hypotheses.append({"iteration": 2, "against": 0, "title": "Bad edit", "description": "x",
                           "strategy_tag": "hybrid", "outcome": "failed:edit",
                           "error": "no edit block applied"})
     pkg = build_package(spec, st, store)
     names = {p.name for p in pkg.iterdir()}
     assert {"mod.rs", "diff_vs_baseline.patch", "scores.md", "hypotheses.md",
-            "evidence_draft.md", "README.md"} <= names
+            "evidence_draft.md", "README.md", "hyperparameters.json"} <= names
     assert "let k = 9" in (pkg / "diff_vs_baseline.patch").read_text()
     # mutation: dropping the error string from the log hides why an iteration failed
     hyps_text = (pkg / "hypotheses.md").read_text()
