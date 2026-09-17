@@ -158,3 +158,33 @@ def test_failed_attempt_lines_carry_the_numbers_and_the_error():
     assert "rejected: ['x/track2.rs']" in describe_attempt(edit)
     _, user = hypothesis_prompts(ctx(failed_hypotheses=[scored, edit]))
     assert "14.1x" in user and "rejected: ['x/track2.rs']" in user
+
+
+HP = {"t": {"b": 2, "a": 1}, "u": None}
+
+
+def test_hypothesis_and_edit_prompts_show_every_tracks_hyperparameters():
+    c = ctx(hyperparameters=HP)
+    _, hyp_user = hypothesis_prompts(c)
+    _, edit_user = edit_prompts(c, {"title": "t", "description": "d"})
+    for user in (hyp_user, edit_user):
+        # mutation: leaving the block out of either prompt lets the model rename a key unawares
+        assert 'track t: {"a":1,"b":2}' in user
+        assert "track u: none (solve_challenge receives None)" in user
+        assert "do not rename or remove" in user
+    import re
+    assert not re.search(r"\b[0-9a-f]{64}\b", hyp_user + edit_user)
+
+
+def test_no_hyperparameters_block_without_a_map():
+    _, user = hypothesis_prompts(ctx())
+    # mutation: printing the block for None tells the model values are passed when none are
+    assert "Hyperparameters:" not in user
+
+
+def test_a_focused_prompt_shows_only_the_focus_tracks_hyperparameters():
+    c = ctx(hyperparameters={"t": {"x": 1}, "u": {"x": 2}}, track="t", guard_tracks=["u"])
+    _, user = hypothesis_prompts(c)
+    # mutation: listing every track spends the focused prompt on tracks it must not tune for
+    assert 'track t: {"x":1}' in user and '{"x":2}' not in user
+    assert "guard tracks run with their own values" in user
