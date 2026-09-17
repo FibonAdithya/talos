@@ -125,7 +125,15 @@ def test_payload_carries_the_hyperparameters(tmp_path):
     r = req()
     r.hyperparameters = {"t": {"x": 1}}
     assert c3_jobdir.payload(r)["hyperparameters"] == {"t": {"x": 1}}
-    assert c3_jobdir.payload(req())["hyperparameters"] is None
+    # mutation: always writing the key (even None) changes the hash of a pre-upgrade request
+    assert "hyperparameters" not in c3_jobdir.payload(req())
+
+
+def test_request_hash_is_unchanged_from_before_hyperparameters_existed():
+    # mutation: always writing the "hyperparameters" key changes this request's hash, so a
+    # resume against a job that was submitted before the upgrade orphans it instead of
+    # reattaching, leaving it to keep billing
+    assert c3_jobdir.request_hash(req()) == "8360658c78306a4f"
 
 
 def test_request_hash_changes_with_the_hyperparameters():

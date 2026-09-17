@@ -46,16 +46,21 @@ def job_sh_text(monorepo_ref: str) -> str:
 
 def payload(request: EvalRequest) -> dict:
     spec = CHALLENGES[request.challenge]
-    return {"challenge": request.challenge, "challenge_id": spec.id, "files": request.files,
-            "training": [asdict(n) for n in request.training],
-            "holdout": [asdict(n) for n in request.holdout], "fuel": request.fuel,
-            "baseline_training": ([r.to_dict() for r in request.baseline_training]
-                                  if request.baseline_training is not None else None),
-            "rule": asdict(request.rule), "monorepo_ref": MONOREPO_REF,
-            "prior_functions": request.prior_functions, "timeouts": request.timeouts,
-            "hyperparameters": request.hyperparameters,
-            "workers": c3_workers(spec), "nonce_timeout_s": NONCE_TIMEOUT_S,
-            "dev_image_tag": DEV_IMAGE_TAG}
+    p = {"challenge": request.challenge, "challenge_id": spec.id, "files": request.files,
+         "training": [asdict(n) for n in request.training],
+         "holdout": [asdict(n) for n in request.holdout], "fuel": request.fuel,
+         "baseline_training": ([r.to_dict() for r in request.baseline_training]
+                               if request.baseline_training is not None else None),
+         "rule": asdict(request.rule), "monorepo_ref": MONOREPO_REF,
+         "prior_functions": request.prior_functions, "timeouts": request.timeouts,
+         "workers": c3_workers(spec), "nonce_timeout_s": NONCE_TIMEOUT_S,
+         "dev_image_tag": DEV_IMAGE_TAG}
+    if request.hyperparameters is not None:
+        # Only when present, so a request identical to a pre-upgrade one hashes the same way;
+        # a resumed job would otherwise see a hash mismatch and submit a second, orphaning the
+        # first (still-billing) one. `c3_job` reads it with `payload.get("hyperparameters") or {}`.
+        p["hyperparameters"] = request.hyperparameters
+    return p
 
 
 def request_hash(request: EvalRequest) -> str:
