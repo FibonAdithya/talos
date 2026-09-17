@@ -25,6 +25,7 @@ from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_im
                               hardware_class)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
+from talos.executables import argv0
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
@@ -54,10 +55,11 @@ def deploy_bench(token_id: str | None, token_secret: str | None, run=subprocess.
     base = modal if isinstance(modal, list) else [modal]
     if token_id and token_secret:
         r = run(base + ["token", "set", "--token-id", token_id, "--token-secret", token_secret],
-                capture_output=True, text=True)
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             raise ConfigError(f"modal token set failed: {r.stderr[-500:]}")
-    r = run(base + ["deploy", str(MODAL_APP_FILE)], capture_output=True, text=True)
+    r = run(base + ["deploy", str(MODAL_APP_FILE)], capture_output=True, text=True,
+            encoding="utf-8", errors="replace")
     if r.returncode != 0:
         raise ConfigError(f"modal deploy failed: {(r.stderr or r.stdout)[-2000:]}")
 
@@ -72,7 +74,8 @@ def check_c3(run=None, api_key: str | None = None) -> float:
 
     def c3(*args: str):
         try:
-            return runner(["c3", *args], capture_output=True, text=True, env=env)
+            return runner([argv0("c3"), *args], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env)
         except OSError:
             # FileNotFoundError included. `cmd_setup` catches ConfigError only, so anything
             # else here tracebacks out of the wizard and throws away every answer typed.
@@ -487,7 +490,7 @@ def cmd_run(args, ask) -> int:
         if not df.exists():
             print(f"direction file not found: {df}", file=sys.stderr)
             return 2
-        direction = df.read_text()
+        direction = df.read_text(encoding="utf-8")
     if not direction:
         direction = ask("Direction for the agent (what to explore)")
     metered = cfg.provider not in CLI_PROVIDERS
@@ -593,7 +596,8 @@ def cmd_run(args, ask) -> int:
                    hyperparameters_source=hp_source)
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
-    (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n")
+    (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n",
+                                            encoding="utf-8", newline="\n")
     scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
     if hyperparameters is None and algorithm is not None:
         hp_line = (f"hyperparameters: none (no mainnet benchmark of {algorithm['name']} "
@@ -629,7 +633,7 @@ def cmd_compile(args, ask) -> int:
         print(f"unknown challenge {args.challenge!r}", file=sys.stderr)
         return 2
     d = Path(args.dir)
-    files = ({str(p.relative_to(d)): p.read_text() for p in d.rglob("*")
+    files = ({p.relative_to(d).as_posix(): p.read_text(encoding="utf-8") for p in d.rglob("*")
               if p.is_file() and p.suffix in (".rs", ".cu")} if d.is_dir() else {})
     # An empty file map builds nothing on the far side: refuse here rather than pay for a
     # container that can only report a mystery failure.
@@ -657,7 +661,7 @@ def cmd_compile(args, ask) -> int:
 def cmd_status(args, ask) -> int:
     root = Path.cwd() / "runs"
     for job in sorted(root.glob("*/state.json")):
-        st = json.loads(job.read_text())
+        st = json.loads(job.read_text(encoding="utf-8"))
         print(f"{job.parent.name}: {st['status']} it={st['iteration']} "
               f"llm=${st['spend']['llm_usd']:.2f} compute=${st['spend']['compute_usd']:.2f}")
     return 0

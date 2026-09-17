@@ -44,6 +44,8 @@ def _text_io_violations(source: str) -> list[tuple[int, str]]:
         elif name == "write_text":
             need = {"encoding", "newline"}
         elif name in ("open", "fdopen"):
+            if name == "open" and getattr(getattr(f, "value", None), "id", None) == "os":
+                continue  # os.open works on file descriptors and has no text mode
             mode = _mode(node)
             if "b" in mode:
                 continue
@@ -64,7 +66,9 @@ def test_the_checker_flags_each_platform_default():
            "p.open('a')\nos.fdopen(fd, 'w')\nrun(cmd, text=True)\n")
     assert [line for line, _ in _text_io_violations(bad)] == [1, 2, 3, 4, 5, 6]
     good = ("p.read_text(encoding='utf-8')\np.write_text(s, encoding='utf-8', newline='\\n')\n"
-            "open(p, 'rb')\nrun(cmd, text=True, encoding='utf-8')\nopen(p, encoding='utf-8')\n")
+            "open(p, 'rb')\nrun(cmd, text=True, encoding='utf-8')\nopen(p, encoding='utf-8')\n"
+            # mutation: flagging os.open, a file-descriptor call with no encoding parameter
+            "os.open(p, os.O_WRONLY, 0o600)\n")
     assert _text_io_violations(good) == []
 
 

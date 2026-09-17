@@ -84,11 +84,13 @@ def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str) -> Path:
     spec = CHALLENGES[request.challenge]
     nonces = sum(n.count for n in request.training) + sum(n.count for n in request.holdout)
     (job_dir / ".c3").write_text(c3_config_text(request.challenge, purpose,
-                                                time_limit_s(max(nonces, 1), c3_workers(spec))))
+                                                time_limit_s(max(nonces, 1), c3_workers(spec))),
+                                 encoding="utf-8", newline="\n")
     sh = job_dir / "job.sh"
-    sh.write_text(job_sh_text(MONOREPO_REF))
+    sh.write_text(job_sh_text(MONOREPO_REF), encoding="utf-8", newline="\n")
     sh.chmod(sh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    (job_dir / "payload.json").write_text(json.dumps(payload(request), indent=1))
+    (job_dir / "payload.json").write_text(json.dumps(payload(request), indent=1),
+                                          encoding="utf-8", newline="\n")
     for mod in JOB_MODULES:
         shutil.copy2(_PKG / f"{mod}.py", job_dir / "talos" / f"{mod}.py")
     return job_dir

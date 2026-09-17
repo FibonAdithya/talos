@@ -21,7 +21,7 @@ from talos.types import NonceResult
 
 def _atomic(path: Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1))
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8", newline="\n")
     os.replace(tmp, path)
 
 
@@ -70,7 +70,7 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
     # C3 need not have created the artifacts dir. The staging-error branch writes build.log
     # from inside an `except`, where a second raise would lose the compile-only result.
     art.mkdir(parents=True, exist_ok=True)
-    payload = json.loads((workdir / "payload.json").read_text())
+    payload = json.loads((workdir / "payload.json").read_text(encoding="utf-8"))
     challenge = payload["challenge"]
     out: dict = {"compile": None, "training": [], "holdout": None,
                  "holdout_reason": "not_compiled",
@@ -88,12 +88,12 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
         # file map) is a result, not a crash: raising here would exit non-zero and lose every
         # result, including the compile-only one this job could still report.
         build_out = f"staging failed: {e}"
-        (art / "build.log").write_text(build_out)
+        (art / "build.log").write_text(build_out, encoding="utf-8", newline="\n")
         out["compile"] = {"ok": False, "artifact_id": None, "output": build_out}
         _atomic(results, out)
         log(f"[{int(clock() - t0)}s] staging/build raised: {e}")
         return 0
-    (art / "build.log").write_text(build_out)
+    (art / "build.log").write_text(build_out, encoding="utf-8", newline="\n")
     so, ptx = inside.artifact_paths(monorepo, challenge, inside.ALGO_NAME)
     log(f"[{int(clock() - t0)}s] build ok={ok} so={so.exists()}")
     if not ok or not so.exists():

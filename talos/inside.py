@@ -35,7 +35,7 @@ def _check_rel(target: Path, rel: str) -> None:
         raise ValueError(bad)
     root = target.resolve()
     p = (target / rel).resolve()
-    if p == root or not str(p).startswith(str(root) + "/"):
+    if p == root or not p.is_relative_to(root):  # a "/" prefix test fails on Windows paths
         raise ValueError(bad)
 
 
@@ -48,14 +48,14 @@ def stage_algorithm(monorepo: Path, challenge: str, files: dict[str, str], name:
     for rel, text in files.items():
         p = target / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text)
+        p.write_text(text, encoding="utf-8", newline="\n")
     mod_rs = root / "mod.rs"
     line = f"pub mod {name};"
-    existing = mod_rs.read_text()
+    existing = mod_rs.read_text(encoding="utf-8")
     if line not in existing.splitlines():
         if not existing.endswith("\n"):
             existing += "\n"
-        mod_rs.write_text(existing + line + "\n")
+        mod_rs.write_text(existing + line + "\n", encoding="utf-8", newline="\n")
 
 
 def unstage_algorithm(monorepo: Path, challenge: str, name: str) -> None:
@@ -64,8 +64,8 @@ def unstage_algorithm(monorepo: Path, challenge: str, name: str) -> None:
     shutil.rmtree(root / name, ignore_errors=True)
     mod_rs = root / "mod.rs"
     line = f"pub mod {name};"
-    kept = [ln for ln in mod_rs.read_text().splitlines() if ln != line]
-    mod_rs.write_text("\n".join(kept) + "\n")
+    kept = [ln for ln in mod_rs.read_text(encoding="utf-8").splitlines() if ln != line]
+    mod_rs.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
 
 
 # A cap on what leaves the container, not a window on the diagnostics: every consumer filters
@@ -76,7 +76,8 @@ BUILD_OUTPUT_CAP = 1_000_000
 
 
 def build(monorepo: Path, challenge: str, name: str, run=subprocess.run) -> tuple[bool, str]:
-    r = run(["build_algorithm", name], cwd=monorepo, capture_output=True, text=True)
+    r = run(["build_algorithm", name], cwd=monorepo, capture_output=True, text=True,
+            encoding="utf-8", errors="replace")
     out = (r.stdout or "") + (r.stderr or "")
     return r.returncode == 0, out[-BUILD_OUTPUT_CAP:]
 
@@ -130,7 +131,8 @@ def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Pat
         t0 = clock()
         timed_out = False
         try:
-            r1 = run(cmd, capture_output=True, text=True, timeout=timeout_s)
+            r1 = run(cmd, capture_output=True, text=True, timeout=timeout_s,
+                     encoding="utf-8", errors="replace")
             rt_rc = r1.returncode
         except subprocess.TimeoutExpired:
             timed_out, rt_rc = True, -1
@@ -147,7 +149,8 @@ def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Pat
             try:
                 r2 = run(["tig-verifier", settings, rand_hash, str(nonce), str(out_file)] + gpu_args,
                          capture_output=True, text=True,
-                         timeout=max(1, int(timeout_s - elapsed)))
+                         timeout=max(1, int(timeout_s - elapsed)),
+                         encoding="utf-8", errors="replace")
                 ver_rc = r2.returncode
                 m = _QUALITY_RE.search(r2.stdout or "")
                 quality = int(m.group(1)) if m else None

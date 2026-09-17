@@ -160,7 +160,7 @@ def _atomic_write(path: Path, text: str) -> None:
     without the fsync a crash can leave the renamed file empty or truncated, which for
     state.json is an unresumable job."""
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
@@ -179,17 +179,19 @@ class JobStore:
         _atomic_write(path, json.dumps(spec.to_dict(), indent=1))
 
     def read_spec(self) -> JobSpec:
-        return JobSpec.from_dict(json.loads((self.run_dir / "job.json").read_text()))
+        text = (self.run_dir / "job.json").read_text(encoding="utf-8")
+        return JobSpec.from_dict(json.loads(text))
 
     def save(self, state: JobState) -> None:
         _atomic_write(self.run_dir / "state.json", json.dumps(state.to_dict(), indent=1))
 
     def load(self) -> JobState:
-        return JobState.from_dict(json.loads((self.run_dir / "state.json").read_text()))
+        text = (self.run_dir / "state.json").read_text(encoding="utf-8")
+        return JobState.from_dict(json.loads(text))
 
     def event(self, kind: str, **data) -> None:
         row = {"ts": time.time(), "kind": kind, **data}
-        with (self.run_dir / "timeline.jsonl").open("a") as f:
+        with (self.run_dir / "timeline.jsonl").open("a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(row) + "\n")
 
     def iteration_dir(self, n: int) -> Path:

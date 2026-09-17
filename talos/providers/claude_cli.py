@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import subprocess
 
+from talos.executables import argv0
 from talos.providers import ProviderAuthError, ProviderError
 from talos.types import Completion, Usage
 
@@ -18,10 +19,11 @@ class ClaudeCli:
         self.timeout_s = timeout_s
 
     def complete(self, system: str, user: str) -> Completion:
-        cmd = ["claude", "-p", "--output-format", "json", "--model", self.model,
+        cmd = [argv0("claude"), "-p", "--output-format", "json", "--model", self.model,
                "--system-prompt", system]
         try:
-            r = self._run(cmd, input=user, capture_output=True, text=True, timeout=self.timeout_s)
+            r = self._run(cmd, input=user, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=self.timeout_s)
         except FileNotFoundError:
             raise ProviderAuthError("claude CLI not found on PATH; install Claude Code") from None
         except subprocess.TimeoutExpired:

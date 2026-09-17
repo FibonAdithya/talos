@@ -14,6 +14,7 @@ from talos.bench import (BenchCancelled, BenchUnavailable, EvalRequest, EvalResu
                          PendingJobStore, _redact)
 from talos.c3_jobdir import request_hash, write_job_dir
 from talos.challenges import CHALLENGES, c3_profile
+from talos.executables import argv0
 from talos.inside import NONCE_TIMEOUT_S
 from talos.types import CompileResult, NonceResult, NonceSet
 
@@ -77,7 +78,8 @@ class C3Bench:
     # ── CLI plumbing ───────────────────────────────────────────────────
     def _c3(self, *args: str, cwd: Path | None = None, timeout: int = 600) -> str:
         try:
-            r = self._run(["c3", *args], capture_output=True, text=True, timeout=timeout,
+            r = self._run([argv0("c3"), *args], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout,
                           cwd=str(cwd) if cwd else None, env=self._env)
         except OSError as e:
             # FileNotFoundError included: a `c3` that is not on PATH must pause the run like
@@ -242,7 +244,8 @@ class C3Bench:
                 raise BenchUnavailable(f"C3 job {job_id} timed out before writing results")
             raise _JobFailed(f"{job_id} {status} with no results")
         try:
-            return self._result_from(status, json.loads(results.read_text()), request)
+            return self._result_from(status, json.loads(results.read_text(encoding="utf-8")),
+                                     request)
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             raise BenchUnavailable(
                 f"C3 job {job_id} wrote unreadable results: {_redact(str(e))[:300]}") from None

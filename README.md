@@ -108,6 +108,8 @@ you do not want the demo job listed by `talos status`.
 
 ### 1. Prerequisites
 
+- Linux, macOS or Windows. CI runs the test suite on all three. Compiling and scoring happen
+  on the compute backend, so nothing Rust- or CUDA-related is needed locally.
 - Python 3.10 or newer, and Git.
 - [`uv`](https://docs.astral.sh/uv/) to create the virtualenv (recommended; plain `pip`
   works too).
@@ -124,6 +126,12 @@ uv pip install --python .venv/bin/python -e .
 source .venv/bin/activate      # puts `talos` on PATH for this shell
 talos --help
 ```
+
+On Windows the virtualenv's interpreter is `.venv\Scripts\python.exe`, so the install line is
+`uv pip install --python .venv\Scripts\python.exe -e .`, and `.venv\Scripts\activate`
+activates it. Windows has no owner-only file permissions, so `.talos/secrets.json` is not
+restricted to your user there the way it is on Linux and macOS (mode `0600`); keep the
+repository in a folder only you can read.
 
 `talos setup` and `talos run` read and write `talos.config.json`, `.talos/secrets.json` and
 `runs/` in the **current directory**. Always run Talos from the same directory, normally
