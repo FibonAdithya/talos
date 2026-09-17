@@ -88,11 +88,11 @@ def test_run_nonce_builds_commands_and_parses_quality(tmp_path):
     settings = json.loads(rt[1])
     assert settings == {"algorithm_id": "", "challenge_id": "c003", "track_id": "n=1",
                         "block_id": "", "player_id": ""}
-    assert rt[2] == "ab" * 32 and rt[3] == "7" and rt[4] == "/lib/x.so"
+    assert rt[2] == "ab" * 32 and rt[3] == "7" and rt[4] == str(Path("/lib/x.so"))
     assert "--fuel" in rt and rt[rt.index("--fuel") + 1] == "10"
     # tig-verifier takes positional SETTINGS RAND_HASH NONCE SOLUTION_FILE and has no subcommand
     # mutation: inserting a "verify_solution" argv[1] makes clap reject every call
-    assert ver[:4] == ["tig-verifier", rt[1], "ab" * 32, "7"] and ver[4].endswith("/7.json")
+    assert ver[:4] == ["tig-verifier", rt[1], "ab" * 32, "7"] and Path(ver[4]).name == "7.json"
     assert len(ver) == 5
     assert "--ptx" not in rt  # CPU challenge
 
@@ -109,7 +109,7 @@ def test_run_nonce_gpu_passes_ptx_and_gpu_to_both_binaries(tmp_path):
     inside.run_nonce("c005", "k=1", "ab" * 32, 3, Path("/a.so"), 10, 600, Path("/a.ptx"), run, tmp_path)
     rt, ver = seen
     for cmd in (rt, ver):  # mutation: dropping --gpu from the verifier call breaks GPU challenges
-        assert cmd[cmd.index("--ptx") + 1] == "/a.ptx" and cmd[cmd.index("--gpu") + 1] == "0"
+        assert cmd[cmd.index("--ptx") + 1] == str(Path("/a.ptx")) and cmd[cmd.index("--gpu") + 1] == "0"
 
 
 def test_run_nonce_classifies_no_solution(tmp_path):
