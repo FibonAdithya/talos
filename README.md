@@ -183,7 +183,8 @@ It then checks everything before writing anything:
   if the balance is below £1.
 
 On success it writes `talos.config.json` and, if you gave an LLM API key or a C3 API key,
-`.talos/secrets.json` (mode 0600, holding only those keys), and prints
+`.talos/secrets.json` (mode 0600, holding only those keys; with neither key given, it deletes
+any `.talos/secrets.json` left by an earlier setup), and prints
 `Setup complete. Run `talos run` to start a job.` If any check fails it prints the reason,
 exits non-zero, and does not write `talos.config.json` or `.talos/secrets.json`.
 

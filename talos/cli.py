@@ -80,7 +80,9 @@ def check_c3(run=None, api_key: str | None = None) -> float:
 
     r = c3("whoami")
     if r.returncode != 0:
-        fix = ("check the C3 API key (`c3 apikey list`)" if api_key else
+        # With no key given, the child inherits a C3_API_KEY from this environment if one is set.
+        keyed = api_key or os.environ.get("C3_API_KEY")
+        fix = ("check the C3 API key (`c3 apikey list`)" if keyed else
                "run `c3 login`, or give setup a C3 API key (`c3 apikey create`),")
         raise ConfigError(f"C3 login check failed: {(r.stderr or r.stdout)[-300:].strip()}; "
                           f"{fix} and retry")

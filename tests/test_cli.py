@@ -1256,7 +1256,11 @@ def test_setup_modal_does_not_ask_for_a_c3_key(tmp_path, monkeypatch):
 
 def test_execute_job_gives_the_c3_key_to_the_bench_and_the_sandbox(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("C3_API_KEY", raising=False)
+    # setenv before delenv: execute_job writes both into os.environ, and delenv of an unset
+    # variable records nothing to undo, so the key would leak into every later test
+    for var in ("C3_API_KEY", "TALOS_BACKEND"):
+        monkeypatch.setenv(var, "")
+        monkeypatch.delenv(var)
     save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
                           backend="c3"), None, c3_api_key="c3_key_1")
     monkeypatch.setattr(cli, "image_available", lambda ch, fetch=None: True)
@@ -1318,3 +1322,27 @@ def test_make_bench_hands_the_c3_key_to_c3bench(tmp_path):
         b._c3("squeue", "--json")
     # mutation: make_bench accepting the key but not forwarding it
     assert runs[0]["C3_API_KEY"] == "c3_key_1"
+
+
+def test_setup_with_no_keys_left_removes_the_old_secrets(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("C3_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    checked = []
+    monkeypatch.setattr(cli, "check_c3", lambda run=None, api_key=None: checked.append(api_key))
+    assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", "c3_old"])) == 0
+    assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", ""])) == 0
+    # mutation: skipping the write when no key was given leaves the old c3_api_key on disk, so
+    # a run uses a key the user just chose to drop, after setup checked the login session
+    assert checked == ["c3_old", None]
+    assert resolve_c3_api_key(load(tmp_path)) is None
+    assert not (tmp_path / ".talos" / "secrets.json").exists()
+
+
+def test_check_c3_failure_with_the_key_from_the_environment_names_the_api_key(monkeypatch):
+    monkeypatch.setenv("C3_API_KEY", "c3_key_env")
+    with pytest.raises(ConfigError) as excinfo:
+        cli.check_c3(run=_c3_runner(whoami_rc=1))
+    msg = str(excinfo.value)
+    # mutation: keying the hint on the argument alone sends a C3_API_KEY user to `c3 login`
+    assert "check the C3 API key" in msg and "c3_key_env" not in msg
