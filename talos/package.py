@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 import shutil
 from importlib import resources
 from pathlib import Path
@@ -113,6 +114,23 @@ def _won_training(spec: JobSpec, state: JobState) -> bool:
         return False
 
 
+def _hyperparameters_section(spec: JobSpec) -> str:
+    if spec.hyperparameters is None:
+        return ""
+    lines = []
+    for track in spec.tracks:
+        hp = spec.hyperparameters.get(track)
+        src = (spec.hyperparameters_source or {}).get(track)
+        value = "none" if hp is None else f"`{json.dumps(hp, sort_keys=True)}`"
+        origin = (f" (mainnet benchmark {src['benchmark_id']} by {src['player_id']}, "
+                  f"mean quality {src['mean_quality']:g})" if src else "")
+        lines.append(f"- {track}: {value}{origin}")
+    return ("\n## Hyperparameters\n\nThe baseline and every candidate ran with these per-track "
+            "hyperparameters, from the best mainnet benchmark of the baseline algorithm. The "
+            "measured improvement holds only with them: benchmark with the same values (they are "
+            "also in hyperparameters.json).\n\n" + "\n".join(lines) + "\n")
+
+
 def _readme(spec: JobSpec, state: JobState) -> str:
     confirmed = state.best.iteration in state.confirmed
     false_positive = state.best.iteration in state.false_positives
@@ -140,7 +158,7 @@ def _readme(spec: JobSpec, state: JobState) -> str:
              "2. Add the copyright header the TIG Inbound Game License requires.\n"
              "3. Follow docs/guides in the monorepo to submit. For Advance Rewards, complete "
              "evidence_draft.md.\n")
-    return head
+    return head + _hyperparameters_section(spec)
 
 
 def _hypothesis_line(h: dict) -> str:
@@ -175,5 +193,7 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     (pkg / "hypotheses.md").write_text("# Hypotheses\n\n" + hyps + "\n")
     (pkg / "evidence_draft.md").write_text(evidence_draft(spec, state))
     (pkg / "README.md").write_text(_readme(spec, state))
+    if spec.hyperparameters is not None:
+        (pkg / "hyperparameters.json").write_text(json.dumps(spec.hyperparameters, indent=1))
     shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
     return pkg
