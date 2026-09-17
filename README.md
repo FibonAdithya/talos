@@ -1,114 +1,344 @@
 # Talos
 
-Single-user autoresearch for [TIG](https://tig.foundation). Run one setup wizard and one
-run wizard, and an LLM agent iterates on the current state-of-the-art algorithm for a TIG
-challenge, benchmarking each candidate on TIG's own Modal-hosted harness, until it beats
-the baseline or runs out of budget. You get back a submit-ready package.
+Single-user autoresearch for [TIG](https://tig.foundation). You pick a TIG challenge and
+describe what to explore. An LLM then repeatedly edits the current top mainnet algorithm for
+that challenge, and each candidate is compiled and scored with TIG's own `tig-runtime` and
+`tig-verifier` on your own Modal or C3 account. The run stops when a candidate beats the
+baseline on both training and held-out nonces, or when the budget runs out. The best
+candidate is written to a local, submit-ready package.
 
-## Requirements
+Talos never submits to TIG for you, and LLM-authored code never runs on your machine (with
+one opt-in exception: [agentic codex](#agentic-mode)).
 
-- Python 3.10+ and Git.
-- `uv` is the recommended way to create the virtualenv on this machine.
-- A Modal account (free tier works) with an API token.
-- One LLM credential: an API key for `anthropic`, `openai`, `google`, `openrouter`, or a
-  custom OpenAI-compatible endpoint — or a logged-in `claude` or `codex` CLI session
-  (`claude-cli` / `codex-cli` providers).
+## Contents
 
-## Compute backend
+- [How it works](#how-it-works)
+- [Try it with no accounts](#try-it-with-no-accounts)
+- [Setup](#setup)
+- [Running a job](#running-a-job)
+- [Command reference](#command-reference)
+- [Agentic mode](#agentic-mode)
+- [Where results land](#where-results-land)
+- [Budget](#budget)
+- [Compute backends in detail](#compute-backends-in-detail)
+- [Live smoke test](#live-smoke-test)
+- [Development](#development)
+- [Licence](#licence)
 
-Talos compiles and scores candidates on one of two backends, chosen once at `talos setup`:
+## How it works
 
-- **Modal** (default): a Modal account and API token, set up as in Requirements above.
-- **C3** ([cthree.cloud](https://cthree.cloud)): a logged-in `c3` CLI (`c3 login`) and
-  credit on the account; `talos setup` warns if the balance is below £1.
+```mermaid
+flowchart TD
+    setup["talos setup<br/>writes talos.config.json and .talos/secrets.json<br/>deploys the Modal app (Modal backend only)"]
+    start["talos run<br/>fetch challenge tracks and max fuel from mainnet<br/>by default, pin the top-adoption algorithm and the per-track<br/>hyperparameters of its best mainnet benchmark"]
+    spec["Draw training and held-out nonces from a secret rand_hash<br/>freeze them, the fuel, hyperparameters and budget into runs/JOB_ID/job.json"]
+    baseline["Measure the top-adoption algorithm on the same nonces<br/>and hyperparameters as every candidate<br/>cached in ~/.talos/baselines/"]
+    budget{"Budget left?"}
+    propose["LLM writes a hypothesis and an edit<br/>single-shot: one API call<br/>agentic: a sandboxed claude or codex session"]
+    scope{"Edit touches only<br/>the algorithm files?"}
+    compile["Compile on Modal or C3"]
+    builds{"Compiles, and every<br/>new function is called?"}
+    fix["LLM fix round<br/>up to 3"]
+    score["Score training nonces<br/>per-nonce timeout: 3x the baseline's slowest nonce,<br/>between 60 s and 600 s"]
+    errors{"Error rate under<br/>the challenge's ceiling?"}
+    beats{"Beats the baseline<br/>on training?"}
+    confirm["Score held-out nonces<br/>with --track: also the other tracks' training nonces"]
+    confirmed{"Still beats the baseline?<br/>with --track: no other track worse"}
+    failed["Record the outcome in the hypothesis log<br/>after 3 iterations in a row without improvement,<br/>the LLM distills a lesson into tacit.md"]
+    won["Status: won"]
+    stop["Status: exhausted, cancelled (Ctrl-C), failed or paused"]
+    package["Write runs/JOB_ID/package/ and package.zip<br/>best candidate, diff, scores, evidence draft"]
 
-On C3, one iteration is one batch job with about 12 minutes of fixed overhead before any
-nonce is scored — MEASURED 2026-09-14 on a spike run (knapsack, 4 vCPU): about 4 minutes
-to script start, 466 seconds to build the candidate, then 1 to 2 seconds per nonce at
-mainnet fuel. The release smoke test on 2026-09-15 (MEASURED, knapsack, 4 vCPU, two
-training and two held-out nonces) took 12 min 20 s from submission to result: about 2 minutes
-queued, 470 seconds to build, 1.3 to 1.7 seconds per nonce; the client's cost estimate was
-$0.027 and the account balance fell by £0.02. Modal has no equivalent per-job overhead.
-
-C3 pulls only public Docker Hub images, never GHCR. Maintainers mirror the TIG dev images
-to `docker.io/fibonadithya/tig-<challenge>-dev:<tag>` with `make mirror-images`
-(`scripts/mirror_images.sh`); this only needs running once per `DEV_IMAGE_TAG`, but a tag
-bump means re-running it before release. Tags currently mirrored: knapsack 0.0.7 (verified
-2026-09-15). Users never touch GHCR or the mirror script themselves. `talos run` on C3
-checks the Hub tag before the baseline is measured and fails with a mirror hint if it is
-missing. Maintainers can point at a test mirror instead of the real one with
-`TALOS_IMAGE_NAMESPACE`.
-
-The mirror script needs `talos` importable, which the system `python3` does not have: from
-a fresh shell run `make mirror-images PYTHON=.venv/bin/python`, or activate the venv first
-and run plain `make mirror-images` (`Makefile`'s `PYTHON ?= python3` otherwise picks the
-system interpreter and fails with "No module named talos").
-
-## Install
-
-```bash
-uv venv --python 3.10 .venv
-uv pip install --python .venv/bin/python -e '.[dev]'
+    setup --> start --> spec --> baseline --> budget
+    budget -- yes --> propose --> scope
+    budget -- no --> stop
+    scope -- no --> failed
+    scope -- yes --> compile --> builds
+    builds -- no --> fix --> compile
+    fix -. "fix rounds used up" .-> failed
+    builds -- yes --> score --> errors
+    errors -- no --> failed
+    errors -- yes --> beats
+    beats -- "no (kept as best if its mean delta is the best so far)" --> failed
+    beats -- yes --> confirm --> confirmed
+    confirmed -- no --> failed
+    confirmed -- yes --> won
+    failed --> budget
+    won --> package
+    stop --> package
 ```
 
-## Commands
+Baseline and candidates are always scored on the same nonces, fuel, hyperparameters and
+hardware class, so
+the delta between them measures the edit and nothing else. The `rand_hash` that seeds the
+nonces is never shown to the LLM, so it cannot tune to the exact nonces it is scored on.
+
+The design reasoning is in
+[docs/ai/specs/2026-09-11-talos-design.md](docs/ai/specs/2026-09-11-talos-design.md). That
+directory is not kept in step with the code; where it disagrees with this README or the
+code, it is out of date.
+
+## Try it with no accounts
+
+You can run the whole loop end to end before creating any account. The hidden `--fake` flag
+replaces the LLM, mainnet and the compute backend with in-process stand-ins: no config file,
+no network, no credentials.
+
+```bash
+git clone https://github.com/FibonAdithya/talos.git
+cd talos
+uv venv --python 3.10 .venv
+uv pip install --python .venv/bin/python -e .
+.venv/bin/talos run --challenge knapsack --direction "demo" --budget-iterations 3 --yes --fake
+```
+
+It finishes in under a second and prints the same event stream a real run does, ending with:
+
+```
+Status: won (beat baseline on training and held-out nonces)
+Best delta vs baseline: +1.000%
+LLM spend: $0.02   Compute spend (estimated): $1.28
+Package: .../runs/<job_id>/package
+```
+
+The spend figures in a fake run are made up by the stand-ins. Delete `runs/` afterwards if
+you do not want the demo job listed by `talos status`.
+
+## Setup
+
+### 1. Prerequisites
+
+- Python 3.10 or newer, and Git.
+- [`uv`](https://docs.astral.sh/uv/) to create the virtualenv (recommended; plain `pip`
+  works too).
+- One compute backend account (step 3).
+- One LLM credential (step 4).
+
+### 2. Install
+
+```bash
+git clone https://github.com/FibonAdithya/talos.git
+cd talos
+uv venv --python 3.10 .venv
+uv pip install --python .venv/bin/python -e .
+source .venv/bin/activate      # puts `talos` on PATH for this shell
+talos --help
+```
+
+`talos setup` and `talos run` read and write `talos.config.json`, `.talos/secrets.json` and
+`runs/` in the **current directory**. Always run Talos from the same directory, normally
+the repository root.
+
+### 3. Pick a compute backend
+
+Candidates are compiled and scored on one of two backends. You choose one in `talos setup`.
+
+| Backend | What you need before setup | Cost per iteration |
+|---|---|---|
+| `modal` (default) | A [Modal](https://modal.com) account (the free tier works) and an API token created at modal.com/settings/tokens. Keep the token id and secret to hand. | Container seconds only; no fixed per-job overhead. |
+| `c3` | The `c3` CLI ([cthree.cloud](https://cthree.cloud)) installed and logged in with `c3 login`, and credit on the account. Top up with `c3 topup`. | One batch job of about 12 minutes before the first nonce is scored. See [Compute backends in detail](#compute-backends-in-detail). |
+
+### 4. Pick an LLM provider
+
+| Provider | Credential | Environment variable used if `.talos/secrets.json` has no key | Default model |
+|---|---|---|---|
+| `anthropic` | API key | `ANTHROPIC_API_KEY` | `claude-opus-5` |
+| `openai` | API key | `OPENAI_API_KEY` | `gpt-5` |
+| `google` | API key | `GEMINI_API_KEY` | `gemini-2.5-pro` |
+| `openrouter` | API key | `OPENROUTER_API_KEY` | `anthropic/claude-opus-5` |
+| `custom` | API key and base URL of an OpenAI-compatible endpoint | `TALOS_CUSTOM_API_KEY` | none |
+| `claude-cli` | A logged-in `claude` CLI on `PATH` | none | `claude-opus-5` |
+| `codex-cli` | A logged-in `codex` CLI on `PATH` | none | the first model `codex debug models` lists |
+
+Only the CLI providers (`claude-cli`, `codex-cli`) support [agentic mode](#agentic-mode).
+CLI providers bill through your CLI subscription rather than per API call, so the `talos run`
+wizard asks them for an iteration budget instead of a dollar budget.
+
+### 5. Run `talos setup`
+
+```bash
+talos setup
+```
+
+It asks, in order:
+
+1. **Compute backend**: `modal` or `c3`.
+2. **Provider**: one of the kinds in the table above.
+3. **Model**: press Enter for the default. For `codex-cli` it first prints the models your
+   login accepts; for `claude-cli` an alias such as `fable`, `opus` or `sonnet` works.
+4. **API base URL**: `custom` provider only.
+5. **API key**: API providers only; input is hidden.
+6. **Mode** (`single-shot` or `agentic`): CLI providers only. This is the default; `talos
+   run --mode` overrides it per job.
+7. **Modal token id and secret**: `modal` backend only.
+
+It then checks everything before writing anything:
+
+- the provider, with one cheap call (for CLI providers: that the binary is on `PATH` and a
+  trivial call succeeds);
+- on `modal`: sets your Modal token and deploys the benchmark app to your account;
+- on `c3`: runs `c3 whoami` and `c3 balance`, and warns if the balance is below £1.
+
+On success it writes `talos.config.json` and, for API providers, `.talos/secrets.json`
+(mode 0600, holding only the LLM key), and prints
+`Setup complete. Run `talos run` to start a job.` If any check fails it prints the reason,
+exits non-zero, and does not write `talos.config.json` or `.talos/secrets.json`.
+
+Run `talos setup` again to change provider, model or backend. On the Modal backend, also
+run it again after pulling a new version of Talos: the deployed app must match the client,
+because the score function's arguments change between versions (it now takes a per-nonce
+timeout and per-track hyperparameters). A client that reaches an older deploy stops with a
+message naming `talos setup`. The C3 backend ships its code with each job and needs nothing.
+
+### 6. Before your first real run
+
+Run the [live smoke test](#live-smoke-test) for your backend once. It spends a small amount
+of real compute and confirms the backend can compile and score the real mainnet algorithm.
+
+## Running a job
+
+### Start
+
+Interactively, answering each prompt:
+
+```bash
+talos run
+```
+
+Or with every answer given as a flag:
+
+```bash
+talos run --challenge knapsack \
+  --direction "Try a tighter upper bound in the branch-and-bound pruning" \
+  --budget-usd 20 --budget-hours 4 --budget-compute-usd 10 --yes
+```
+
+Before the job starts, Talos fetches the challenge's active tracks and fuel from mainnet,
+draws the nonces, and prints a line such as
+`Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}; hyperparameters: 5/5 tracks from mainnet`. The job id is the start
+time plus the challenge name.
+
+### Watch
+
+The terminal prints one line per event (`hypothesis`, `compile_failed`, `scored`,
+`confirming`, `won`, ...) and, after each finished iteration, a status line:
+
+```
+[status] job=20260917-101006-knapsack it=1 best=+1.000% llm=$0.02 compute≈$1.28 left=3.9h
+```
+
+`best` is the best candidate's mean relative delta versus the baseline on training nonces.
+`compute≈` is an estimate (see [Budget](#budget)). `left` is the wall-clock budget
+remaining, or `∞` without `--budget-hours`.
+
+### Stop
+
+Press `Ctrl-C` once. Talos stops at the next safe point, packages the best candidate found
+so far, and prints the final status. The job can be resumed later.
+
+### Resume
+
+```bash
+talos status                              # find the job id
+talos run --resume 20260917-101006-knapsack
+```
+
+A resumed job keeps the provider, model, mode, track, hyperparameters and nonces it started
+with, whatever
+`talos.config.json` says now. A C3 job that was still running when Talos stopped is
+reattached rather than paid for twice.
+
+### Submit
+
+When a job ends with `Status: won`, open `runs/<job_id>/package/README.md`. It explains how
+to submit the candidate to TIG. `evidence_draft.md` in the same directory is a partly
+filled-in advance-evidence template. You submit it yourself; Talos does not.
+
+A job that ends any other way still writes a package with its best candidate, but that
+candidate has not beaten the baseline on held-out nonces, and the package README says so.
+
+## Command reference
+
+| Command | What it does |
+|---|---|
+| `talos setup` | One-time configuration: backend, LLM provider, credentials. Validates them and deploys the Modal app. |
+| `talos run` | Starts or resumes a research job and writes its package when it stops. |
+| `talos compile` | Compiles a directory of algorithm files on the configured backend and prints the compiler output. Scores nothing. |
+| `talos status` | Lists every job under `runs/` with its status, iteration and spend. |
 
 ### `talos setup`
 
-Run once. Asks first for the compute backend (`modal` or `c3`), then the provider kind, a
-model id (a sensible default is offered per provider; for `codex-cli` the wizard reads
-the catalog from `codex debug models`, prints the models your login accepts, and offers
-the first as the default; for `claude-cli` an alias such as `fable` works), an API key
-for API providers
-(nothing for CLI providers, beyond checking the binary is on `PATH` and running one
-trivial call to confirm a logged-in session), and a default mode (`single-shot` or
-`agentic`) for CLI providers. The Modal token id/secret prompt (create one at
-modal.com/settings/tokens) appears only when the backend is `modal`; for `c3` there is no
-token prompt, but setup runs `c3 whoami` to confirm a logged-in session and warns if the
-credit balance is below £1. Every credential is validated with one cheap call before
-anything is written. On success it writes `talos.config.json` and `.talos/secrets.json`
-(mode 0600, holds only the LLM key; CLI providers store no secret), and, for the Modal
-backend, deploys the benchmark app to your Modal account.
+No flags. See [Setup, step 5](#5-run-talos-setup) for every prompt and what is written.
+Exit code 0 on success, 1 when a credential or backend check fails, 2 for an unknown
+backend or provider.
 
 ### `talos run`
 
-Run per job. Prompts interactively for anything not given as a flag:
+Prompts for anything not given as a flag, unless `--yes` is passed.
 
-- `--challenge` — one of the TIG challenges; the interactive prompt lists them if omitted.
-- `--direction` / `--direction-file` — free text describing what to explore; becomes the
-  first entry in the job's tacit knowledge.
-- `--mode {single-shot,agentic}` — overrides the configured mode for this run; `agentic`
-  is only valid for a CLI provider.
-- `--track <name>` — one active track of the challenge to optimise (the interactive prompt
-  lists them; `all`, the default, means every track). Training scores that track only. When
-  a candidate wins on training, the confirmation job scores the track's held-out nonces plus
-  every other track's training nonces as a regression guard: no other track may get worse.
-  The model still sees and may edit every file; the flag narrows what is scored and what it
-  is told to target.
-- `--hyperparameters mainnet|none` — `mainnet` (the default; the interactive prompt asks)
-  runs the baseline and every candidate with the per-track hyperparameters of the baseline
-  algorithm's best-quality benchmark on mainnet at the job's fuel, frozen at job start. A
-  track with no such benchmark runs without any. `none` runs every nonce without
-  hyperparameters, as Talos did before. It cannot be changed on `--resume`. The package
-  lists the values and their source benchmark in `README.md` and `hyperparameters.json`.
-- `--budget-usd`, `--budget-hours`, `--budget-iterations`, `--budget-compute-usd` — see
-  Budget below.
-- `--resume <job_id>` — reloads `runs/<job_id>/job.json` and `state.json` and continues a
-  job that was interrupted, cancelled, or failed.
-- `--yes` — accept defaults instead of prompting; still requires at least one budget
-  dimension unless one is passed as a flag.
+| Flag | Meaning |
+|---|---|
+| `--challenge NAME` | `satisfiability`, `vehicle_routing`, `knapsack`, `job_scheduling`, `energy_arbitrage` (CPU), or `vector_search`, `hypergraph`, `neuralnet_optimizer` (GPU, on an L40S). The prompt shows an estimated hourly price for the GPU challenges. |
+| `--direction TEXT` | What to explore, in free text. It becomes the first entry in the job's `tacit.md`. |
+| `--direction-file PATH` | The same, read from a file. Pass one of `--direction` or `--direction-file`, not both. |
+| `--track NAME` | Optimise one active track of the challenge instead of all of them (`all` is the default; the prompt lists the tracks). Training scores that track only. When a candidate wins on training, the confirmation scores that track's held-out nonces plus every other track's training nonces, and no other track may get worse. The LLM still sees and may edit every file. |
+| `--hyperparameters mainnet\|none` | `mainnet` (the default) runs the baseline and every candidate with the per-track hyperparameters of the baseline algorithm's best-quality mainnet benchmark at the job's fuel, fixed at job start. A track with no such benchmark runs without any. `none` runs every nonce without hyperparameters. The package lists the values and the benchmark they came from. |
+| `--mode single-shot\|agentic` | Overrides the configured mode for this job. `agentic` needs a CLI provider and uses roughly 5 to 20 times the tokens of `single-shot`. |
+| `--budget-usd N` | LLM spend cap in USD. |
+| `--budget-hours N` | Wall-clock cap in hours. |
+| `--budget-iterations N` | Iteration cap. |
+| `--budget-compute-usd N` | Estimated compute spend cap in USD. |
+| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track or hyperparameters. |
+| `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20. |
 
-Once running, the terminal streams one line per event and, after every finished
-iteration, a status line with the job id, iteration, best delta versus baseline, LLM and
-compute spend, and wall-clock time left. `Ctrl-C` stops cleanly at the next safe point and
-packages the best candidate found so far.
+Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
+providers, default 20; iterations for CLI providers, default 50), a wall-clock budget
+(default 4 hours), a compute budget (default $20), the mode (CLI providers only), the
+track, and the hyperparameters (`mainnet` or `none`).
 
-There is also a hidden `--fake` flag: `talos run --challenge knapsack --direction "..."
---budget-iterations 5 --yes --fake` runs the whole loop against a canned in-process
-provider and benchmark — no config file, no network, no Modal, no LLM credential. It
-exists to demo and smoke-test the CLI on a machine with none of the above configured.
+Talos refuses to start, before spending anything, when: there is no API key for the
+provider; the model has no entry in the price table and the only budget is `--budget-usd`
+(a dollar cap it could not enforce); the mainnet challenge id no longer matches
+`talos/challenges.py`; or, on C3, the challenge's dev image is not mirrored to Docker Hub.
 
-### Agentic mode
+Exit code 0 when the job ends `won`; 1 when it ends any other way, or when the mainnet or
+Docker Hub check stops it; 2 for invalid arguments, a missing config, or a missing API key.
+
+### `talos compile`
+
+```bash
+talos compile --challenge knapsack --dir algorithm
+```
+
+| Flag | Meaning |
+|---|---|
+| `--challenge NAME` | Required. |
+| `--dir PATH` | Directory whose `.rs` and `.cu` files are compiled (default `algorithm`). |
+| `--backend modal\|c3` | Backend to use. Without it: `TALOS_BACKEND`, then `talos.config.json`, then `modal`. |
+
+Prints the last 4000 characters of compiler output and exits 0 if the build succeeded, 1 if
+it failed, 2 if the directory has no `.rs`/`.cu` files. Agentic mode uses this command to
+check its own edits. On Modal it is one function call; on C3 it is one batch job of about 12
+minutes, written to `.talos/compile/`, which each run overwrites, so do not run two
+`talos compile` commands at once from the same directory.
+
+### `talos status`
+
+```bash
+talos status
+```
+
+One line per job under `runs/`:
+
+```
+20260917-101006-knapsack: won it=1 llm=$0.02 compute=$1.28
+```
+
+Status is one of `measuring_baseline`, `researching`, `confirming`, `won`, `exhausted`
+(a budget ran out), `cancelled` (Ctrl-C), `paused` (the compute backend was unreachable)
+or `failed` (the reason is in `state.json` and the last lines of `timeline.jsonl`).
+
+## Agentic mode
 
 `--mode agentic` (CLI providers only) hands each iteration to a headless `claude` or `codex`
 session in a throwaway worktree outside `runs/`, instead of asking an API for one edit.
@@ -134,32 +364,29 @@ sandbox is one C3 job of about 12 minutes. If the agent's 30-minute timeout kill
 compile while its C3 job is still running, the job is not cancelled: it runs on to its own
 time limit and bills for it, which bounds the cost but does not avoid it.
 
-### `talos compile`
-
-`talos compile --challenge <name> --dir <path>` (default `--dir algorithm`) uploads the
-`.rs`/`.cu` files under `<path>` and compiles them, and prints the compiler output, exiting
-non-zero on failure. It is the command agentic mode uses to check its own edits. It runs
-on the configured backend: `--backend`, then `TALOS_BACKEND` (set for the agentic
-sandbox), then `talos.config.json`, then `modal`. On Modal this is one function call; on
-C3 it is one batch job of about 12 minutes, written to a fixed job directory that every
-`talos compile` run in the same directory overwrites — concurrent `talos compile` runs in
-one directory are unsupported.
-
-### `talos status`
-
-Lists every job under `runs/`, one line each, with status, iteration, and spend.
-
 ## Where results land
 
-Each job gets `runs/<job_id>/`: `job.json` (immutable inputs), `state.json` (mutable
-progress, including the best candidate found), `timeline.jsonl` (one JSON event per
-line), `tacit.md` (the direction and anything learned), and `iterations/<n>/` (each
-candidate's files and hypothesis). On exit, `runs/<job_id>/package/` holds: the best
-algorithm's files, `diff_vs_baseline.patch`, `scores.md` (per-nonce tables for baseline
-and candidate on training and held-out nonces; a focused job adds a regression-guard table
-for the other tracks), `hypotheses.md` (the full log with
+Each job gets a directory under `runs/`:
+
+| Path | Contents |
+|---|---|
+| `runs/<job_id>/job.json` | The job's fixed inputs: challenge, direction, provider, model, mode, budget, nonces, fuel, track, baseline algorithm, hyperparameters. Written once. |
+| `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log. |
+| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. |
+| `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
+| `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
+| `runs/<job_id>/iterations/<n>/` | Each candidate's files and its hypothesis. |
+| `runs/<job_id>/best/` | The best candidate's files so far. |
+| `runs/<job_id>/package/` | The hand-back package, written when the job stops. |
+| `runs/<job_id>/package.zip` | The same package, zipped. |
+
+The package directory holds: the best algorithm's files, `diff_vs_baseline.patch`, `scores.md`
+(per-nonce tables for baseline and candidate on training and held-out nonces; a focused job
+adds a regression-guard table for the other tracks), `hypotheses.md` (the full log with
 outcomes), `evidence_draft.md` (a partially filled-in TIG advance-evidence template), and
-`README.md` explaining how to submit — also zipped as `package.zip`.
+`README.md` explaining how to submit, including a Hyperparameters section when the job used
+them, whose values are also in `hyperparameters.json`. Benchmark the submitted algorithm with
+the same hyperparameters: the measured improvement holds only with them.
 
 On the C3 backend, each job also gets `runs/<job_id>/c3/<n>/` (and
 `runs/<job_id>/c3/baseline/` for the baseline measurement): the files C3 generates and
@@ -170,7 +397,7 @@ the modules the container needs — plus the pulled artifacts, which land under
 and is uploaded to C3's workspace store as part of the job directory.
 
 The measured baseline is cached separately from the run directory, keyed by challenge,
-monorepo ref, algorithm, nonce sets, fuel, and hardware class: real runs share
+monorepo ref, algorithm, nonce sets, fuel, hardware class, and hyperparameters: real runs share
 `~/.talos/baselines/<challenge>/<key>.json` across jobs, while `--fake` runs (which use no
 real network or Modal) keep theirs under `runs/<job_id>/baseline_cache/<challenge>/<key>.json`
 instead.
@@ -186,11 +413,57 @@ start, including time spent resumed. Compute spend shown in status lines and the
 report is an **estimate**, computed from measured container seconds times list prices in
 a table shipped with Talos — not a billed amount.
 
+LLM spend is likewise measured tokens times a price table. A model with no entry in that
+table is shown as `unpriced`, and `--budget-usd` cannot be enforced for it: add
+`--budget-hours` or `--budget-iterations`.
+
 Compute spent by `talos compile` from the agentic sandbox is not counted against
 `--budget-compute-usd`; on C3 each of those is one job (about 12 minutes of overhead,
 MEASURED 2026-09-14) billed at the profile's rate. A focused job's confirmation scores the
 other tracks' training nonces too, about a minute more per winning iteration on C3
 (ESTIMATE, unverified).
+
+## Compute backends in detail
+
+### C3 timings
+
+On C3, one iteration is one batch job with about 12 minutes of fixed overhead before any
+nonce is scored — MEASURED 2026-09-14 on a spike run (knapsack, 4 vCPU): about 4 minutes
+to script start, 466 seconds to build the candidate, then 1 to 2 seconds per nonce at
+mainnet fuel. The release smoke test on 2026-09-15 (MEASURED, knapsack, 4 vCPU, two
+training and two held-out nonces) took 12 min 20 s from submission to result: about 2 minutes
+queued, 470 seconds to build, 1.3 to 1.7 seconds per nonce; the client's cost estimate was
+$0.027 and the account balance fell by £0.02. Modal has no equivalent per-job overhead.
+
+### C3 dev images (maintainers)
+
+C3 pulls only public Docker Hub images, never GHCR. Maintainers mirror the TIG dev images
+to `docker.io/fibonadithya/tig-<challenge>-dev:<tag>` with `make mirror-images`
+(`scripts/mirror_images.sh`); this only needs running once per `DEV_IMAGE_TAG`, but a tag
+bump means re-running it before release. Tags currently mirrored: knapsack 0.0.7 (verified
+2026-09-15). Users never touch GHCR or the mirror script themselves. `talos run` on C3
+checks the Hub tag before the baseline is measured and fails with a mirror hint if it is
+missing. Maintainers can point at a test mirror instead of the real one with
+`TALOS_IMAGE_NAMESPACE`.
+
+The mirror script needs `talos` importable, which the system `python3` does not have: from
+a fresh shell run `make mirror-images PYTHON=.venv/bin/python`, or activate the venv first
+and run plain `make mirror-images` (`Makefile`'s `PYTHON ?= python3` otherwise picks the
+system interpreter and fails with "No module named talos").
+
+### Guards between build and scoring
+
+A candidate that compiles but adds a function nothing calls (rustc's `never used` warning
+inside the candidate's own files) is not scored: the change is off the solve path and would
+score the same as the baseline. It gets the same fix rounds as a compile error, then fails
+as `failed:dead_code`.
+
+Each candidate nonce runs under a per-track timeout of three times the baseline's slowest
+nonce on that track, never below 60 s and never above the flat 600 s the baseline itself ran
+under. A nonce over it is a `timeout` error, and enough of them fail the candidate through
+the error ceiling. TIG caps fuel, not seconds, so this is a limit on research cost, not a
+TIG rule: `Thresholds.runtime_ceiling` in `talos/loop.py` sets the multiplier, and 0
+disables it.
 
 ## Live smoke test
 
@@ -209,43 +482,27 @@ and a few pence of credit (MEASURED 2026-09-15: £0.02 billed, 12 min 20 s wall 
 TALOS_LIVE_BACKEND=c3 .venv/bin/pytest -m live tests/test_live.py -k c3 -s
 ```
 
+Both need `pytest`: install it with `uv pip install --python .venv/bin/python pytest`, or use
+the development install below.
+
 Run these once yourself after `talos setup`, before trusting a real run. The C3 test was
 run by the maintainers on 2026-09-15 (see above); the Modal test has not been run by the
 developers of this repository (no Modal or LLM credentials were available in the
 development environment).
 
-## How it works
+## Development
 
-Talos measures the current top-adoption mainnet algorithm as its baseline, then loops: an
-LLM proposes a hypothesis and an edit, `talos compile` + the Modal bench harness score it
-against training nonces, promising candidates are confirmed against held-out nonces, and
-the loop stops when a candidate beats baseline on both, or the budget runs out. See
-[docs/ai/specs/2026-09-11-talos-design.md](docs/ai/specs/2026-09-11-talos-design.md)
-for the full design.
+The gate needs Python 3.11 or newer, because the pinned `agentify` in `requirements-dev.txt`
+does. CI uses 3.12.
 
-Two guards sit between the build and the scoring, both added after a run that spent half
-its iterations on candidates that could not have scored. A candidate that compiles with a
-function it added that nothing calls (rustc's `never used` warning inside the candidate's
-own files) is not scored: the change is off the solve path, and scoring it repeats the
-baseline nonce for nonce. It gets the same fix rounds a compile error gets, then fails as
-`failed:dead_code`. And each candidate nonce runs under a per-track timeout of three times
-the baseline's slowest nonce on that track, never below 60 s and never above the flat 600 s
-the baseline itself ran under; a nonce over it is a `timeout` error, and enough of them
-fail the candidate through the error ceiling. TIG caps fuel, not seconds, so this is a
-research-economy cap, not a TIG rule: `Thresholds.runtime_ceiling` in `talos/loop.py` sets
-the multiplier and 0 disables it. The Modal score function takes the timeout as an
-argument, so after upgrading past this change run `talos setup` again on the Modal backend
-before the next run; the C3 job ships its own code and needs nothing. The Modal score
-function also takes the track's hyperparameters as an argument, so the same applies after
-upgrading past that change. A client that reaches an older deploy stops at once with a
-message naming `talos setup`, not after retrying it as an outage.
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements-dev.txt -e .
+make check PYTHON=.venv/bin/python
+```
 
-When the loop recalls failed attempts to the model, each line carries what the run measured:
-the mean delta, the worst track and its delta, the candidate's runtime relative to the
-baseline on its slowest track, and any rejection error. Compile-fix prompts see only the
-diagnostics that concern the candidate (errors anywhere, warnings only inside its files) and
-the exact file names to use, because the full build output is dominated by other algorithms'
-warnings and a fixer fed that has edited their paths instead.
+`make check` runs ruff, pytest without the `live` marker, and the agentify contract check.
+It is the same command CI runs. See `AGENTS.md` for the invariants a change must keep.
 
 ## Licence
 
