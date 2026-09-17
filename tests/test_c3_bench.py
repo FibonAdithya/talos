@@ -52,9 +52,11 @@ class FakeC3:
         self.squeue_fail = squeue_fail
         self.pull_fail = pull_fail
         self.calls = []
+        self.envs = []
 
     def __call__(self, cmd, **kw):
         self.calls.append((cmd, kw.get("cwd")))
+        self.envs.append(kw.get("env"))
         rc, out = 0, ""
         if cmd[1] == "deploy":
             rc = self.deploy_rc
@@ -401,3 +403,25 @@ def test_a_hung_c3_call_pauses_the_run_instead_of_tracebacking(tmp_path):
     # `c3 deploy` that hangs past its timeout escape evaluate into execute_job's blanket
     # handler, which marks the whole job failed instead of pausing it for a resume
     assert "deploy" in str(ei.value) and "timed out" in str(ei.value)
+
+
+def test_every_c3_call_carries_the_api_key_in_its_environment(tmp_path):
+    c3 = FakeC3(["RUNNING", "SUCCEEDED"], results_doc())
+    clock = Clock()
+
+    def sleep(s):
+        clock.t += s
+    b = C3Bench(tmp_path, run=c3, clock=clock, sleep=sleep, api_key="c3_key_secret")
+    b.evaluate(req())
+    assert {cmd[1] for cmd, _ in c3.calls} >= {"deploy", "squeue", "pull"}
+    # mutation: passing env= on deploy only authenticates the submit and not the polling
+    assert all(env and env["C3_API_KEY"] == "c3_key_secret" and "PATH" in env for env in c3.envs)
+    assert all("c3_key_secret" not in " ".join(cmd) for cmd, _ in c3.calls)
+
+
+def test_without_an_api_key_c3_calls_inherit_the_environment(tmp_path):
+    c3 = FakeC3(["RUNNING", "SUCCEEDED"], results_doc())
+    b, _ = bench(tmp_path, c3)
+    b.evaluate(req())
+    # mutation: forcing C3_API_KEY into the env for a login-session user
+    assert c3.envs and all(env is None for env in c3.envs)

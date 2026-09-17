@@ -23,7 +23,8 @@ from talos import mainnet as mainnet_api
 from talos.budget import Budget, Spend
 from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_image,
                               hardware_class)
-from talos.config import Config, ConfigError, ENV_KEYS, load, resolve_api_key, save
+from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
+                          resolve_c3_api_key, save)
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
@@ -61,14 +62,17 @@ def deploy_bench(token_id: str | None, token_secret: str | None, run=subprocess.
         raise ConfigError(f"modal deploy failed: {(r.stderr or r.stdout)[-2000:]}")
 
 
-def check_c3(run=None) -> float:
-    """Confirms a logged-in `c3` session and returns the credit balance in GBP. `run` is
-    resolved at call time so a test can monkeypatch `cli.subprocess`."""
+def check_c3(run=None, api_key: str | None = None) -> float:
+    """Confirms `c3` is authenticated, by `api_key` when given and by the `c3 login` session
+    otherwise, and returns the credit balance in GBP. `run` is resolved at call time so a test
+    can monkeypatch `cli.subprocess`."""
+    from talos.c3_bench import c3_env
     runner = run or subprocess.run
+    env = c3_env(api_key)
 
     def c3(*args: str):
         try:
-            return runner(["c3", *args], capture_output=True, text=True)
+            return runner(["c3", *args], capture_output=True, text=True, env=env)
         except OSError:
             # FileNotFoundError included. `cmd_setup` catches ConfigError only, so anything
             # else here tracebacks out of the wizard and throws away every answer typed.
@@ -76,8 +80,10 @@ def check_c3(run=None) -> float:
 
     r = c3("whoami")
     if r.returncode != 0:
+        fix = ("check the C3 API key (`c3 apikey list`)" if api_key else
+               "run `c3 login`, or give setup a C3 API key (`c3 apikey create`),")
         raise ConfigError(f"C3 login check failed: {(r.stderr or r.stdout)[-300:].strip()}; "
-                          f"run `c3 login` and retry")
+                          f"{fix} and retry")
     r = c3("balance")
     m = re.search(r"Credit balance:\s*£([0-9.]+)", r.stdout or "")
     if r.returncode != 0 or not m:
@@ -109,13 +115,13 @@ def image_available(challenge: str, fetch=None) -> bool:
     return fetch(url) == 200
 
 
-def make_bench(backend: str, run_dir: Path, pending):
+def make_bench(backend: str, run_dir: Path, pending, c3_api_key: str | None = None):
     if backend == "modal":
         from talos.bench import ModalBench
         return ModalBench()
     if backend == "c3":
         from talos.c3_bench import C3Bench
-        return C3Bench(run_dir, pending=pending)
+        return C3Bench(run_dir, pending=pending, api_key=c3_api_key)
     raise ConfigError(f"unknown backend {backend!r}; run `talos setup`")
 
 
@@ -186,7 +192,9 @@ def cmd_setup(args, ask) -> int:
     mode = "single-shot"
     if kind in CLI_PROVIDERS:
         mode = ask("Mode (single-shot or agentic)", "single-shot")
-    token_id = token_secret = None
+    token_id = token_secret = c3_api_key = None
+    if backend == "c3":
+        c3_api_key = ask("C3 API key (blank to use your `c3 login` session)", secret=True) or None
     if backend == "modal":
         token_id = ask("Modal token id (create at modal.com/settings/tokens)")
         token_secret = ask("Modal token secret", secret=True)
@@ -197,14 +205,14 @@ def cmd_setup(args, ask) -> int:
         return 1
     try:
         if backend == "c3":
-            check_c3()
+            check_c3(api_key=c3_api_key)
         else:
             deploy_bench(token_id or None, token_secret or None)
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 1
     save(root, Config(provider=kind, model=model, mode=mode, api_base=api_base,
-                      backend=backend), api_key)
+                      backend=backend), api_key, c3_api_key=c3_api_key)
     print("Setup complete. Run `talos run` to start a job.")
     return 0
 
@@ -339,7 +347,11 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     else:
         provider = make_provider(cfg.provider, cfg.model, api_key=resolve_api_key(cfg),
                                  api_base=cfg.api_base)
-        bench = make_bench(cfg.backend, store.run_dir, pending)
+        c3_api_key = resolve_c3_api_key(cfg) if cfg.backend == "c3" else None
+        bench = make_bench(cfg.backend, store.run_dir, pending, c3_api_key=c3_api_key)
+        if c3_api_key:
+            # `talos compile` in the agentic sandbox has no secrets.json to read the key from.
+            os.environ["C3_API_KEY"] = c3_api_key
         cache_dir, mainnet = BASELINE_CACHE, None
         # Before the baseline, not after: C3 pulls the image at job start, so a missing mirror
         # costs a whole job (and its queue wait) to report a pull failure.
@@ -628,7 +640,12 @@ def cmd_compile(args, ask) -> int:
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
-    bench = make_bench(backend, Path.cwd() / ".talos" / "compile", PendingJobStore.memory())
+    try:
+        cfg = load(Path.cwd())
+    except ConfigError:
+        cfg = None  # the agentic sandbox: the key comes from C3_API_KEY
+    bench = make_bench(backend, Path.cwd() / ".talos" / "compile", PendingJobStore.memory(),
+                       c3_api_key=resolve_c3_api_key(cfg) if backend == "c3" else None)
     r = bench.evaluate(EvalRequest(args.challenge, files, [], [], 0, None,
                                    CHALLENGES[args.challenge].beat)).compile
     print(r.output[-4000:])

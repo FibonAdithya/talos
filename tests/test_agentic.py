@@ -249,3 +249,13 @@ def test_claude_md_shows_the_hyperparameters():
     text = claude_md(ctx(hyperparameters={"t": {"x": 1}}))
     # mutation: the agentic brief omitting the block while single-shot prompts carry it
     assert 'track t: {"x":1}' in text and "do not rename or remove" in text
+
+
+def test_agent_env_passes_the_c3_api_key_through(monkeypatch):
+    from talos.agentic import _agent_env
+    monkeypatch.setenv("C3_API_KEY", "c3_key_1")
+    monkeypatch.setenv("C3_AUTH_TOKEN", "raw-token")
+    env = _agent_env()
+    # mutation: dropping it from the allowlist fails every agentic `talos compile` on C3 for a
+    # user with no `c3 login` session; the allowlist stays exact, so other C3_ vars stay out
+    assert env["C3_API_KEY"] == "c3_key_1" and "C3_AUTH_TOKEN" not in env

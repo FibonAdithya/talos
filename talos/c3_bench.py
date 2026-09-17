@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -40,6 +41,13 @@ def parse_json_stdout(text: str):
     raise ValueError("no JSON in c3 output")
 
 
+def c3_env(api_key: str | None) -> dict[str, str] | None:
+    """The environment for a `c3` call. With a key, C3_API_KEY on top of this process's
+    environment; the CLI reads it there, and argv would show it in `ps`. Without one, None:
+    the child inherits the environment and uses the `c3 login` session."""
+    return {**os.environ, "C3_API_KEY": api_key} if api_key else None
+
+
 def fill_timeouts(rows: list[NonceResult], nonce_sets: list[NonceSet]) -> list[NonceResult]:
     have = {(r.track, r.nonce): r for r in rows}
     out = []
@@ -54,8 +62,10 @@ class C3Bench:
     def __init__(self, run_dir: Path, pending: PendingJobStore | None = None,
                  run: Callable = subprocess.run, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep, poll_s: float = 20.0,
-                 pending_timeout_s: int = 1800, poll_failures_max: int = 15):
+                 pending_timeout_s: int = 1800, poll_failures_max: int = 15,
+                 api_key: str | None = None):
         self.run_dir = Path(run_dir)
+        self._env = c3_env(api_key)
         self._pending = pending or PendingJobStore.memory()
         self._run = run
         self._clock, self._sleep = clock, sleep
@@ -68,7 +78,7 @@ class C3Bench:
     def _c3(self, *args: str, cwd: Path | None = None, timeout: int = 600) -> str:
         try:
             r = self._run(["c3", *args], capture_output=True, text=True, timeout=timeout,
-                          cwd=str(cwd) if cwd else None)
+                          cwd=str(cwd) if cwd else None, env=self._env)
         except OSError as e:
             # FileNotFoundError included: a `c3` that is not on PATH must pause the run like
             # any other CLI failure, not traceback out of evaluate into "job failed".

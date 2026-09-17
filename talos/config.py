@@ -1,4 +1,4 @@
-"""talos.config.json and .talos/secrets.json."""
+"""talos.config.json and .talos/secrets.json (the LLM key and the C3 API key)."""
 from __future__ import annotations
 
 import json
@@ -43,10 +43,11 @@ def load(root: Path) -> Config:
                   secrets_path=root / ".talos" / "secrets.json")
 
 
-def save(root: Path, config: Config, api_key: str | None) -> None:
+def save(root: Path, config: Config, api_key: str | None, c3_api_key: str | None = None) -> None:
     root = Path(root)
     (root / "talos.config.json").write_text(json.dumps(config.to_dict(), indent=1) + "\n")
-    if api_key:
+    secrets = {k: v for k, v in (("api_key", api_key), ("c3_api_key", c3_api_key)) if v}
+    if secrets:
         sdir = root / ".talos"
         sdir.mkdir(exist_ok=True)
         sp = sdir / "secrets.json"
@@ -54,7 +55,7 @@ def save(root: Path, config: Config, api_key: str | None) -> None:
         # between write_text and chmod the key was readable by anyone on the machine.
         fd = os.open(sp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
-            f.write(json.dumps({"api_key": api_key}) + "\n")
+            f.write(json.dumps(secrets) + "\n")
         os.chmod(sp, 0o600)  # an existing file keeps its old mode through O_CREAT
 
 
@@ -66,3 +67,13 @@ def resolve_api_key(config: Config) -> str | None:
     env = ENV_KEYS.get(config.provider)
     val = os.environ.get(env, "") if env else ""
     return val or None
+
+
+def resolve_c3_api_key(config: Config | None) -> str | None:
+    """The C3 API key: .talos/secrets.json, then C3_API_KEY. None means the `c3` CLI uses its
+    `c3 login` session. `config` is None for a `talos compile` run where no config exists."""
+    if config and config.secrets_path and config.secrets_path.exists():
+        key = json.loads(config.secrets_path.read_text()).get("c3_api_key")
+        if key:
+            return key
+    return os.environ.get("C3_API_KEY") or None

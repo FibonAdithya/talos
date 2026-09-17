@@ -136,7 +136,7 @@ Candidates are compiled and scored on one of two backends. You choose one in `ta
 | Backend | What you need before setup | Cost per iteration |
 |---|---|---|
 | `modal` (default) | A [Modal](https://modal.com) account (the free tier works) and an API token created at modal.com/settings/tokens. Keep the token id and secret to hand. | Container seconds only; no fixed per-job overhead. |
-| `c3` | The `c3` CLI ([cthree.cloud](https://cthree.cloud)) installed and logged in with `c3 login`, and credit on the account. Top up with `c3 topup`. | One batch job of about 12 minutes before the first nonce is scored. See [Compute backends in detail](#compute-backends-in-detail). |
+| `c3` | The `c3` CLI ([cthree.cloud](https://cthree.cloud)) installed, either logged in with `c3 login` or with a C3 API key (create one with `c3 apikey create`), and credit on the account. Top up with `c3 topup`. | One batch job of about 12 minutes before the first nonce is scored. See [Compute backends in detail](#compute-backends-in-detail). |
 
 ### 4. Pick an LLM provider
 
@@ -171,16 +171,19 @@ It asks, in order:
 6. **Mode** (`single-shot` or `agentic`): CLI providers only. This is the default; `talos
    run --mode` overrides it per job.
 7. **Modal token id and secret**: `modal` backend only.
+8. **C3 API key**: `c3` backend only; input is hidden. Leave it blank to use your `c3 login`
+   session. With it blank, a `C3_API_KEY` environment variable is used if set.
 
 It then checks everything before writing anything:
 
 - the provider, with one cheap call (for CLI providers: that the binary is on `PATH` and a
   trivial call succeeds);
 - on `modal`: sets your Modal token and deploys the benchmark app to your account;
-- on `c3`: runs `c3 whoami` and `c3 balance`, and warns if the balance is below £1.
+- on `c3`: runs `c3 whoami` and `c3 balance` (with the API key, if you gave one), and warns
+  if the balance is below £1.
 
-On success it writes `talos.config.json` and, for API providers, `.talos/secrets.json`
-(mode 0600, holding only the LLM key), and prints
+On success it writes `talos.config.json` and, if you gave an LLM API key or a C3 API key,
+`.talos/secrets.json` (mode 0600, holding only those keys), and prints
 `Setup complete. Run `talos run` to start a job.` If any check fails it prints the reason,
 exits non-zero, and does not write `talos.config.json` or `.talos/secrets.json`.
 
@@ -359,7 +362,8 @@ to start an agentic codex run unless you set `TALOS_ALLOW_CODEX_AGENTIC=1`. In b
 edit outside the algorithm files fails the iteration.
 
 On the C3 backend, the sandbox has no `talos.config.json` to read, so the configured
-backend is passed to it as `TALOS_BACKEND`; each `talos compile` the agent runs from the
+backend is passed to it as `TALOS_BACKEND`, and a C3 API key, if you use one, as
+`C3_API_KEY`; each `talos compile` the agent runs from the
 sandbox is one C3 job of about 12 minutes. If the agent's 30-minute timeout kills a sandbox
 compile while its C3 job is still running, the job is not cancelled: it runs on to its own
 time limit and bills for it, which bounds the cost but does not avoid it.
@@ -474,9 +478,9 @@ real mainnet top algorithm for one challenge on your deployed Modal app:
 TALOS_LIVE_CHALLENGE=knapsack .venv/bin/pytest -m live tests/test_live.py -s
 ```
 
-For the C3 backend, a separate test runs one real C3 job end to end; it needs `c3 login`
-and a few pence of credit (MEASURED 2026-09-15: £0.02 billed, 12 min 20 s wall clock, job
-`SUCCEEDED`, `1 passed`):
+For the C3 backend, a separate test runs one real C3 job end to end; it needs `c3 login` (or
+`C3_API_KEY` set) and a few pence of credit (MEASURED 2026-09-15: £0.02 billed, 12 min 20 s
+wall clock, job `SUCCEEDED`, `1 passed`):
 
 ```bash
 TALOS_LIVE_BACKEND=c3 .venv/bin/pytest -m live tests/test_live.py -k c3 -s
