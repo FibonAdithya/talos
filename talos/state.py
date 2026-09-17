@@ -33,6 +33,13 @@ class JobSpec:
     monorepo_ref: str
     challenge_id: str
     track: str | None = None  # one active track to optimise; None = all tracks
+    # Pinned at job start by `talos run --hyperparameters mainnet` (the default). The map
+    # belongs to this algorithm's code: resolve_baseline measures this algorithm rather than
+    # whatever tops mainnet adoption by then. None on all three = no hyperparameters, as
+    # before.
+    baseline_algorithm: dict | None = None  # {"name", "id", "adoption"}
+    hyperparameters: dict[str, dict | None] | None = None  # track -> map passed to tig-runtime
+    hyperparameters_source: dict[str, dict] | None = None  # track -> benchmark it came from
 
     def to_dict(self) -> dict:
         d = asdict(self)
