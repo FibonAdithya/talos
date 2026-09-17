@@ -34,13 +34,17 @@ def make(tmp_path, status="won"):
 
 def test_package_contents_and_no_hash(tmp_path):
     spec, st, store = make(tmp_path)
+    # so the hash-grep below also covers hyperparameters.json and the README section
+    spec = replace(spec, hyperparameters={"t": {"x": 1}},
+                   hyperparameters_source={"t": {"benchmark_id": "b1", "player_id": "p1",
+                                                 "mean_quality": 1.0}})
     st.hypotheses.append({"iteration": 2, "against": 0, "title": "Bad edit", "description": "x",
                           "strategy_tag": "hybrid", "outcome": "failed:edit",
                           "error": "no edit block applied"})
     pkg = build_package(spec, st, store)
     names = {p.name for p in pkg.iterdir()}
     assert {"mod.rs", "diff_vs_baseline.patch", "scores.md", "hypotheses.md",
-            "evidence_draft.md", "README.md"} <= names
+            "evidence_draft.md", "README.md", "hyperparameters.json"} <= names
     assert "let k = 9" in (pkg / "diff_vs_baseline.patch").read_text()
     # mutation: dropping the error string from the log hides why an iteration failed
     hyps_text = (pkg / "hypotheses.md").read_text()
@@ -173,3 +177,26 @@ def test_unfocused_package_keeps_todays_headings(tmp_path):
     scores = (build_package(spec, st, store) / "scores.md").read_text()
     assert "# Training nonces\n" in scores and "(track" not in scores
     assert "Regression guard" not in scores
+
+
+def test_package_records_the_hyperparameters_and_their_source(tmp_path):
+    spec, st, store = make(tmp_path)
+    spec = replace(spec, hyperparameters={"t": {"x": 1}},
+                   hyperparameters_source={"t": {"benchmark_id": "bm1", "player_id": "0xp",
+                                                 "mean_quality": 150.0}})
+    pkg = build_package(spec, st, store)
+    readme = (pkg / "README.md").read_text()
+    # mutation: omitting the section leaves the user submitting without the values they beat with
+    assert "## Hyperparameters" in readme
+    assert '- t: `{"x": 1}` (mainnet benchmark bm1 by 0xp, mean quality 150)' in readme
+    # mutation: not writing the file leaves nothing to paste into a benchmarker config
+    import json
+    assert json.loads((pkg / "hyperparameters.json").read_text()) == {"t": {"x": 1}}
+
+
+def test_package_without_hyperparameters_has_no_section_or_file(tmp_path):
+    spec, st, store = make(tmp_path)
+    pkg = build_package(spec, st, store)
+    # mutation: writing the section for None claims values were used when none were
+    assert "## Hyperparameters" not in (pkg / "README.md").read_text()
+    assert not (pkg / "hyperparameters.json").exists()

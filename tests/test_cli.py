@@ -10,8 +10,18 @@ from talos import cli
 from talos.bench import BenchCancelled, EvalResult
 from talos.challenges import DEV_IMAGE_TAG
 from talos.config import Config, ConfigError, load, resolve_api_key, save
-from talos.mainnet import MainnetError
+from talos.mainnet import MainnetError, TrackHyperparameters
 from talos.types import CompileResult
+
+
+@pytest.fixture(autouse=True)
+def _no_mainnet_hyperparameters(monkeypatch):
+    """`talos run` reads the top algorithm and its hyperparameters before the job exists. No test
+    here may reach mainnet for them; a test that cares overrides these."""
+    monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("fake_base", "c003_a000", 1))
+    monkeypatch.setattr("talos.mainnet.top_hyperparameters",
+                        lambda algorithm_id, tracks, fuel:
+                        {t: TrackHyperparameters(None, None, None, None) for t in tracks})
 
 
 def scripted(answers):
@@ -118,7 +128,7 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     monkeypatch.setattr(cli, "execute_job",
                         lambda spec, store, cfg, resume: seen.update(spec=spec, cfg=cfg) or 0)
     prompts = []
-    answers = iter(["knapsack", "go", "abc", "3", "4", "5", "agentic", ""])
+    answers = iter(["knapsack", "go", "abc", "3", "4", "5", "agentic", "", ""])
 
     def ask(prompt, default=None, secret=False):
         prompts.append(prompt)
@@ -130,8 +140,9 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     assert "hypergraph (GPU: L40S, ≈$1.95/h estimated)" in prompts[0]
     assert "knapsack" in prompts[0] and "knapsack (GPU" not in prompts[0]
     assert prompts.count("Iteration budget") == 2  # the typo was re-asked, not fatal
-    assert prompts[-2] == "Mode (single-shot or agentic)"
-    assert prompts[-1] == "Track to optimise (all, or one of: n=1)"
+    assert prompts[-3] == "Mode (single-shot or agentic)"
+    assert prompts[-2] == "Track to optimise (all, or one of: n=1)"
+    assert prompts[-1] == "Hyperparameters (mainnet or none)"
     assert seen["spec"].track is None
     assert "agentic mode uses roughly 5-20x the tokens of single-shot" in captured.out
     assert seen["spec"].budget.iterations == 3 and seen["spec"].budget.hours == 4.0
@@ -797,7 +808,7 @@ def _refuse_bench(why):
 
 def _stub_mainnet(monkeypatch):
     """Everything resolve_baseline reads from mainnet, so a test never hits the network."""
-    monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("fake_base", 1))
+    monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("fake_base", "c003_a000", 1))
     monkeypatch.setattr("talos.mainnet.fetch_template", lambda ch: "pub fn solve_challenge(")
     monkeypatch.setattr("talos.mainnet.fetch_algorithm_files",
                         lambda ch, name: {"mod.rs": "fn solve() {}\n"})
@@ -1006,3 +1017,133 @@ def test_resume_of_a_focused_job_with_track_all_is_refused(tmp_path, monkeypatch
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     assert cli.main(["run", "--resume", run_dir.name, "--track", "all"]) == 2
     assert "started with track n=1" in capsys.readouterr().err
+
+
+def _cli_config(tmp_path):
+    save(tmp_path, Config(provider="claude-cli", model="claude-opus-5", mode="single-shot",
+                          api_base=None), None)
+
+
+def test_run_pins_the_top_algorithm_and_its_hyperparameters(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _cli_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("algo", "c003_a7", 9))
+    asked = []
+
+    def top_hp(algorithm_id, tracks, fuel):
+        asked.append((algorithm_id, tracks, fuel))
+        return {"n=1": TrackHyperparameters({"x": 1}, "bm1", "0xp", 150.0)}
+    monkeypatch.setattr("talos.mainnet.top_hyperparameters", top_hp)
+    seen = {}
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--yes"])
+    assert rc == 0
+    # mutation: passing the algorithm name, or another fuel, matches no precommit on mainnet
+    assert asked == [("c003_a7", ["n=1"], 7)]
+    spec = seen["spec"]
+    # mutation: not pinning the algorithm lets the baseline measure a different one later
+    assert spec.baseline_algorithm == {"name": "algo", "id": "c003_a7", "adoption": 9}
+    assert spec.hyperparameters == {"n=1": {"x": 1}}
+    assert spec.hyperparameters_source == {"n=1": {"benchmark_id": "bm1", "player_id": "0xp",
+                                                   "mean_quality": 150.0}}
+    # mutation: a silent default hides from the user that their job runs with mainnet values
+    assert "hyperparameters: 1/1 tracks from mainnet" in capsys.readouterr().out
+
+
+def test_run_hyperparameters_none_reads_nothing_from_mainnet(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _cli_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    def boom(*a, **k):
+        pytest.fail("mainnet must not be read for --hyperparameters none")
+    monkeypatch.setattr("talos.mainnet.top_algorithm", boom)
+    monkeypatch.setattr("talos.mainnet.top_hyperparameters", boom)
+    seen = {}
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--yes", "--hyperparameters", "none"])
+    # mutation: ignoring the flag fetches and applies the map anyway
+    assert rc == 0
+    assert (seen["spec"].baseline_algorithm, seen["spec"].hyperparameters) == (None, None)
+    assert "hyperparameters: none" in capsys.readouterr().out
+
+
+def test_run_with_no_matching_benchmark_pins_the_algorithm_but_no_map(tmp_path, monkeypatch,
+                                                                      capsys):
+    monkeypatch.chdir(tmp_path)
+    _cli_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = {}
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+    assert cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                     "--budget-iterations", "3", "--yes"]) == 0
+    # mutation: storing {"n=1": None} makes the package claim hyperparameters were used
+    assert seen["spec"].hyperparameters is None and seen["spec"].hyperparameters_source is None
+    assert seen["spec"].baseline_algorithm == {"name": "fake_base", "id": "c003_a000",
+                                               "adoption": 1}
+    # mutation: printing the plain "hyperparameters: none" hides that mainnet was asked and had
+    # no benchmark of this algorithm at this fuel (spec §7: "say so")
+    out = capsys.readouterr().out
+    assert "hyperparameters: none (no mainnet benchmark of fake_base at fuel 7)" in out
+
+
+def test_run_reports_a_hyperparameters_fetch_failure_and_creates_nothing(tmp_path, monkeypatch,
+                                                                         capsys):
+    monkeypatch.chdir(tmp_path)
+    _cli_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+
+    def down(*a, **k):
+        raise MainnetError("HTTP 503 fetching get-benchmarks")
+    monkeypatch.setattr("talos.mainnet.top_hyperparameters", down)
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: pytest.fail("must not start a job"))
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--yes"])
+    # mutation: letting MainnetError escape tracebacks; resolving after write_spec leaves a run dir
+    assert rc == 1 and "mainnet unreachable" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_wizard_hyperparameters_answer_none_and_a_bad_answer(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _cli_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = {}
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+    wizard = ["knapsack", "go", "3", "4", "5", "single-shot", ""]
+    assert cli.main(["run"], ask=scripted(wizard + ["none"])) == 0
+    # mutation: ignoring the wizard answer applies mainnet values the user declined
+    assert seen["spec"].hyperparameters is None and seen["spec"].baseline_algorithm is None
+    # mutation: accepting any answer starts a job whose choice nobody made
+    assert cli.main(["run"], ask=scripted(wizard + ["maybe"])) == 2
+    assert "unknown hyperparameters choice 'maybe'" in capsys.readouterr().err
+
+
+def test_resume_refuses_a_hyperparameters_flag(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    # mutation: letting it through on resume would score a job against a baseline measured
+    # with different hyperparameters
+    assert cli.main(["run", "--resume", run_dir.name, "--hyperparameters", "none"]) == 2
+    assert "fixed its hyperparameters" in capsys.readouterr().err
+
+
+def test_fake_run_carries_hyperparameters_into_the_package(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    job = json.loads((run_dir / "job.json").read_text())
+    # mutation: the fake provider path skipping FAKE_MAINNET's map leaves the end-to-end run
+    # exercising none of this feature
+    assert job["hyperparameters"] == {"n=1": {"fake_boost": 1}}
+    assert "## Hyperparameters" in (run_dir / "package" / "README.md").read_text()

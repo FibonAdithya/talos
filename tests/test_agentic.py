@@ -242,3 +242,10 @@ def test_agentic_prompt_describes_failed_attempts_with_their_numbers(tmp_path):
     # mutation: joining titles alone drops the per-track delta and the runtime ratio
     assert "Dynamic greedy" in seen["prompt"] and "14.1x" in seen["prompt"]
     assert "n_items=5000,budget=10" in seen["prompt"]
+
+
+def test_claude_md_shows_the_hyperparameters():
+    from talos.agentic import claude_md
+    text = claude_md(ctx(hyperparameters={"t": {"x": 1}}))
+    # mutation: the agentic brief omitting the block while single-shot prompts carry it
+    assert 'track t: {"x":1}' in text and "do not rename or remove" in text

@@ -89,3 +89,26 @@ def test_spec_track_round_trips_and_defaults_to_none(tmp_path):
     del old["track"]
     assert JobSpec.from_dict(old).track is None
     assert spec().track is None
+
+
+def test_spec_hyperparameter_fields_round_trip_default_to_none_and_survive_redaction(tmp_path):
+    pinned = replace(spec(), baseline_algorithm={"name": "a", "id": "c003_a1", "adoption": 9},
+                     hyperparameters={"n=1": {"x": 1}},
+                     hyperparameters_source={"n=1": {"benchmark_id": "b", "player_id": "0xp",
+                                                     "mean_quality": 1.0}})
+    store = JobStore(tmp_path)
+    store.write_spec(pinned)
+    # mutation: dropping a field loses the pinned algorithm or map on resume
+    assert store.read_spec() == pinned
+    old = spec().to_dict()
+    for key in ("baseline_algorithm", "hyperparameters", "hyperparameters_source"):
+        del old[key]
+    # mutation: a field without a default makes every job.json written before it unresumable
+    loaded = JobSpec.from_dict(old)
+    assert (loaded.baseline_algorithm, loaded.hyperparameters,
+            loaded.hyperparameters_source) == (None, None, None)
+    red = pinned.redacted()
+    # mutation: stripping them from the redacted spec hides from the agent what every run passes
+    assert red["hyperparameters"] == {"n=1": {"x": 1}}
+    assert red["baseline_algorithm"]["id"] == "c003_a1"
+    assert "ab" * 32 not in json.dumps(red)

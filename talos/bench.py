@@ -44,6 +44,11 @@ def timeout_for(timeouts: dict[str, int] | None, track: str) -> int:
     return NONCE_TIMEOUT_S if timeouts is None else timeouts.get(track, NONCE_TIMEOUT_S)
 
 
+def hyperparameters_for(hyperparameters: dict[str, dict | None] | None,
+                        track: str) -> dict | None:
+    return None if hyperparameters is None else hyperparameters.get(track)
+
+
 def dead_code(request: "EvalRequest", compile_output: str) -> list[str]:
     if request.prior_functions is None:
         return []
@@ -68,6 +73,10 @@ class EvalRequest:
     # baseline ran under. The loop derives it from the baseline's measured runtime so a
     # candidate many times slower fails fast instead of holding the job for its full length.
     timeouts: dict[str, int] | None = None
+    # Per-track mainnet hyperparameters, passed to tig-runtime on every nonce of that track. A
+    # track mapped to None, or absent, runs without the flag. None = no track gets any. The loop
+    # and the baseline both take it from JobSpec.hyperparameters, never per request.
+    hyperparameters: dict[str, dict | None] | None = None
 
 
 @dataclass
@@ -178,8 +187,10 @@ class ModalBench:
         return CompileResult(ok=out["ok"], artifact_id=out.get("artifact_id"), output=out["output"])
 
     def _score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
-              fuel: int, timeouts: dict[str, int] | None) -> list[NonceResult]:
-        args = [(artifact_id, ns.track, ns.rand_hash, n, fuel, timeout_for(timeouts, ns.track))
+              fuel: int, timeouts: dict[str, int] | None,
+              hyperparameters: dict[str, dict | None] | None) -> list[NonceResult]:
+        args = [(artifact_id, ns.track, ns.rand_hash, n, fuel, timeout_for(timeouts, ns.track),
+                 hyperparameters_for(hyperparameters, ns.track))
                 for ns in nonce_sets for n in ns.nonces()]
         rows = self._with_retry(
             lambda: list(self._fn(f"score_nonce_{challenge}").starmap(args)))
@@ -194,13 +205,13 @@ class ModalBench:
         if dead_code(request, c.output):
             return EvalResult(c, [], None, "dead_code")
         tr = (self._score(request.challenge, c.artifact_id, request.training, request.fuel,
-                          request.timeouts)
+                          request.timeouts, request.hyperparameters)
               if request.training else [])
         go, reason = holdout_decision(request.baseline_training, tr, request.rule)
         ho = None
         if go:
             ho = (self._score(request.challenge, c.artifact_id, request.holdout, request.fuel,
-                              request.timeouts)
+                              request.timeouts, request.hyperparameters)
                   if request.holdout else [])
         return EvalResult(c, tr, ho, reason)
 

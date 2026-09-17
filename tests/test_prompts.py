@@ -169,3 +169,33 @@ def test_compile_fix_prompt_shows_every_error_of_a_build_the_size_of_iteration_5
                    "    |\n" + f"{i:<3} | " + "x" * 900 + "\n\n" for i in range(8))
     _, user = compile_fix_prompts(ctx(), {"track1.rs": "fn x(){}"}, errs)
     assert all(f"(site {i})" in user for i in range(8))
+
+
+HP = {"t": {"b": 2, "a": 1}, "u": None}
+
+
+def test_hypothesis_and_edit_prompts_show_every_tracks_hyperparameters():
+    c = ctx(hyperparameters=HP)
+    _, hyp_user = hypothesis_prompts(c)
+    _, edit_user = edit_prompts(c, {"title": "t", "description": "d"})
+    for user in (hyp_user, edit_user):
+        # mutation: leaving the block out of either prompt lets the model rename a key unawares
+        assert 'track t: {"a":1,"b":2}' in user
+        assert "track u: none (solve_challenge receives None)" in user
+        assert "do not rename or remove" in user
+    import re
+    assert not re.search(r"\b[0-9a-f]{64}\b", hyp_user + edit_user)
+
+
+def test_no_hyperparameters_block_without_a_map():
+    _, user = hypothesis_prompts(ctx())
+    # mutation: printing the block for None tells the model values are passed when none are
+    assert "Hyperparameters:" not in user
+
+
+def test_a_focused_prompt_shows_only_the_focus_tracks_hyperparameters():
+    c = ctx(hyperparameters={"t": {"x": 1}, "u": {"x": 2}}, track="t", guard_tracks=["u"])
+    _, user = hypothesis_prompts(c)
+    # mutation: listing every track spends the focused prompt on tracks it must not tune for
+    assert 'track t: {"x":1}' in user and '{"x":2}' not in user
+    assert "guard tracks run with their own values" in user

@@ -71,7 +71,8 @@ def _compile_impl(name: str, files: dict[str, str]) -> dict:
 
 
 def _score_impl(name: str, challenge_id: str, artifact_id: str, track: str, rand_hash: str,
-                nonce: int, fuel: int, timeout_s: int = NONCE_TIMEOUT_S) -> dict:
+                nonce: int, fuel: int, timeout_s: int = NONCE_TIMEOUT_S,
+                hyperparameters: dict | None = None) -> dict:
     volume.reload()
     d = Path(ARTIFACTS) / name / artifact_id
     so, ptx = d / "algo.so", d / "algo.ptx"
@@ -81,7 +82,7 @@ def _score_impl(name: str, challenge_id: str, artifact_id: str, track: str, rand
         raise FileNotFoundError(f"artifact {artifact_id} missing on volume")
     return inside.run_nonce(challenge_id, track, rand_hash, nonce, so, fuel,
                             min(timeout_s, NONCE_TIMEOUT_S), ptx if ptx.exists() else None,
-                            workdir=MONOREPO)
+                            workdir=MONOREPO, hyperparameters=hyperparameters)
 
 
 for _name, _spec in CHALLENGES.items():
@@ -99,8 +100,10 @@ for _name, _spec in CHALLENGES.items():
 
     def _mk_score(n=_name, cid=_spec.id):
         def score_nonce(artifact_id: str, track: str, rand_hash: str, nonce: int, fuel: int,
-                        timeout_s: int = NONCE_TIMEOUT_S) -> dict:
-            return _score_impl(n, cid, artifact_id, track, rand_hash, nonce, fuel, timeout_s)
+                        timeout_s: int = NONCE_TIMEOUT_S,
+                        hyperparameters: dict | None = None) -> dict:
+            return _score_impl(n, cid, artifact_id, track, rand_hash, nonce, fuel, timeout_s,
+                               hyperparameters)
         return score_nonce
 
     app.function(name=f"compile_{_name}", timeout=3600, **_kw)(_mk_compile())

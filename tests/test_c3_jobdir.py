@@ -118,3 +118,29 @@ def test_payload_carries_per_track_timeouts(tmp_path):
     r.timeouts = {"t": 42}
     assert c3_jobdir.payload(r)["timeouts"] == {"t": 42}
     assert c3_jobdir.payload(req())["timeouts"] is None
+
+
+def test_payload_carries_the_hyperparameters(tmp_path):
+    # mutation: dropping the map from the payload runs every C3 nonce without hyperparameters
+    r = req()
+    r.hyperparameters = {"t": {"x": 1}}
+    assert c3_jobdir.payload(r)["hyperparameters"] == {"t": {"x": 1}}
+    # mutation: always writing the key (even None) changes the hash of a pre-upgrade request
+    assert "hyperparameters" not in c3_jobdir.payload(req())
+
+
+def test_request_hash_is_unchanged_from_before_hyperparameters_existed():
+    # mutation: always writing the "hyperparameters" key changes this request's hash, so a
+    # resume against a job that was submitted before the upgrade orphans it instead of
+    # reattaching, leaving it to keep billing
+    assert c3_jobdir.request_hash(req()) == "8360658c78306a4f"
+
+
+def test_request_hash_changes_with_the_hyperparameters():
+    # mutation: a hash that ignores the map lets a resume reattach to a job run without it
+    with_hp = req()
+    with_hp.hyperparameters = {"t": {"x": 1}}
+    other_hp = req()
+    other_hp.hyperparameters = {"t": {"x": 2}}
+    hashes = {c3_jobdir.request_hash(r) for r in (req(), with_hp, other_hp)}
+    assert len(hashes) == 3

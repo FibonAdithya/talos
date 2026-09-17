@@ -47,3 +47,20 @@ def test_compile_reports_a_build_that_produced_no_so(monkeypatch, tmp_path):
     # mutation: copying a .so that is not there raises FileNotFoundError out of the container
     assert out["ok"] is False and out["artifact_id"] is None
     assert "build produced no .so at" in out["output"] and "warning: unused" in out["output"]
+
+
+def test_score_impl_hands_the_hyperparameters_to_run_nonce(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    art = tmp_path / "artifacts" / "knapsack" / "art1"
+    art.mkdir(parents=True)
+    (art / "algo.so").write_bytes(b"\x7fELF")
+    seen = {}
+
+    def fake_run_nonce(*args, **kwargs):
+        seen.update(kwargs)
+        return {"track": args[1], "nonce": args[3], "ok": True, "quality": 1, "runtime_ms": 1,
+                "error": None}
+    monkeypatch.setattr(talos_bench.inside, "run_nonce", fake_run_nonce)
+    talos_bench._score_impl("knapsack", "c003", "art1", "t", "ab" * 32, 0, 5, 60, {"x": 1})
+    # mutation: accepting the argument but not forwarding it runs Modal nonces without the map
+    assert seen["hyperparameters"] == {"x": 1}

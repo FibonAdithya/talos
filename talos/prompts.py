@@ -45,6 +45,7 @@ class PromptContext:
     is_gpu: bool = False
     track: str | None = None
     guard_tracks: list[str] = field(default_factory=list)
+    hyperparameters: dict[str, dict | None] | None = None
 
 
 def _files_block(files: dict[str, str]) -> str:
@@ -59,6 +60,27 @@ def focus_sentence(ctx: PromptContext) -> str:
     return (f"Optimise for track \"{ctx.track}\" only. The other active tracks ({guards}) are "
             f"re-scored as a regression guard when a candidate wins, and none of them may get "
             f"worse: confine changes to the code path that serves \"{ctx.track}\".")
+
+
+def hyperparameters_block(ctx: PromptContext) -> str:
+    """What every run passes to solve_challenge, so edits keep those keys readable. Empty when the
+    job runs without hyperparameters. A focused job shows only its own track."""
+    if ctx.hyperparameters is None:
+        return ""
+    shown = [ctx.track] if ctx.track else sorted(ctx.hyperparameters)
+    lines = []
+    for track in shown:
+        hp = ctx.hyperparameters.get(track)
+        value = ("none (solve_challenge receives None)" if hp is None
+                 else json.dumps(hp, sort_keys=True, separators=(",", ":")))
+        lines.append(f"track {track}: {value}")
+    text = ("Hyperparameters: every run of this code, the baseline and your candidate alike, "
+            "passes these values to solve_challenge as `hyperparameters`, per track. They came "
+            "from the best mainnet benchmark of this algorithm. Keep every key readable: you may "
+            "add keys, but do not rename or remove existing ones.\n" + "\n".join(lines))
+    if ctx.track and len(ctx.hyperparameters) > 1:
+        text += "\nThe guard tracks run with their own values too."
+    return text
 
 
 def describe_attempt(h: dict) -> str:
@@ -100,6 +122,9 @@ def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
     if ctx.forced_tag:
         parts.append(f"You have stagnated. Your strategy_tag MUST be \"{ctx.forced_tag}\" "
                      f"this time; change the approach, not the constants.")
+    hp = hyperparameters_block(ctx)
+    if hp:
+        parts.append(hp)
     parts.append("Current algorithm source:\n" + _files_block(ctx.files))
     return system, "\n\n".join(parts)
 
@@ -110,9 +135,11 @@ def edit_prompts(ctx: PromptContext, hypothesis: dict) -> tuple[str, str]:
         f"{SEARCH_REPLACE_FORMAT}\n\n{_rust_rules()}"
     )
     focus = focus_sentence(ctx)
+    hp = hyperparameters_block(ctx)
     user = (f"Implement this hypothesis:\nTitle: {hypothesis['title']}\n"
             f"Description: {hypothesis['description']}\n\n"
             + (focus + "\n\n" if focus else "")
+            + (hp + "\n\n" if hp else "")
             + f"Current algorithm source files:\n{_files_block(ctx.files)}")
     return system, user
 

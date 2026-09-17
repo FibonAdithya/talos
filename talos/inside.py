@@ -109,18 +109,24 @@ def classify(runtime_rc: int, verifier_rc: int, quality: int | None,
 
 def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Path, fuel: int,
               timeout_s: int, ptx: Path | None, run=subprocess.run,
-              workdir: Path | None = None, clock=time.monotonic) -> dict:
+              workdir: Path | None = None, clock=time.monotonic,
+              hyperparameters: dict | None = None) -> dict:
     """Mirrors scripts/test_algorithm in the monorepo:
-    `tig-runtime SETTINGS RAND_HASH NONCE SO --fuel F --output DIR [--ptx P --gpu 0]` writes
-    DIR/<nonce>.json, then `tig-verifier SETTINGS RAND_HASH NONCE DIR/<nonce>.json [--ptx P --gpu 0]`
-    prints `quality: N` and exits 0 on a valid solution."""
+    `tig-runtime SETTINGS RAND_HASH NONCE SO --fuel F --output DIR [--hyperparameters JSON]
+    [--ptx P --gpu 0]` writes DIR/<nonce>.json, then
+    `tig-verifier SETTINGS RAND_HASH NONCE DIR/<nonce>.json [--ptx P --gpu 0]`
+    prints `quality: N` and exits 0 on a valid solution. `{}` is passed as `{}`: the algorithm
+    receives Some(empty map), not None."""
     settings = json.dumps({"algorithm_id": "", "challenge_id": challenge_id, "track_id": track,
                            "block_id": "", "player_id": ""}, separators=(",", ":"))
     gpu_args = ["--ptx", str(ptx), "--gpu", "0"] if ptx else []
     with tempfile.TemporaryDirectory(dir=workdir) as td:
         out_file = Path(td) / f"{nonce}.json"
+        hp_args = ([] if hyperparameters is None else
+                   ["--hyperparameters",
+                    json.dumps(hyperparameters, separators=(",", ":"))])
         cmd = ["tig-runtime", settings, rand_hash, str(nonce), str(so),
-               "--fuel", str(fuel), "--output", td] + gpu_args
+               "--fuel", str(fuel), "--output", td] + hp_args + gpu_args
         t0 = clock()
         timed_out = False
         try:

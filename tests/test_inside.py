@@ -195,3 +195,36 @@ def test_build_keeps_the_diagnostics_past_20k_of_other_algorithms_warnings(tmp_p
                           lambda cmd, **kw: Result(1, "", stderr))
     assert own_error in relevant(out)
     assert dead_new_functions(out, {"mod.rs": ["solve"]}) == ["mod.rs: polish"]
+
+
+def _capture_run(seen):
+    def run(cmd, **kw):
+        seen.append(cmd)
+        if cmd[0] == "tig-runtime":
+            (Path(cmd[cmd.index("--output") + 1]) / f"{cmd[3]}.json").write_text("{}")
+        return Result(0, "quality: 1\n", "")
+    return run
+
+
+@pytest.mark.parametrize("hp, flag", [
+    ({"b": [2, 3], "a": 1}, '{"b":[2,3],"a":1}'),
+    ({}, "{}"),
+])
+def test_run_nonce_passes_hyperparameters_to_the_runtime_only(tmp_path, hp, flag):
+    seen = []
+    inside.run_nonce("c003", "n=1", "ab" * 32, 7, Path("/lib/x.so"), 10, 600, None,
+                     _capture_run(seen), tmp_path, hyperparameters=hp)
+    rt, ver = seen
+    # mutation: `if hyperparameters:` skips the flag for {}, which the benchmark ran with
+    # mutation: json.dumps without compact separators still parses, but pins a different argv
+    assert rt[rt.index("--hyperparameters") + 1] == flag
+    # mutation: appending the flag to the verifier call makes clap reject every verification
+    assert "--hyperparameters" not in ver
+
+
+def test_run_nonce_without_hyperparameters_passes_no_flag(tmp_path):
+    seen = []
+    inside.run_nonce("c003", "n=1", "ab" * 32, 7, Path("/lib/x.so"), 10, 600, None,
+                     _capture_run(seen), tmp_path)
+    # mutation: always passing the flag sends "null", which tig-runtime rejects as not an object
+    assert all("--hyperparameters" not in cmd for cmd in seen)

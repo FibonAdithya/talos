@@ -6,6 +6,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from statistics import mean
 
 from talos.challenges import MONOREPO_REF
 
@@ -70,8 +71,9 @@ def fetch_challenge_info(name: str, get_json=_get_json) -> ChallengeInfo:
     raise MainnetError(f"challenge {name!r} not found on mainnet")
 
 
-def top_algorithm(name: str, get_json=_get_json) -> tuple[str, int] | None:
-    """(algorithm_name, adoption) of the highest-adoption compiled algorithm, or None."""
+def top_algorithm(name: str, get_json=_get_json) -> tuple[str, str, int] | None:
+    """(algorithm_name, algorithm_id, adoption) of the highest-adoption compiled algorithm, or
+    None. The id is what a benchmark's precommit names its algorithm by."""
     block_id = _block_id(get_json)
     challenges = get_json(f"{MAINNET_API}/get-challenges?block_id={block_id}")
     algos = get_json(f"{MAINNET_API}/get-algorithms?block_id={block_id}")
@@ -81,7 +83,7 @@ def top_algorithm(name: str, get_json=_get_json) -> tuple[str, int] | None:
         raise MainnetError(f"challenge {name!r} not found on mainnet")
     compiled = {b["algorithm_id"]: bool((b.get("details") or {}).get("compile_success"))
                 for b in algos.get("binarys", [])}
-    best: tuple[str, int] | None = None
+    best: tuple[str, str, int] | None = None
     for algo in algos.get("codes", []):
         details = algo.get("details") or {}
         if details.get("challenge_id") != cid or not compiled.get(algo["id"]):
@@ -91,9 +93,68 @@ def top_algorithm(name: str, get_json=_get_json) -> tuple[str, int] | None:
         except (TypeError, ValueError):
             adoption = 0
         algo_name = details.get("name")
-        if adoption > 0 and algo_name and (best is None or adoption > best[1]):
-            best = (algo_name, adoption)
+        if adoption > 0 and algo_name and (best is None or adoption > best[2]):
+            best = (algo_name, algo["id"], adoption)
     return best
+
+
+@dataclass(frozen=True)
+class TrackHyperparameters:
+    """One track's best mainnet benchmark for an algorithm. Every field is None when no benchmark
+    qualified; `hyperparameters` alone is None when that benchmark ran without any."""
+    hyperparameters: dict | None
+    benchmark_id: str | None
+    player_id: str | None
+    mean_quality: float | None
+
+    def source(self) -> dict:
+        return {"benchmark_id": self.benchmark_id, "player_id": self.player_id,
+                "mean_quality": self.mean_quality}
+
+
+def top_hyperparameters(algorithm_id: str, tracks: list[str], fuel: int,
+                        get_json=_get_json) -> dict[str, TrackHyperparameters]:
+    """Per track, the hyperparameters of the highest mean-quality benchmark that ran
+    `algorithm_id` at exactly `fuel`, among every player's benchmarks in mainnet's recent window.
+    Frauds and benchmarks without a quality are skipped; ties go to the lower benchmark id. One
+    player that cannot be read raises: the choice is never made from a partial view. An
+    unexpected shape in the response (a missing key, a row that is not a dict) raises
+    MainnetError too, rather than a bare KeyError/TypeError out of `talos run`."""
+    block_id = _block_id(get_json)
+    try:
+        opow = get_json(f"{MAINNET_API}/get-opow?block_id={block_id}")
+        best: dict[str, tuple[float, str, dict]] = {}
+        for player in [row["player_id"] for row in opow.get("opow", [])]:
+            data = get_json(f"{MAINNET_API}/get-benchmarks?block_id={block_id}&player_id={player}")
+            frauds = {f["benchmark_id"] for f in data.get("frauds") or []}
+            quality = {b["id"]: (b.get("details") or {}).get("average_quality_by_bundle")
+                       for b in data.get("benchmarks") or []}
+            for pre in data.get("precommits") or []:
+                bid = pre["benchmark_id"]
+                settings, details = pre.get("settings") or {}, pre.get("details") or {}
+                bundles = quality.get(bid)
+                if (settings.get("algorithm_id") != algorithm_id
+                        or settings.get("track_id") not in tracks
+                        or details.get("fuel_budget") != fuel
+                        or bid in frauds or not bundles):  # None/[]: no quality to rank
+                    continue
+                score = mean(bundles)
+                held = best.get(settings["track_id"])
+                if held is None or score > held[0] or (score == held[0] and bid < held[1]):
+                    best[settings["track_id"]] = (score, bid, pre)
+        out: dict[str, TrackHyperparameters] = {}
+        for track in tracks:
+            if track not in best:
+                out[track] = TrackHyperparameters(None, None, None, None)
+                continue
+            score, bid, pre = best[track]
+            out[track] = TrackHyperparameters(pre["details"].get("hyperparameters"), bid,
+                                              pre["settings"].get("player_id"), float(score))
+        return out
+    except (KeyError, TypeError, ValueError) as e:
+        # get_json's own MainnetError (a RuntimeError) passes through this clause untouched;
+        # only a malformed-shape failure while parsing the response is converted.
+        raise MainnetError(f"unexpected /get-benchmarks data: {e!r}") from None
 
 
 def _walk(path: str, ref: str, get_json) -> list[str]:

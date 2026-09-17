@@ -20,7 +20,7 @@ def test_baseline_compiles_and_scores():
     info = mainnet.fetch_challenge_info(ch)
     top = mainnet.top_algorithm(ch)
     assert top is not None, f"no adopted compiled algorithm for {ch}"
-    name, adoption = top
+    name, _algorithm_id, adoption = top
     files = mainnet.fetch_algorithm_files(ch, name)
     bench = ModalBench()
     tr, ho = draw_nonce_sets(info.tracks[:1], new_rand_hash(), training_count=2, holdout_count=0)
@@ -45,7 +45,7 @@ def test_c3_knapsack_job(tmp_path):
     from talos.challenges import CHALLENGES
     ch = "knapsack"
     info = mainnet.fetch_challenge_info(ch)
-    name, _ = mainnet.top_algorithm(ch)
+    name, _algorithm_id, _adoption = mainnet.top_algorithm(ch)
     files = mainnet.fetch_algorithm_files(ch, name)
     tr, ho = draw_nonce_sets(info.tracks[:1], new_rand_hash(), training_count=2, holdout_count=2)
     b = C3Bench(tmp_path)

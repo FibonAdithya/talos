@@ -1,5 +1,6 @@
 import json
 import types
+from dataclasses import replace
 
 import pytest
 
@@ -333,7 +334,7 @@ def test_baseline_is_budget_checked_before_the_first_bench_call(tmp_path):
     loop.state.baseline = None
     calls_before = len(fb.calls)
     mainnet = types.SimpleNamespace(
-        top_algorithm=lambda ch: ("base", 1),
+        top_algorithm=lambda ch: ("base", "base_id", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
         fetch_template=lambda ch: "pub fn solve_challenge(")
     with pytest.raises(BudgetExhausted) as ei:
@@ -353,7 +354,7 @@ def test_baseline_compute_cost_is_charged_before_the_next_check(tmp_path):
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
     loop.state.baseline = None
     mainnet = types.SimpleNamespace(
-        top_algorithm=lambda ch: ("base", 1),
+        top_algorithm=lambda ch: ("base", "base_id", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
         fetch_template=lambda ch: "pub fn solve_challenge(")
     loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
@@ -371,7 +372,7 @@ def test_baseline_and_best_dirs_are_written(tmp_path):
     loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)])
     loop.state.baseline = None
     mainnet = types.SimpleNamespace(
-        top_algorithm=lambda ch: ("base", 1),
+        top_algorithm=lambda ch: ("base", "base_id", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
         fetch_template=lambda ch: "pub fn solve_challenge(")
     loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
@@ -588,7 +589,7 @@ def test_measure_baseline_keeps_a_stored_baseline_job_record(tmp_path):
         return real(request)
     fb.evaluate = evaluate
     mainnet = types.SimpleNamespace(
-        top_algorithm=lambda ch: ("base", 1),
+        top_algorithm=lambda ch: ("base", "base_id", 1),
         fetch_algorithm_files=lambda ch, name: BASE_FILES,
         fetch_template=lambda ch: "pub fn solve_challenge(")
     loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
@@ -743,3 +744,29 @@ def test_candidate_timeouts_follow_the_baseline_runtime_per_track(tmp_path):
                                    thresholds=Thresholds(runtime_ceiling=0.0))
     loop3.run()
     assert fb3.calls[0].timeouts is None
+
+
+def test_the_spec_hyperparameters_reach_baseline_candidates_and_prompts(tmp_path):
+    hp = {"t": {"x": 1}}
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(5)], budget=b)
+    loop.spec = replace(loop.spec, hyperparameters=hp,
+                        baseline_algorithm={"name": "pinned", "id": "p1", "adoption": 3})
+    loop.state.baseline = None
+
+    def no_top(ch):
+        raise AssertionError("the pinned algorithm must be used")
+    mainnet = types.SimpleNamespace(
+        top_algorithm=no_top,
+        fetch_algorithm_files=lambda ch, name: BASE_FILES,
+        fetch_template=lambda ch: "pub fn solve_challenge(")
+    loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
+    # mutation: measure_baseline not passing algorithm= asks mainnet again
+    assert loop.state.baseline.name == "pinned"
+    # mutation: not passing hyperparameters= measures the baseline without the map
+    assert fb.calls[0].hyperparameters == hp
+    loop.run()
+    # mutation: _request without hyperparameters= scores candidates without the map
+    assert len(fb.calls) >= 2 and all(c.hyperparameters == hp for c in fb.calls)
+    # mutation: _context without hyperparameters= leaves the model unaware of the keys
+    assert any('track t: {"x":1}' in user for _system, user in fp.calls)

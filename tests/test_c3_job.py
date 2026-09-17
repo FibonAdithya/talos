@@ -217,7 +217,7 @@ def test_the_pool_path_passes_run_one_positional_tuples_and_sorts_the_rows(tmp_p
     # mutation: swapping two positions in the task tuple (say nonce and fuel) sends the wrong
     # nonce or the wrong fuel to run_nonce, and _run_one unpacks it without noticing
     assert {t[3]: t for t in seen}[0] == ("c003", "t", HASH, 0, str(so), 7,
-                                          inside.NONCE_TIMEOUT_S, None, str(mono))
+                                          inside.NONCE_TIMEOUT_S, None, str(mono), None)
     assert [t[3] for t in seen] == [1, 0]  # the pool really did finish out of order
     r = json.loads((art / "results.json").read_text())
     # mutation: dropping the sort in `scored` writes the rows in completion order, and the
@@ -294,3 +294,34 @@ def test_per_track_timeouts_reach_each_nonce_task(tmp_path, monkeypatch):
     # mutation: reading nonce_timeout_s alone ignores the per-track cap the loop computed
     assert {t[6] for t in seen} == {42}
     assert inside.NONCE_TIMEOUT_S != 42
+
+
+def test_each_track_gets_its_own_hyperparameters_in_the_pool_tasks(tmp_path, monkeypatch):
+    mono, work, art = setup(tmp_path, n=1, baseline_q=200)
+    payload = json.loads((work / "payload.json").read_text())
+    payload["training"].append({"track": "u", "rand_hash": HASH, "start": 0, "count": 1})
+    payload["hyperparameters"] = {"t": {"x": 1}, "u": None}
+    (work / "payload.json").write_text(json.dumps(payload))
+    seen = []
+
+    def stub(task):
+        seen.append(task)
+        return {"track": task[1], "nonce": task[3], "ok": True, "quality": 120,
+                "runtime_ms": 5, "error": None}
+    monkeypatch.setattr(c3_job, "_run_one", stub)
+    c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(), monorepo=mono,
+                log=lambda *a: None, pool_factory=FakePool)
+    # mutation: putting the whole map in the task hands tig-runtime {"t": ..., "u": ...}
+    assert sorted((t[1], json.dumps(t[9])) for t in seen) == [("t", '{"x": 1}'), ("u", "null")]
+
+
+def test_the_serial_path_passes_the_hyperparameters_to_tig_runtime(tmp_path):
+    mono, work, art = setup(tmp_path, n=1, baseline_q=200)
+    payload = json.loads((work / "payload.json").read_text())
+    payload["hyperparameters"] = {"t": {"x": 1}}
+    (work / "payload.json").write_text(json.dumps(payload))
+    run = fake_run()
+    c3_job.main(workdir=work, artifacts_dir=art, run=run, monorepo=mono, log=lambda *a: None)
+    runtime = [c for c in run.calls if c[0] == "tig-runtime"]
+    # mutation: the serial branch not passing t[9] runs local and CPU jobs without the map
+    assert runtime and all(c[c.index("--hyperparameters") + 1] == '{"x":1}' for c in runtime)

@@ -19,11 +19,12 @@ import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
+from talos import mainnet as mainnet_api
 from talos.budget import Budget, Spend
 from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_image,
                               hardware_class)
 from talos.config import Config, ConfigError, ENV_KEYS, load, resolve_api_key, save
-from talos.mainnet import ChallengeInfo, MainnetError, fetch_challenge_info
+from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
 from talos.providers.codex_cli import list_codex_models
@@ -146,6 +147,24 @@ def _track_arg(answer: str | None) -> str | None:
     return answer.strip()
 
 
+def _mainnet_hyperparameters(api, challenge: str, info) -> tuple[dict | None, dict | None,
+                                                                 dict | None]:
+    """(baseline_algorithm, hyperparameters, hyperparameters_source) for a new job. The algorithm
+    is pinned whenever mainnet has one, so the baseline measured later is the code the map
+    belongs to. The map is None when no track has a benchmark of it at this fuel."""
+    top = api.top_algorithm(challenge)
+    if top is None:
+        return None, None, None  # resolve_baseline reports the missing algorithm
+    name, algorithm_id, adoption = top
+    algorithm = {"name": name, "id": algorithm_id, "adoption": adoption}
+    per_track = api.top_hyperparameters(algorithm_id, info.tracks, info.max_fuel)
+    found = {t: th for t, th in per_track.items() if th.benchmark_id is not None}
+    if not found:
+        return algorithm, None, None
+    return (algorithm, {t: per_track[t].hyperparameters for t in info.tracks},
+            {t: th.source() for t, th in found.items()})
+
+
 def cmd_setup(args, ask) -> int:
     root = Path.cwd()
     backend = ask(f"Compute backend ({' or '.join(BACKENDS)})", "modal")
@@ -248,7 +267,10 @@ def _fake_script(system: str, user: str) -> str:
 
 
 FAKE_MAINNET = types.SimpleNamespace(
-    top_algorithm=lambda ch: ("fake_base", 1),
+    top_algorithm=lambda ch: ("fake_base", "c003_a000", 1),
+    top_hyperparameters=lambda algorithm_id, tracks, fuel: {
+        t: TrackHyperparameters({"fake_boost": 1}, "fake-benchmark", "0xfake", 100.0)
+        for t in tracks},
     fetch_algorithm_files=lambda ch, name: {"mod.rs": "fn solve() { let k = 1; }\n"},
     fetch_template=lambda ch: "pub fn solve_challenge(")
 
@@ -422,6 +444,10 @@ def cmd_run(args, ask) -> int:
             print(f"job {spec.job_id} was started with track {spec.track or 'all'}; start a new "
                   f"job to change track", file=sys.stderr)
             return 2
+        if args.hyperparameters is not None:
+            print(f"job {spec.job_id} fixed its hyperparameters at start; start a new job to "
+                  f"change them", file=sys.stderr)
+            return 2
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
         if _codex_refused(cfg):
             return 2
@@ -521,6 +547,23 @@ def cmd_run(args, ask) -> int:
         print(f"unknown track {track!r} for {challenge}; active tracks: "
               f"{', '.join(info.tracks)}", file=sys.stderr)
         return 2
+    choice = args.hyperparameters
+    if choice is None:
+        # A blank answer is the default, as `_track_arg` treats a blank track answer: the wizard
+        # test's raw `ask` returns "" rather than the default.
+        choice = ("mainnet" if args.yes
+                  else ask("Hyperparameters (mainnet or none)", "mainnet").strip() or "mainnet")
+    if choice not in ("mainnet", "none"):
+        print(f"unknown hyperparameters choice {choice!r}; use mainnet or none", file=sys.stderr)
+        return 2
+    algorithm = hyperparameters = hp_source = None
+    if choice == "mainnet":
+        api = FAKE_MAINNET if cfg.provider == "fake" else mainnet_api
+        try:
+            algorithm, hyperparameters, hp_source = _mainnet_hyperparameters(api, challenge, info)
+        except MainnetError as e:
+            print(f"mainnet unreachable: {e}", file=sys.stderr)
+            return 1
     rand_hash = new_rand_hash()
     training, holdout = draw_nonce_sets(info.tracks, rand_hash)
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
@@ -532,12 +575,21 @@ def cmd_run(args, ask) -> int:
                    model=cfg.model, mode=cfg.mode, budget=budget, rand_hash=rand_hash,
                    tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
                    created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
-                   track=track)
+                   track=track, baseline_algorithm=algorithm, hyperparameters=hyperparameters,
+                   hyperparameters_source=hp_source)
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
     (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n")
     scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
-    print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}")
+    if hyperparameters is None and algorithm is not None:
+        hp_line = (f"hyperparameters: none (no mainnet benchmark of {algorithm['name']} "
+                   f"at fuel {info.max_fuel})")
+    elif hyperparameters is None:
+        hp_line = "hyperparameters: none"
+    else:
+        used = sum(1 for v in hyperparameters.values() if v is not None)
+        hp_line = f"hyperparameters: {used}/{len(info.tracks)} tracks from mainnet"
+    print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}; {hp_line}")
     return execute_job(spec, store, cfg, resume=False)
 
 
@@ -601,6 +653,9 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--direction")
     r.add_argument("--direction-file")
     r.add_argument("--track", help="one active track to optimise, or all (the default)")
+    r.add_argument("--hyperparameters", choices=["mainnet", "none"],
+                   help="per-track hyperparameters from the baseline algorithm's best mainnet "
+                        "benchmark (mainnet, the default) or none")
     r.add_argument("--mode", choices=["single-shot", "agentic"])
     r.add_argument("--budget-usd", type=float)
     r.add_argument("--budget-hours", type=float)
