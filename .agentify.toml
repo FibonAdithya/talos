@@ -14,7 +14,7 @@ ignore_references = [
   # and `talos setup`; none exist in a clean checkout.
   "runs/", ".talos/", "talos.config.json",
   "job.json", "state.json", "timeline.jsonl", "tacit.md", "CHALLENGE.md",
-  "scores.md", "hypotheses.md", "evidence_draft.md",
+  "scores.md", "hypotheses.md", "evidence_draft.md", "hyperparameters.json",
   # Written by agentic mode into the throwaway worktree, not this repo's own.
   ".claude/settings.json",
 ]

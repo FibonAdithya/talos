@@ -85,6 +85,12 @@ Run per job. Prompts interactively for anything not given as a flag:
   every other track's training nonces as a regression guard: no other track may get worse.
   The model still sees and may edit every file; the flag narrows what is scored and what it
   is told to target.
+- `--hyperparameters mainnet|none` — `mainnet` (the default; the interactive prompt asks)
+  runs the baseline and every candidate with the per-track hyperparameters of the baseline
+  algorithm's best-quality benchmark on mainnet at the job's fuel, frozen at job start. A
+  track with no such benchmark runs without any. `none` runs every nonce without
+  hyperparameters, as Talos did before. It cannot be changed on `--resume`. The package
+  lists the values and their source benchmark in `README.md` and `hyperparameters.json`.
 - `--budget-usd`, `--budget-hours`, `--budget-iterations`, `--budget-compute-usd` — see
   Budget below.
 - `--resume <job_id>` — reloads `runs/<job_id>/job.json` and `state.json` and continues a
@@ -230,6 +236,8 @@ research-economy cap, not a TIG rule: `Thresholds.runtime_ceiling` in `talos/loo
 the multiplier and 0 disables it. The Modal score function takes the timeout as an
 argument, so after upgrading past this change run `talos setup` again on the Modal backend
 before the next run; the C3 job ships its own code and needs nothing.
+The Modal score function also takes the track's hyperparameters as an argument, so the same
+applies after upgrading past that change: run `talos setup` again on Modal first.
 
 When the loop recalls failed attempts to the model, each line carries what the run measured:
 the mean delta, the worst track and its delta, the candidate's runtime relative to the

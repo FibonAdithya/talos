@@ -50,6 +50,11 @@ progress.
    baseline cache key (`talos/challenges.py::hardware_class`,
    `talos/baseline.py::cache_key`); a cached baseline measured under different
    hardware or fuel is a different key, never a hit.
+   Both sides also run with identical hyperparameters: the per-track map is
+   frozen into `job.json` (`talos/state.py::JobSpec`) together with the
+   algorithm it belongs to, every request takes it from there
+   (`talos/loop.py::Loop._request`, `talos/baseline.py::resolve_baseline`), and
+   `talos/inside.py::run_nonce` passes it to `tig-runtime`.
    With `--track`, the loop slices both sides with the same `NonceSet` lists
    (`talos/scoring.py::select`, `talos/scoring.py::focus_sets`); the guard compares
    the other tracks' training nonces against the cached baseline training results
@@ -76,6 +81,9 @@ progress.
    exit codes in `talos/inside.py` were read from `tig-runtime` at that
    commit. Bumping either pin silently changes what every cached baseline
    meant, and the Modal app must be redeployed (`talos setup`) before any run.
+   The baseline cache key also includes the hyperparameter map
+   (`talos/baseline.py::effective_hyperparameters`); a key computed without one
+   is unchanged from before the map existed.
 4. **An edit outside the algorithm files fails the whole iteration; its
    in-scope blocks are never applied either.** `talos/edits.py::apply_edit_response`
    reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration
