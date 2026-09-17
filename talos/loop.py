@@ -153,7 +153,8 @@ class Loop:
         return EvalRequest(challenge=self.spec.challenge, files=files, training=training,
                            holdout=holdout, fuel=self.spec.fuel, baseline_training=base,
                            rule=self.rule, prior_functions=prior,
-                           timeouts=self._timeouts(baseline_training))
+                           timeouts=self._timeouts(baseline_training),
+                           hyperparameters=self.spec.hyperparameters)
 
     def _timeouts(self, baseline_training) -> dict[str, int] | None:
         if self.t.runtime_ceiling <= 0 or not baseline_training:
@@ -194,7 +195,9 @@ class Loop:
         rec, template = resolve_baseline(self.spec.challenge, self.spec.training,
                                          self.spec.holdout, self.spec.fuel, _BudgetedBench(self),
                                          cache_dir, hardware_class, rule=self.rule,
-                                         log=lambda m: self._event("baseline", message=m), **kw)
+                                         log=lambda m: self._event("baseline", message=m),
+                                         algorithm=self.spec.baseline_algorithm,
+                                         hyperparameters=self.spec.hyperparameters, **kw)
         self.state.pending_job = None
         self.state.baseline = rec
         self.template_rs = template
@@ -252,7 +255,8 @@ class Loop:
                              is_gpu=CHALLENGES[self.spec.challenge].is_gpu,
                              track=self.spec.track,
                              guard_tracks=([t for t in self.spec.tracks if t != self.spec.track]
-                                           if self.spec.track else []))
+                                           if self.spec.track else []),
+                             hyperparameters=self.spec.hyperparameters)
 
     # ── single-shot propose + edit ────────────────────────────────────
 
