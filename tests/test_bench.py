@@ -361,3 +361,10 @@ def test_modal_starmap_carries_each_tracks_hyperparameters(monkeypatch):
     seen.clear()
     ModalBench().evaluate(req(training=two, holdout=[]))
     assert seen == [("t", None), ("u", None)]
+    seen.clear()
+    # forced held-out (no baseline_training): the holdout starmap call must carry the map too
+    r_ho = req(training=[], holdout=two, baseline=None)
+    r_ho.hyperparameters = {"t": {"x": 1}, "u": None}
+    ModalBench().evaluate(r_ho)
+    # mutation: passing None instead of request.hyperparameters to the holdout _score call
+    assert seen == [("t", {"x": 1}), ("u", None)]
