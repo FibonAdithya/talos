@@ -231,3 +231,20 @@ def test_top_hyperparameters_raises_when_one_player_cannot_be_read():
     # mutation: skipping a failed player chooses from a partial view without saying so
     with pytest.raises(mainnet.MainnetError):
         mainnet.top_hyperparameters("a2", ["T1"], FUEL, get_json=gj)
+
+
+def test_top_hyperparameters_raises_mainneterror_on_a_malformed_precommit():
+    def gj(url):
+        if url.endswith("/get-block"):
+            return BLOCK
+        if "/get-opow?block_id=b1" in url:
+            return {"opow": [{"player_id": "0xp1"}]}
+        if "/get-benchmarks?block_id=b1&player_id=" in url:
+            # missing "benchmark_id": a shape mainnet has never sent, but not impossible
+            return {"precommits": [{"settings": {"algorithm_id": "a2", "track_id": "T1"},
+                                    "details": {"fuel_budget": FUEL}}],
+                    "benchmarks": [], "proofs": [], "frauds": []}
+        raise AssertionError(url)
+    # mutation: leaving the KeyError unconverted sends a bare traceback out of `talos run`
+    with pytest.raises(mainnet.MainnetError):
+        mainnet.top_hyperparameters("a2", ["T1"], FUEL, get_json=gj)

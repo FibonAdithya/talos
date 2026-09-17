@@ -117,37 +117,44 @@ def top_hyperparameters(algorithm_id: str, tracks: list[str], fuel: int,
     """Per track, the hyperparameters of the highest mean-quality benchmark that ran
     `algorithm_id` at exactly `fuel`, among every player's benchmarks in mainnet's recent window.
     Frauds and benchmarks without a quality are skipped; ties go to the lower benchmark id. One
-    player that cannot be read raises: the choice is never made from a partial view."""
+    player that cannot be read raises: the choice is never made from a partial view. An
+    unexpected shape in the response (a missing key, a row that is not a dict) raises
+    MainnetError too, rather than a bare KeyError/TypeError out of `talos run`."""
     block_id = _block_id(get_json)
-    opow = get_json(f"{MAINNET_API}/get-opow?block_id={block_id}")
-    best: dict[str, tuple[float, str, dict]] = {}
-    for player in [row["player_id"] for row in opow.get("opow", [])]:
-        data = get_json(f"{MAINNET_API}/get-benchmarks?block_id={block_id}&player_id={player}")
-        frauds = {f["benchmark_id"] for f in data.get("frauds") or []}
-        quality = {b["id"]: (b.get("details") or {}).get("average_quality_by_bundle")
-                   for b in data.get("benchmarks") or []}
-        for pre in data.get("precommits") or []:
-            bid = pre["benchmark_id"]
-            settings, details = pre.get("settings") or {}, pre.get("details") or {}
-            bundles = quality.get(bid)
-            if (settings.get("algorithm_id") != algorithm_id
-                    or settings.get("track_id") not in tracks
-                    or details.get("fuel_budget") != fuel
-                    or bid in frauds or not bundles):  # None or [] (a list): no quality to rank
+    try:
+        opow = get_json(f"{MAINNET_API}/get-opow?block_id={block_id}")
+        best: dict[str, tuple[float, str, dict]] = {}
+        for player in [row["player_id"] for row in opow.get("opow", [])]:
+            data = get_json(f"{MAINNET_API}/get-benchmarks?block_id={block_id}&player_id={player}")
+            frauds = {f["benchmark_id"] for f in data.get("frauds") or []}
+            quality = {b["id"]: (b.get("details") or {}).get("average_quality_by_bundle")
+                       for b in data.get("benchmarks") or []}
+            for pre in data.get("precommits") or []:
+                bid = pre["benchmark_id"]
+                settings, details = pre.get("settings") or {}, pre.get("details") or {}
+                bundles = quality.get(bid)
+                if (settings.get("algorithm_id") != algorithm_id
+                        or settings.get("track_id") not in tracks
+                        or details.get("fuel_budget") != fuel
+                        or bid in frauds or not bundles):  # None/[]: no quality to rank
+                    continue
+                score = mean(bundles)
+                held = best.get(settings["track_id"])
+                if held is None or score > held[0] or (score == held[0] and bid < held[1]):
+                    best[settings["track_id"]] = (score, bid, pre)
+        out: dict[str, TrackHyperparameters] = {}
+        for track in tracks:
+            if track not in best:
+                out[track] = TrackHyperparameters(None, None, None, None)
                 continue
-            score = mean(bundles)
-            held = best.get(settings["track_id"])
-            if held is None or score > held[0] or (score == held[0] and bid < held[1]):
-                best[settings["track_id"]] = (score, bid, pre)
-    out: dict[str, TrackHyperparameters] = {}
-    for track in tracks:
-        if track not in best:
-            out[track] = TrackHyperparameters(None, None, None, None)
-            continue
-        score, bid, pre = best[track]
-        out[track] = TrackHyperparameters(pre["details"].get("hyperparameters"), bid,
-                                          pre["settings"].get("player_id"), float(score))
-    return out
+            score, bid, pre = best[track]
+            out[track] = TrackHyperparameters(pre["details"].get("hyperparameters"), bid,
+                                              pre["settings"].get("player_id"), float(score))
+        return out
+    except (KeyError, TypeError, ValueError) as e:
+        # get_json's own MainnetError (a RuntimeError) passes through this clause untouched;
+        # only a malformed-shape failure while parsing the response is converted.
+        raise MainnetError(f"unexpected /get-benchmarks data: {e!r}") from None
 
 
 def _walk(path: str, ref: str, get_json) -> list[str]:
