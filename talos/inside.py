@@ -68,10 +68,17 @@ def unstage_algorithm(monorepo: Path, challenge: str, name: str) -> None:
     mod_rs.write_text("\n".join(kept) + "\n")
 
 
+# A cap on what leaves the container, not a window on the diagnostics: every consumer filters
+# with diagnostics.relevant first and truncates after. A 20000-byte window here kept 6 of the
+# 8 errors of run 20260916-095103 iteration 5, cut off before anything could drop the other
+# algorithms' warnings.
+BUILD_OUTPUT_CAP = 1_000_000
+
+
 def build(monorepo: Path, challenge: str, name: str, run=subprocess.run) -> tuple[bool, str]:
     r = run(["build_algorithm", name], cwd=monorepo, capture_output=True, text=True)
     out = (r.stdout or "") + (r.stderr or "")
-    return r.returncode == 0, out[-20000:]
+    return r.returncode == 0, out[-BUILD_OUTPUT_CAP:]
 
 
 def artifact_paths(monorepo: Path, challenge: str, name: str) -> tuple[Path, Path | None]:

@@ -1,8 +1,9 @@
 """Apply an LLM edit response to the algorithm files. Any block naming a path that is not
 one of the algorithm's own files is rejected outright, never resolved by basename. The one
-spelling accepted besides the bare name is the candidate's own monorepo path
-(`.../talos_cand/<name>`), because that is how the compiler prints it and a fix response
-copies it; another algorithm's directory with the same basename is still rejected."""
+spelling accepted besides the bare name is the candidate's own directory, with or without
+the directories above it (`.../talos_cand/<name>`, `talos_cand/<name>`), because that is how
+the compiler prints it and a fix response copies it; another algorithm's directory with the
+same basename is still rejected."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -27,11 +28,9 @@ def _resolve(path: str, files: dict[str, str]) -> str | None:
     """The algorithm-file name `path` denotes, or None when it is out of scope."""
     if path in files:
         return path
-    prefix = f"/{ALGO_NAME}/"
-    if prefix in path:
-        name = path.split(prefix, 1)[1]
-        if name in files:
-            return name
+    head, sep, name = path.rpartition(f"{ALGO_NAME}/")
+    if sep and (head == "" or head.endswith("/")) and name in files:
+        return name
     return None
 
 

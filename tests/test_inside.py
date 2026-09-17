@@ -175,6 +175,28 @@ def test_run_nonce_handles_a_verifier_timeout(tmp_path):
     assert row["error"] == "timeout" and not row["ok"] and row["quality"] is None
 
 
+def test_build_keeps_the_diagnostics_past_20k_of_other_algorithms_warnings(tmp_path):
+    # In run 20260916-095103 every successful build log came back exactly 20000 bytes, and
+    # iteration 5's kept 6 of its 8 errors: the raw cap was applied before anything filtered
+    # the other algorithms' warnings out. mutation: restoring `out[-20000:]` drops the error
+    # and the candidate's own dead-code warning, which sit before the foreign spam
+    from talos.diagnostics import dead_new_functions, relevant
+    own_error = ("error[E0308]: mismatched types\n"
+                 "   --> tig-algorithms/src/knapsack/talos_cand/mod.rs:9:17\n\n")
+    own_dead = ("warning: function `polish` is never used\n"
+                "   --> tig-algorithms/src/knapsack/talos_cand/mod.rs:3:4\n\n")
+    foreign = ("warning: unused variable: `snap`\n"
+               "    --> tig-algorithms/src/knapsack/superfast_knap_v1/track5.rs:2069:17\n"
+               "     |\n2069 |             let snap = state.clone_solution();\n"
+               "     |                 ^^^^ help: prefix it with an underscore\n\n")
+    stderr = own_error + own_dead + foreign * 100
+    assert len(stderr) > 20000
+    _, out = inside.build(tmp_path, "knapsack", "talos_cand",
+                          lambda cmd, **kw: Result(1, "", stderr))
+    assert own_error in relevant(out)
+    assert dead_new_functions(out, {"mod.rs": ["solve"]}) == ["mod.rs: polish"]
+
+
 def _capture_run(seen):
     def run(cmd, **kw):
         seen.append(cmd)

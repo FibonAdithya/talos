@@ -322,6 +322,32 @@ def test_modal_starmap_carries_the_per_track_timeout(monkeypatch):
     assert timeouts == [NONCE_TIMEOUT_S] * 3
 
 
+def test_a_stale_deploy_is_reported_at_once_not_retried_as_an_outage(monkeypatch):
+    # The PR that added timeout_s to score_nonce needs `talos setup` re-run on Modal. Without
+    # this check a client talking to the old deploy retried the TypeError for the whole
+    # 900 s window and then reported "Modal unreachable". mutation: treating the TypeError
+    # like a transport error brings the 17 retries and the wrong diagnosis back
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": "ok"}
+
+        def starmap(self, args):
+            raise TypeError("score_nonce() takes 5 positional arguments but 6 were given")
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    clock, sleeps = FakeClock(), []
+    b = ModalBench(clock=clock, sleep=recording_sleep(clock, sleeps))
+    with pytest.raises(BenchUnavailable, match="talos setup"):
+        b.evaluate(req(baseline=base(100)))
+    assert sleeps == []
+
+
 def test_hyperparameters_for_a_track():
     from talos.bench import hyperparameters_for
     hp = {"t": {"x": 1}, "u": None, "e": {}}

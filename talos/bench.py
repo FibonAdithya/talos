@@ -34,6 +34,12 @@ class BenchUnavailable(Exception):
     pass
 
 
+def _stale_deploy(e: Exception) -> bool:
+    """A remote function refusing its arguments is a deploy older than this client, never a
+    transport outage. Modal re-raises the container's TypeError with its message intact."""
+    return "positional argument" in str(e) or "unexpected keyword argument" in str(e)
+
+
 def timeout_for(timeouts: dict[str, int] | None, track: str) -> int:
     return NONCE_TIMEOUT_S if timeouts is None else timeouts.get(track, NONCE_TIMEOUT_S)
 
@@ -160,6 +166,11 @@ class ModalBench:
             except BenchUnavailable:
                 raise
             except Exception as e:  # noqa: BLE001 - Modal raises many transport types
+                if _stale_deploy(e):
+                    raise BenchUnavailable(
+                        f"the deployed {self.app_name} app predates this client "
+                        f"({type(e).__name__}: {_redact(str(e))[:200]}). "
+                        f"Run `talos setup` to redeploy.") from None
                 if deadline is None:
                     deadline = self._clock() + self.retry_window_s
                 if self._clock() + delay > deadline:

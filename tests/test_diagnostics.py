@@ -67,3 +67,18 @@ def test_defined_functions_finds_free_functions_methods_and_generics():
     text = ("fn a() {}\n  pub fn b(x: i32) {}\nimpl S { pub(crate) fn c<T>(&self) {} }\n"
             "let fnx = 1;\n")
     assert defined_functions(text) == ["a", "b", "c"]
+
+
+def test_dead_new_methods_grouped_in_one_warning_are_all_reported():
+    # rustc groups unused methods of one impl: the run's logs carry 8 lines of the form
+    # "methods `a`, `b`, and `c` are never used". mutation: matching only the singular form
+    # scores a candidate whose new impl is dead in full
+    base = {"track1.rs": ["solve", "old"]}
+    out = ("warning: methods `old`, `relax`, and `polish` are never used\n"
+           "   --> tig-algorithms/src/knapsack/talos_cand/track1.rs:40:8\n\n"
+           "warning: functions `a` and `b` are never used\n"
+           "   --> tig-algorithms/src/knapsack/superfast_knap_v1/track1.rs:1:1\n\n"
+           "warning: associated functions `mk` and `go` are never used\n"
+           "   --> tig-algorithms/src/knapsack/talos_cand/track1.rs:80:8\n")
+    assert dead_new_functions(out, base) == ["track1.rs: relax", "track1.rs: polish",
+                                            "track1.rs: mk", "track1.rs: go"]

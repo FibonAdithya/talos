@@ -10,8 +10,10 @@ from talos.inside import ALGO_NAME
 
 _DIAG_START = re.compile(r"^(warning|error)(\[E\d+\])?:")
 _LOCATION = re.compile(r"^\s*-->\s*(\S+?):\d+", re.M)
+# rustc groups the unused methods of one impl: "methods `a`, `b`, and `c` are never used".
 _NEVER_USED = re.compile(
-    r"^warning: (?:function|method|associated function) `(\w+)` is never used\n"
+    r"^warning: (?:functions?|methods?|associated functions?) "
+    r"((?:`\w+`(?:, and |, | and )?)+) (?:is|are) never used\n"
     r"\s*-->\s*(\S+?):\d+", re.M)
 
 
@@ -63,11 +65,11 @@ def dead_new_functions(output: str, prior_functions: dict[str, list[str]]) -> li
     calls: the candidate compiled, but the change is not on the solve path and scoring it
     repeats the prior result exactly. Each entry is `<file>: <name>`."""
     found = []
-    for name, path in _NEVER_USED.findall(output):
+    for names, path in _NEVER_USED.findall(output):
         if not _own(path):
             continue
         rel = path.split(f"/{ALGO_NAME}/", 1)[1]
-        if name in prior_functions.get(rel, ()):
-            continue
-        found.append(f"{rel}: {name}")
+        for name in re.findall(r"`(\w+)`", names):
+            if name not in prior_functions.get(rel, ()):
+                found.append(f"{rel}: {name}")
     return found

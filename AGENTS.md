@@ -88,10 +88,10 @@ progress.
    in-scope blocks are never applied either.** `talos/edits.py::apply_edit_response`
    reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration
    on any of them, including in a compile-fix round. The only spelling accepted
-   besides the bare file name is the candidate's own monorepo path
-   (`.../talos_cand/<name>`, `talos/edits.py::_resolve`), because that is how the
-   compiler prints it; another algorithm's directory with the same basename is
-   still rejected. With `codex-cli` the
+   besides the bare file name is the candidate's own directory, with or without the
+   directories above it (`.../talos_cand/<name>`, `talos_cand/<name>`;
+   `talos/edits.py::_resolve`), because that is how the compiler prints it; another
+   algorithm's directory with the same basename is still rejected. With `codex-cli` the
    sandbox settings are ignored, so `talos/agentic.py::read_back` is the only
    enforcement, which is why agentic codex is opt-in behind
    `TALOS_ALLOW_CODEX_AGENTIC`.
