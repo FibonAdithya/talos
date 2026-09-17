@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
+from pathlib import Path
 
 from talos.executables import argv0
 from talos.providers import ProviderAuthError, ProviderError
@@ -19,15 +21,21 @@ class ClaudeCli:
         self.timeout_s = timeout_s
 
     def complete(self, system: str, user: str) -> Completion:
-        cmd = [argv0("claude"), "-p", "--output-format", "json", "--model", self.model,
-               "--system-prompt", system]
-        try:
-            r = self._run(cmd, input=user, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=self.timeout_s)
-        except FileNotFoundError:
-            raise ProviderAuthError("claude CLI not found on PATH; install Claude Code") from None
-        except subprocess.TimeoutExpired:
-            raise ProviderError("claude CLI timed out") from None
+        # The system prompt goes in a file, not argv. On Windows an npm-installed `claude.cmd`
+        # runs under cmd.exe, which cuts an argument at its first newline, drops every argument
+        # after it, and still exits 0; it also refuses a command line over 8191 characters.
+        with tempfile.TemporaryDirectory() as td:
+            sp = Path(td) / "system.md"
+            sp.write_text(system, encoding="utf-8", newline="\n")
+            cmd = [argv0("claude"), "-p", "--output-format", "json", "--model", self.model,
+                   "--system-prompt-file", str(sp)]
+            try:
+                r = self._run(cmd, input=user, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=self.timeout_s)
+            except FileNotFoundError:
+                raise ProviderAuthError("claude CLI not found on PATH; install Claude Code") from None
+            except subprocess.TimeoutExpired:
+                raise ProviderError("claude CLI timed out") from None
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "")[-500:]
             if "login" in err.lower() or "auth" in err.lower():

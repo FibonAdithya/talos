@@ -172,3 +172,21 @@ def test_c3_calls_start_the_resolved_cli(tmp_path, windows_path):
     # mutation: either c3 call site building argv from the bare name
     assert setup and set(setup) == {r"C:\bin\c3.cmd"}
     assert bench == [r"C:\bin\c3.cmd"]
+
+
+def test_claude_cli_sends_the_system_prompt_in_a_file_not_argv():
+    system = "line one\nline two & \"quoted\" 100%\n" + "rule\n" * 2000
+    seen = {}
+
+    def run(cmd, **kw):
+        path = cmd[cmd.index("--system-prompt-file") + 1]
+        with open(path, encoding="utf-8", newline="") as f:
+            seen.update(cmd=cmd, file=f.read(), input=kw.get("input"))
+        return _Done()
+
+    ClaudeCli(model="m", run=run).complete(system, "USER")
+    # mutation: --system-prompt in argv. On Windows an npm `claude.cmd` receives it cut at the
+    # first newline, with every argument after it dropped and exit 0 (MEASURED on Windows CI);
+    # an argv over 8191 characters fails with "The command line is too long."
+    assert "--system-prompt" not in seen["cmd"] and not any("line two" in a for a in seen["cmd"])
+    assert seen["file"] == system and seen["input"] == "USER"

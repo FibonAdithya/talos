@@ -101,7 +101,7 @@ def test_claude_cli_parses_json_result_and_cost():
     def run(cmd, input=None, **kw):
         # mutation: shutil.which() in argv[0] makes this machine-dependent
         assert cmd[:2] == ["claude", "-p"] and "--output-format" in cmd and "json" in cmd
-        assert "--system-prompt" in cmd and input == "USER"
+        assert "--system-prompt-file" in cmd and input == "USER"
         class R:
             returncode = 0
             stdout = json.dumps({"result": "the code", "total_cost_usd": 0.42,
