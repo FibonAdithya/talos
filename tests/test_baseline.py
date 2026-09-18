@@ -32,6 +32,18 @@ def test_resolve_compiles_and_scores_both_sets(tmp_path):
     assert len(fb.calls) == 1 and fb.holdout_runs == 1
 
 
+def test_baseline_log_prints_adoption_as_a_percentage(tmp_path):
+    # mainnet adoption is a fixed-point fraction, 10**18 = 100%; the record keeps the raw integer
+    # mutation: logging the raw 18-digit integer, or dividing by the wrong power of ten
+    fb = FakeBench(lambda ch, files, ns: [1 for _ in ns.nonces()])
+    lines = []
+    rec, _ = resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                              rule=BeatRule(), log=lines.append,
+                              mainnet=fake_mainnet(("knap_lean", "k1", 837530541350171022)))
+    assert lines == ["baseline knap_lean (adoption 83.75%): compiling and scoring 1 file(s)"]
+    assert rec.adoption == 837530541350171022
+
+
 def test_cache_hit_skips_bench(tmp_path):
     # mutation: ignoring the cache re-measures and charges the user twice
     fb = FakeBench(lambda ch, files, ns: [1 for _ in ns.nonces()])
