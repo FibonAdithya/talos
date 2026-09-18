@@ -320,6 +320,23 @@ def test_fetch_rejects_a_document_with_no_sha256(tmp_path):
         assert not dest.exists()
 
 
+def test_fetch_rejects_a_non_https_download_url(tmp_path):
+    doc = {"inline": False, "download_url": "file:///etc/passwd",
+           "sha256": hashlib.sha256(b"x").hexdigest()}
+    seen = {}
+
+    def fetch_url(url, timeout_s):
+        seen["called"] = True
+        return b"x"
+
+    t = McpTransport("k", client=FakeClient({"read_artifact": doc}), fetch_url=fetch_url)
+    # mutation: dropping the scheme check lets a server-supplied URL reach urlopen with any
+    # scheme, including file:// on this machine
+    with pytest.raises(C3CommandError):
+        t.fetch("job_1", "results.json", tmp_path / "results.json")
+    assert "called" not in seen
+
+
 def test_fetch_downloads_when_the_artifact_is_too_big_for_inline(tmp_path):
     body = b"x" * 2_000_000
     doc = {"inline": False, "size_bytes": len(body), "download_url": "https://storage/x",

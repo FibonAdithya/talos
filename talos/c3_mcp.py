@@ -226,6 +226,9 @@ class McpTransport:
             url = doc.get("download_url")
             if not url:
                 raise C3CommandError(f"c3 read_artifact gave neither content nor a URL for {path}")
+            if not str(url).startswith("https://"):
+                # download_url is server-supplied; urlopen honours file:// and other schemes
+                raise C3CommandError(f"c3 read_artifact gave an unsupported URL scheme for {path}")
             raw = self._fetch_url(url, self._timeout_s)
         want = doc.get("sha256")
         if not isinstance(want, str) or not want:
