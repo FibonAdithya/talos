@@ -69,6 +69,11 @@ def check_c3(run=None, api_key: str | None = None, transport=None) -> float:
     """Confirms C3 is reachable and authenticated — over MCP when a key is configured, over the
     `c3` CLI otherwise — and returns the credit balance in GBP. 0.0 means "could not read it"."""
     from talos.c3_mcp import McpAuthError
+
+    def key_rejected(e: Exception) -> str:
+        return (f"C3 rejected the API key: {e}; check `c3 apikey list` and "
+                f"run `talos setup` again")
+
     if transport is not None:
         t = transport
     elif run is not None:
@@ -78,8 +83,7 @@ def check_c3(run=None, api_key: str | None = None, transport=None) -> float:
     try:
         t.whoami()
     except McpAuthError as e:
-        raise ConfigError(f"C3 rejected the API key: {e}; check `c3 apikey list` and "
-                          f"run `talos setup` again") from None
+        raise ConfigError(key_rejected(e)) from None
     except C3CommandError as e:
         keyed = api_key or os.environ.get("C3_API_KEY")
         fix = ("check the C3 API key (`c3 apikey list`)" if keyed
@@ -88,6 +92,10 @@ def check_c3(run=None, api_key: str | None = None, transport=None) -> float:
         raise ConfigError(f"C3 login check failed: {e}; {fix} and retry") from None
     try:
         balance = t.balance_gbp()
+    except McpAuthError as e:
+        # McpAuthError is a C3CommandError; without this clause it falls into the branch
+        # below and only warns, letting a revoked key through as if it had credit
+        raise ConfigError(key_rejected(e)) from None
     except C3CommandError as e:
         print(f"warning: could not read the C3 balance: {e}", file=sys.stderr)
         return 0.0
@@ -207,9 +215,15 @@ def cmd_setup(args, ask) -> int:
         return 1
     try:
         if backend == "c3":
-            check_key = c3_api_key or os.environ.get("C3_API_KEY") or None
-            print("C3: using the hosted MCP endpoint with your API key; no c3 CLI needed."
-                  if check_key else "C3: using the c3 CLI and its `c3 login` session.")
+            env_key = os.environ.get("C3_API_KEY") or None
+            check_key = c3_api_key or env_key
+            if c3_api_key:
+                print("C3: using the hosted MCP endpoint with your API key; no c3 CLI needed.")
+            elif env_key:
+                print("C3: using the hosted MCP endpoint with the C3_API_KEY in your "
+                      "environment; a shell without it falls back to the c3 CLI.")
+            else:
+                print("C3: using the c3 CLI and its `c3 login` session.")
             check_c3(api_key=check_key)
         else:
             deploy_bench(token_id or None, token_secret or None)

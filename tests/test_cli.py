@@ -1445,6 +1445,26 @@ def test_check_c3_unreadable_balance_warns_and_returns_zero(monkeypatch, capsys)
     assert "could not read the C3 balance" in capsys.readouterr().err
 
 
+def test_check_c3_reports_a_key_rejected_at_balance_as_a_key_problem(monkeypatch):
+    from talos.c3_mcp import McpAuthError
+
+    class T:
+        name = "mcp"
+
+        def whoami(self):
+            return {}
+
+        def balance_gbp(self):
+            raise McpAuthError("the C3 API key was rejected")
+
+    # mutation: remove the new McpAuthError clause in the balance_gbp try, letting
+    # McpAuthError (a C3CommandError subclass) fall into the generic warning-and-0.0 path,
+    # which downgrades a revoked key to a warning instead of stopping setup
+    with pytest.raises(ConfigError) as ei:
+        cli.check_c3(transport=T())
+    assert "C3 rejected the API key" in str(ei.value)
+
+
 def test_check_c3_with_an_injected_run_drives_the_cli_even_with_a_key(monkeypatch):
     def no_mcp(api_key, run=None):
         raise AssertionError("an injected `run` means the CLI; this would be a network call")
@@ -1467,9 +1487,18 @@ def test_setup_checks_c3_with_the_environment_key_and_says_which_transport(tmp_p
     assert checked == ["c3_key_env"]
     keyed_out = capsys.readouterr().out
     assert "MCP" in keyed_out and "`c3 login`" not in keyed_out
+    # mutation: the same "no c3 CLI needed" line for a typed key is wrong for an environment
+    # key, since a shell without C3_API_KEY set falls back to the c3 CLI
+    assert "C3_API_KEY" in keyed_out
     monkeypatch.delenv("C3_API_KEY")
     assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", ""])) == 0
     # mutation: a fixed line tells a CLI user that nothing needs installing
     keyless_out = capsys.readouterr().out
     assert checked[-1] is None
     assert "`c3 login` session" in keyless_out and "MCP" not in keyless_out
+    assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", "c3_key_typed"])) == 0
+    # mutation: printing the typed-key line for the environment-key case too (or vice versa)
+    # tells a typed-key user that a shell without C3_API_KEY still works over MCP
+    typed_out = capsys.readouterr().out
+    assert checked[-1] == "c3_key_typed"
+    assert "C3_API_KEY" not in typed_out and "MCP" in typed_out
