@@ -21,6 +21,16 @@ class _Tty(io.StringIO):
         return True
 
 
+def _settings(fd):
+    """The terminal's settings without PENDIN. macOS sets that bit itself when canonical mode
+    comes back with input still queued; it is driver state, not something a caller restores."""
+    import termios
+
+    attrs = termios.tcgetattr(fd)
+    attrs[3] &= ~termios.PENDIN
+    return attrs
+
+
 @pytest.fixture
 def pty_pair():
     """A real terminal pair, with the master drained the way a terminal emulator drains it. On
@@ -163,7 +173,7 @@ def test_on_a_posix_terminal_echo_is_off_while_reading_and_restored_after(monkey
     monkeypatch.setattr(masked_input.getpass, "getpass",
                         lambda p: pytest.fail("a terminal must not fall back to getpass"))
     master, slave = pty_pair
-    before = termios.tcgetattr(slave)
+    before = _settings(slave)
     assert before[3] & termios.ECHO and before[3] & termios.ICANON
     lflags = []
 
@@ -179,12 +189,10 @@ def test_on_a_posix_terminal_echo_is_off_while_reading_and_restored_after(monkey
     assert out.getvalue() == "API key: *******\n"
     assert lflags and not any(f & (termios.ECHO | termios.ICANON) for f in lflags)
     assert all(f & termios.ISIG for f in lflags)  # Ctrl-C still interrupts
-    assert termios.tcgetattr(slave) == before
+    assert _settings(slave) == before
 
 
 def test_the_terminal_is_restored_when_the_read_raises(pty_pair):
-    import termios
-
     class Broken(_Tty):
         def write(self, s):
             if s == "*":
@@ -192,12 +200,12 @@ def test_the_terminal_is_restored_when_the_read_raises(pty_pair):
             return super().write(s)
 
     master, slave = pty_pair
-    before = termios.tcgetattr(slave)
+    before = _settings(slave)
     os.write(master, b"x\n")
     with os.fdopen(slave, "r", encoding="utf-8", closefd=False) as stdin:
         with pytest.raises(OSError, match="terminal went away"):
             ask_secret("k: ", stdin=stdin, out=Broken())
-    assert termios.tcgetattr(slave) == before
+    assert _settings(slave) == before
 
 
 def test_the_windows_reader_swallows_both_halves_of_a_special_key():
