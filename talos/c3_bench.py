@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -33,6 +34,18 @@ class C3CommandError(RuntimeError):
 
 class _JobFailed(RuntimeError):
     pass
+
+
+_JOB_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _safe_job_id(job_id: str) -> str:
+    """A job id becomes a path component (job_dir/job_id/artifacts). C3 returns it, so a
+    compromised or buggy server could hand back "../../x" and walk the local filesystem;
+    reject anything that is not a plain relative name. Does not echo the id."""
+    if job_id in (".", "..") or not _JOB_ID_RE.fullmatch(job_id):
+        raise BenchUnavailable("C3 returned an unusable job id")
+    return job_id
 
 
 def parse_json_stdout(text: str):
@@ -141,7 +154,7 @@ class C3Bench:
         job_dir = self.run_dir / "c3" / purpose
         rh = request_hash(request)
         if pend.get("job_id") and pend.get("request_hash") == rh:
-            job_id = pend["job_id"]
+            job_id = _safe_job_id(pend["job_id"])
         else:
             job_id = self._submit(job_dir, request, purpose, rh)
         try:
@@ -159,6 +172,7 @@ class C3Bench:
             job_id = self._t.deploy(job_dir)
         except (C3CommandError, ValueError) as e:
             raise BenchUnavailable(f"C3 deploy failed: {_redact(str(e))[:300]}") from None
+        job_id = _safe_job_id(job_id)
         self._pending.set({**(self._pending.get() or {}), "backend": "c3", "job_id": job_id,
                            "job_dir": str(job_dir), "request_hash": rh})
         return job_id

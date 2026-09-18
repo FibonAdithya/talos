@@ -480,6 +480,16 @@ def test_an_injected_transport_carries_the_whole_job(tmp_path):
     assert [c[0] for c in t.calls].count("deploy") == 1
 
 
+def test_an_unusable_job_id_is_rejected_before_any_status_or_fetch_call(tmp_path):
+    t = FakeTransport(["SUCCEEDED"], results_doc())
+    t.job_ids = ["../../x"]
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: dropping the job id check lets it become job_dir/../../x/artifacts on disk
+    assert "unusable job id" in str(ei.value)
+    assert not any(c[0] in ("status", "fetch") for c in t.calls)
+
+
 def test_pending_timeout_cancels_through_the_transport(tmp_path):
     t = FakeTransport(["PENDING"])
     with pytest.raises(BenchUnavailable) as ei:
