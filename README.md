@@ -275,9 +275,10 @@ $env:TALOS_LIVE_CHALLENGE = "knapsack"
 - **C3 backend**: use a C3 API key. Create one on the
   [C3 dashboard settings page](https://cthree.cloud/dashboard/settings) and paste it at the
   **C3 API key** prompt in `talos setup`. With a key, Talos talks to C3 over HTTPS and nothing
-  from C3 needs installing. This path is covered by unit tests, but a real C3 job has not been
-  run over it yet, so run the [live smoke test](#live-smoke-test) before a real run. The `c3`
-  CLI path (key left blank) has not been tried on Windows:
+  from C3 needs installing. This path is covered by unit tests, and one real C3 job ran over
+  it from Linux on 2026-09-18 (MEASURED, `docs/ai/specs/2026-09-17-c3-mcp-transport-design.md`
+  §8). None has run from Windows, so run the [live smoke test](#live-smoke-test) before a real
+  run. The `c3` CLI path (key left blank) has not been tried on Windows:
   C3's documented installer is a shell script, and Windows cannot mark job.sh executable on
   disk, so it is unknown whether a job uploaded by the CLI from Windows would start.
 - **CLI providers**: `npm` installs `claude` and `codex` as `.cmd` wrappers. Talos finds them
