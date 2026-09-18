@@ -25,7 +25,7 @@ class FakePost:
 
     def __call__(self, url, headers, body, timeout_s):
         doc = json.loads(body)
-        self.calls.append((url, headers, doc))
+        self.calls.append((url, headers, doc, timeout_s))
         method = doc.get("method")
         if method in self.replies:
             return self.replies[method](doc)
@@ -43,12 +43,12 @@ def test_tool_call_sends_auth_and_user_agent_and_returns_structured_content():
     out = McpClient(KEY, post=post).tool("whoami", {})
     assert out == {"ok": True, "tool": "whoami"}
     # mutation: a missing User-Agent is a Cloudflare 403; a missing key is a 401
-    for _url, headers, _doc in post.calls:
+    for _url, headers, _doc, _ts in post.calls:
         assert headers["User-Agent"] == f"talos/{__version__}"
         assert headers["Authorization"] == f"Bearer {KEY}"
         assert "application/json" in headers["Accept"]
     # mutation: initialize skipped, or repeated per call
-    methods = [doc["method"] for _u, _h, doc in post.calls]
+    methods = [doc["method"] for _u, _h, doc, _ts in post.calls]
     assert methods == ["initialize", "notifications/initialized", "tools/call"]
 
 
@@ -58,7 +58,7 @@ def test_initialize_runs_once_across_calls():
     c.tool("whoami", {})
     c.tool("balance", {})
     # mutation: re-initialising per call doubles every request
-    assert [doc["method"] for _u, _h, doc in post.calls].count("initialize") == 1
+    assert [doc["method"] for _u, _h, doc, _ts in post.calls].count("initialize") == 1
 
 
 def test_session_id_is_echoed_when_the_server_issues_one():
@@ -180,7 +180,7 @@ def test_a_404_for_a_stale_session_starts_a_new_session_once():
     with pytest.raises(C3CommandError):
         McpClient(KEY, post=post2).tool("whoami", {})
     # mutation: retrying without a bound loops for ever against a server that always says 404
-    assert [d["method"] for _u, _h, d in post2.calls].count("tools/call") == 2
+    assert [d["method"] for _u, _h, d, _ts in post2.calls].count("tools/call") == 2
 
 
 def test_response_headers_are_read_whatever_their_case():
@@ -205,7 +205,7 @@ class FakeClient:
         self.docs = docs
         self.calls = []
 
-    def tool(self, name, arguments):
+    def tool(self, name, arguments, timeout_s=None):
         self.calls.append((name, arguments))
         doc = self.docs[name]
         return doc(arguments) if callable(doc) else doc
@@ -269,6 +269,28 @@ def test_deploy_reads_the_job_id_under_either_key(tmp_path):
         assert McpTransport("k", client=c).deploy(d) == "job_7"
     with pytest.raises(C3CommandError):  # mutation: KeyError escapes as a crash, not a retry
         McpTransport("k", client=FakeClient({"deploy": {"nothing": 1}})).deploy(d)
+
+
+def test_deploy_gets_a_600s_timeout_while_get_job_gets_the_default(tmp_path):
+    def tools_call(doc):
+        name = doc["params"]["name"]
+        if name == "deploy":
+            result = {"structuredContent": {"job_id": "job_9"}}
+        else:
+            result = {"structuredContent": {"status": "RUNNING"}}
+        return 200, {"Content-Type": "application/json"}, rpc(doc["id"], result)
+
+    post = FakePost({"tools/call": tools_call})
+    client = McpClient(KEY, post=post)
+    t = McpTransport(KEY, client=client)
+    d = job_dir_for(tmp_path)
+    assert t.deploy(d) == "job_9"
+    assert t.status("job_9") == "RUNNING"
+    timeouts = {doc["params"]["name"]: ts for _u, _h, doc, ts in post.calls
+                if doc.get("method") == "tools/call"}
+    # mutation: deploy not passing the timeout
+    assert timeouts["deploy"] == 600
+    assert timeouts["get_job"] == 60
 
 
 def test_status_reads_the_top_level_status_upper_cased():

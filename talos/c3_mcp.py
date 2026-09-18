@@ -72,7 +72,8 @@ class McpClient:
             h["Mcp-Session-Id"] = self._session
         return h
 
-    def _send(self, method: str, params: dict | None, notify: bool = False):
+    def _send(self, method: str, params: dict | None, notify: bool = False,
+              timeout_s: int | None = None):
         self._id += 1
         body: dict = {"jsonrpc": "2.0", "method": method}
         if params is not None:
@@ -80,8 +81,9 @@ class McpClient:
         if not notify:
             body["id"] = self._id
         try:
-            status, headers, raw = self._post(self._url, self._headers(),
-                                              json.dumps(body).encode(), self._timeout_s)
+            status, headers, raw = self._post(
+                self._url, self._headers(), json.dumps(body).encode(),
+                timeout_s if timeout_s is not None else self._timeout_s)
         except Exception as e:  # OSError, URLError, anything the injected post raises
             raise C3CommandError(f"c3 {method} could not be sent: "
                                  f"{_redact(str(e))[:200]}") from None
@@ -132,17 +134,18 @@ class McpClient:
         self._send("notifications/initialized", None, notify=True)
         self._ready = True
 
-    def tool(self, name: str, arguments: dict) -> dict:
-        """Calls one tool and returns its result document."""
+    def tool(self, name: str, arguments: dict, timeout_s: int | None = None) -> dict:
+        """Calls one tool and returns its result document. `timeout_s` overrides the client's
+        default for this call only (deploy and a download read_artifact need more than 60s)."""
         self._ensure_ready()
         params = {"name": name, "arguments": arguments}
         try:
-            res = self._send("tools/call", params) or {}
+            res = self._send("tools/call", params, timeout_s=timeout_s) or {}
         except _SessionGone:
             # spec §4.3: start a new session once. A second 404 raises as a C3CommandError.
             self._session, self._ready = None, False
             self._ensure_ready()
-            res = self._send("tools/call", params) or {}
+            res = self._send("tools/call", params, timeout_s=timeout_s) or {}
         text = " ".join(c.get("text", "") for c in res.get("content", [])
                         if isinstance(c, dict))
         if res.get("isError"):
@@ -189,7 +192,7 @@ class McpTransport:
             files.append(entry)
         challenge, purpose, seconds = _job_dir_settings_inputs(job_dir)
         args = {**job_settings(challenge, purpose, seconds), "files": files}
-        doc = self._c.tool("deploy", args)
+        doc = self._c.tool("deploy", args, timeout_s=600)
         job_id = doc.get("job_id") or doc.get("id")
         if not job_id:
             raise C3CommandError("c3 deploy returned no job id")
@@ -229,7 +232,7 @@ class McpTransport:
             if not str(url).startswith("https://"):
                 # download_url is server-supplied; urlopen honours file:// and other schemes
                 raise C3CommandError(f"c3 read_artifact gave an unsupported URL scheme for {path}")
-            raw = self._fetch_url(url, self._timeout_s)
+            raw = self._fetch_url(url, 600)
         want = doc.get("sha256")
         if not isinstance(want, str) or not want:
             # fail loudly on missing (spec §2): a document with no sha256 has nothing to verify
