@@ -8,6 +8,7 @@ import pytest
 
 from talos import cli
 from talos.bench import BenchCancelled, EvalResult
+from talos.c3_bench import C3CommandError
 from talos.challenges import DEV_IMAGE_TAG
 from talos.config import (Config, ConfigError, load, resolve_api_key, resolve_c3_api_key,
                           save)
@@ -626,6 +627,7 @@ def test_setup_modal_is_the_default_and_unchanged(tmp_path, monkeypatch):
 
 def test_setup_c3_fails_when_the_session_has_expired(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("C3_API_KEY", raising=False)
     monkeypatch.setattr(cli, "validate_provider", lambda p: None)
     monkeypatch.setattr(cli, "subprocess", types.SimpleNamespace(run=_c3_runner(whoami_rc=1)))
     rc = cli.main(["setup"], ask=scripted(["c3", "anthropic", "", "sk-test", ""]))
@@ -637,6 +639,7 @@ def test_setup_c3_fails_when_the_session_has_expired(tmp_path, monkeypatch, caps
 def test_setup_c3_without_the_c3_binary_reports_it_instead_of_tracebacking(tmp_path,
                                                                            monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("C3_API_KEY", raising=False)
     monkeypatch.setattr(cli, "validate_provider", lambda p: None)
 
     def missing(cmd, **kw):
@@ -646,7 +649,7 @@ def test_setup_c3_without_the_c3_binary_reports_it_instead_of_tracebacking(tmp_p
     # mutation: cmd_setup catches ConfigError only, so a FileNotFoundError escaping check_c3
     # tracebacks out of the wizard and throws away every answer already typed
     assert rc == 1
-    assert "c3 CLI is not on PATH" in capsys.readouterr().err
+    assert "install the `c3` CLI" in capsys.readouterr().err
     assert not (tmp_path / "talos.config.json").exists()
 
 
@@ -1351,3 +1354,117 @@ def test_check_c3_failure_with_the_key_from_the_environment_names_the_api_key(mo
     msg = str(excinfo.value)
     # mutation: keying the hint on the argument alone sends a C3_API_KEY user to `c3 login`
     assert "check the C3 API key" in msg and "c3_key_env" not in msg
+
+
+def test_check_c3_with_a_key_uses_mcp_and_never_shells_out(monkeypatch, capsys):
+    calls = []
+
+    class T:
+        name = "mcp"
+
+        def whoami(self):
+            calls.append("whoami")
+            return {"user_id": "u1"}
+
+        def balance_gbp(self):
+            calls.append("balance")
+            return 0.5
+
+    def no_subprocess(*a, **kw):
+        raise AssertionError("check_c3 must not run a subprocess when a key is configured")
+
+    monkeypatch.setattr(cli.subprocess, "run", no_subprocess)
+    made = {}
+
+    def fake_make(api_key, run=None):
+        # AUDIT: was `made.setdefault("key", api_key) or T()`, which returns the key string.
+        made["key"] = api_key
+        return T()
+    monkeypatch.setattr(cli, "make_transport", fake_make)
+    assert cli.check_c3(api_key="c3_key_" + "a" * 20) == 0.5
+    assert calls == ["whoami", "balance"]  # mutation: skipping whoami accepts a revoked key
+    assert made["key"] == "c3_key_" + "a" * 20
+    # mutation: dropping the warning hides a balance that cannot pay for the next job
+    assert "low" in capsys.readouterr().err.lower()
+
+
+def test_check_c3_reports_a_rejected_key_as_a_key_problem(monkeypatch):
+    from talos.c3_mcp import McpAuthError
+
+    class T:
+        name = "mcp"
+
+        def whoami(self):
+            raise McpAuthError("the C3 API key was rejected")
+
+        def balance_gbp(self):
+            return 1.0
+
+    monkeypatch.setattr(cli, "make_transport", lambda api_key, run=None: T())
+    with pytest.raises(ConfigError) as ei:
+        cli.check_c3(api_key="c3_key_" + "a" * 20)
+    msg = str(ei.value)
+    # mutation: telling a key user to run `c3 login` sends them down the wrong path
+    assert "apikey" in msg and "c3 login" not in msg
+
+
+def test_check_c3_without_a_key_still_asks_the_cli_to_log_in(monkeypatch):
+    monkeypatch.delenv("C3_API_KEY", raising=False)  # check_c3 reads it to pick the hint
+
+    class T:
+        name = "cli"
+
+        def whoami(self):
+            raise C3CommandError("c3 whoami could not be run: [Errno 2] no such file")
+
+        def balance_gbp(self):
+            return 1.0
+
+    monkeypatch.setattr(cli, "make_transport", lambda api_key, run=None: T())
+    with pytest.raises(ConfigError) as ei:
+        cli.check_c3()
+    # mutation: a CLI user with no session gets no instruction at all
+    assert "c3 login" in str(ei.value)
+
+
+def test_check_c3_unreadable_balance_warns_and_returns_zero(monkeypatch, capsys):
+    class T:
+        name = "mcp"
+
+        def whoami(self):
+            return {}
+
+        def balance_gbp(self):
+            return None
+
+    monkeypatch.setattr(cli, "make_transport", lambda api_key, run=None: T())
+    # mutation: returning a number the server never reported ("£0.00 is low")
+    assert cli.check_c3(api_key="k") == 0.0
+    assert "could not read the C3 balance" in capsys.readouterr().err
+
+
+def test_check_c3_with_an_injected_run_drives_the_cli_even_with_a_key(monkeypatch):
+    def no_mcp(api_key, run=None):
+        raise AssertionError("an injected `run` means the CLI; this would be a network call")
+    monkeypatch.setattr(cli, "make_transport", no_mcp)
+    # mutation: routing run= + api_key= to make_transport sends the existing keyed check_c3
+    # tests to the real api.cthree.cloud
+    assert cli.check_c3(run=_c3_runner(), api_key="c3_key_secret") == 9.89
+
+
+def test_setup_checks_c3_with_the_environment_key_and_says_which_transport(tmp_path, monkeypatch,
+                                                                            capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("C3_API_KEY", "c3_key_env")
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    checked = []
+    monkeypatch.setattr(cli, "check_c3", lambda run=None, api_key=None: checked.append(api_key))
+    assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", ""])) == 0
+    # mutation: checking with the typed key alone makes setup demand the c3 CLI from a user
+    # whose runs go over MCP on the C3_API_KEY in their environment
+    assert checked == ["c3_key_env"]
+    assert "MCP" in capsys.readouterr().out
+    monkeypatch.delenv("C3_API_KEY")
+    assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", ""])) == 0
+    # mutation: a fixed line tells a CLI user that nothing needs installing
+    assert checked[-1] is None and "c3 CLI" in capsys.readouterr().out

@@ -21,11 +21,12 @@ from pathlib import Path
 
 from talos import mainnet as mainnet_api
 from talos.budget import Budget, Spend
+from talos.c3_bench import C3CommandError
+from talos.c3_transport import CliTransport, make_transport
 from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_image,
                               hardware_class)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
-from talos.executables import argv0
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
@@ -64,39 +65,35 @@ def deploy_bench(token_id: str | None, token_secret: str | None, run=subprocess.
         raise ConfigError(f"modal deploy failed: {(r.stderr or r.stdout)[-2000:]}")
 
 
-def check_c3(run=None, api_key: str | None = None) -> float:
-    """Confirms `c3` is authenticated, by `api_key` when given and by the `c3 login` session
-    otherwise, and returns the credit balance in GBP. `run` is resolved at call time so a test
-    can monkeypatch `cli.subprocess`."""
-    from talos.c3_bench import c3_env
-    runner = run or subprocess.run
-    env = c3_env(api_key)
-
-    def c3(*args: str):
-        try:
-            return runner([argv0("c3"), *args], capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", env=env)
-        except OSError:
-            # FileNotFoundError included. `cmd_setup` catches ConfigError only, so anything
-            # else here tracebacks out of the wizard and throws away every answer typed.
-            raise ConfigError("the c3 CLI is not on PATH; install it and run `c3 login`") from None
-
-    r = c3("whoami")
-    if r.returncode != 0:
-        # With no key given, the child inherits a C3_API_KEY from this environment if one is set.
+def check_c3(run=None, api_key: str | None = None, transport=None) -> float:
+    """Confirms C3 is reachable and authenticated — over MCP when a key is configured, over the
+    `c3` CLI otherwise — and returns the credit balance in GBP. 0.0 means "could not read it"."""
+    from talos.c3_mcp import McpAuthError
+    if transport is not None:
+        t = transport
+    elif run is not None:
+        t = CliTransport(run=run, api_key=api_key)  # an injected runner means the CLI, keyed or not
+    else:
+        t = make_transport(api_key, run=subprocess.run)  # resolved now: tests patch cli.subprocess
+    try:
+        t.whoami()
+    except McpAuthError as e:
+        raise ConfigError(f"C3 rejected the API key: {e}; check `c3 apikey list` and "
+                          f"run `talos setup` again") from None
+    except C3CommandError as e:
         keyed = api_key or os.environ.get("C3_API_KEY")
-        fix = ("check the C3 API key (`c3 apikey list`)" if keyed else
-               "run `c3 login`, or give setup a C3 API key (`c3 apikey create`),")
-        raise ConfigError(f"C3 login check failed: {(r.stderr or r.stdout)[-300:].strip()}; "
-                          f"{fix} and retry")
-    r = c3("balance")
-    m = re.search(r"Credit balance:\s*£([0-9.]+)", r.stdout or "")
-    if r.returncode != 0 or not m:
-        # "£0.00 is low" would be a number the CLI never reported. Say what happened instead.
-        print(f"warning: could not read the C3 balance: "
-              f"{(r.stderr or r.stdout or '')[-200:].strip()}", file=sys.stderr)
+        fix = ("check the C3 API key (`c3 apikey list`)" if keyed
+               else "install the `c3` CLI and run `c3 login`, or give setup a C3 API key "
+                    "(`c3 apikey create`),")
+        raise ConfigError(f"C3 login check failed: {e}; {fix} and retry") from None
+    try:
+        balance = t.balance_gbp()
+    except C3CommandError as e:
+        print(f"warning: could not read the C3 balance: {e}", file=sys.stderr)
         return 0.0
-    balance = float(m.group(1))
+    if balance is None:
+        print("warning: could not read the C3 balance", file=sys.stderr)
+        return 0.0
     if balance < 1.0:
         print(f"warning: C3 credit balance is low (£{balance:.2f}); run `c3 topup`",
               file=sys.stderr)
@@ -210,7 +207,10 @@ def cmd_setup(args, ask) -> int:
         return 1
     try:
         if backend == "c3":
-            check_c3(api_key=c3_api_key)
+            check_key = c3_api_key or os.environ.get("C3_API_KEY") or None
+            print("C3: using the hosted MCP endpoint with your API key; no c3 CLI needed."
+                  if check_key else "C3: using the c3 CLI and its `c3 login` session.")
+            check_c3(api_key=check_key)
         else:
             deploy_bench(token_id or None, token_secret or None)
     except ConfigError as e:

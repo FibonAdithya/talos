@@ -144,7 +144,7 @@ Candidates are compiled and scored on one of two backends. You choose one in `ta
 | Backend | What you need before setup | Cost per iteration |
 |---|---|---|
 | `modal` (default) | A [Modal](https://modal.com) account (the free tier works) and an API token created at modal.com/settings/tokens. Keep the token id and secret to hand. | Container seconds only; no fixed per-job overhead. |
-| `c3` | The `c3` CLI ([cthree.cloud](https://cthree.cloud)) installed, either logged in with `c3 login` or with a C3 API key (create one with `c3 apikey create`), and credit on the account. Top up with `c3 topup`. | One batch job of about 12 minutes before the first nonce is scored. See [Compute backends in detail](#compute-backends-in-detail). |
+| `c3` | With a C3 API key (`c3 apikey create`): nothing to install — Talos talks to C3 over HTTPS. Without a key: the `c3` CLI ([cthree.cloud](https://cthree.cloud)) installed and logged in with `c3 login`. Either way, credit on the account; top up with `c3 topup`. | One batch job of about 12 minutes before the first nonce is scored. See [Compute backends in detail](#compute-backends-in-detail). |
 
 ### 4. Pick an LLM provider
 
@@ -437,6 +437,11 @@ other tracks' training nonces too, about a minute more per winning iteration on 
 (ESTIMATE, unverified).
 
 ## Compute backends in detail
+
+On the C3 backend Talos uses C3's hosted MCP endpoint (`https://api.cthree.cloud/mcp`) when a C3
+API key is configured, and the `c3` CLI when it is not. The key path needs no C3 install, which is
+what makes the C3 backend usable on Windows, and it uploads job.sh already marked executable.
+Both paths submit the same job directory, which is still written to `runs/<job_id>/c3/<n>/`.
 
 ### C3 timings
 
