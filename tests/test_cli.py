@@ -1405,7 +1405,8 @@ def test_check_c3_reports_a_rejected_key_as_a_key_problem(monkeypatch):
         cli.check_c3(api_key="c3_key_" + "a" * 20)
     msg = str(ei.value)
     # mutation: telling a key user to run `c3 login` sends them down the wrong path
-    assert "apikey" in msg and "c3 login" not in msg
+    assert "C3 rejected the API key" in msg
+    assert "C3 login check failed" not in msg and "`c3 login`" not in msg
 
 
 def test_check_c3_without_a_key_still_asks_the_cli_to_log_in(monkeypatch):
