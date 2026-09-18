@@ -1423,8 +1423,9 @@ def test_check_c3_without_a_key_still_asks_the_cli_to_log_in(monkeypatch):
     monkeypatch.setattr(cli, "make_transport", lambda api_key, run=None: T())
     with pytest.raises(ConfigError) as ei:
         cli.check_c3()
+    msg = str(ei.value)
     # mutation: a CLI user with no session gets no instruction at all
-    assert "c3 login" in str(ei.value)
+    assert "run `c3 login`" in msg and "apikey list" not in msg
 
 
 def test_check_c3_unreadable_balance_warns_and_returns_zero(monkeypatch, capsys):
@@ -1463,8 +1464,11 @@ def test_setup_checks_c3_with_the_environment_key_and_says_which_transport(tmp_p
     # mutation: checking with the typed key alone makes setup demand the c3 CLI from a user
     # whose runs go over MCP on the C3_API_KEY in their environment
     assert checked == ["c3_key_env"]
-    assert "MCP" in capsys.readouterr().out
+    keyed_out = capsys.readouterr().out
+    assert "MCP" in keyed_out and "`c3 login`" not in keyed_out
     monkeypatch.delenv("C3_API_KEY")
     assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", ""])) == 0
     # mutation: a fixed line tells a CLI user that nothing needs installing
-    assert checked[-1] is None and "c3 CLI" in capsys.readouterr().out
+    keyless_out = capsys.readouterr().out
+    assert checked[-1] is None
+    assert "`c3 login` session" in keyless_out and "MCP" not in keyless_out
