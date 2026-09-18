@@ -87,7 +87,6 @@ def test_cli_transport_missing_binary_is_a_c3commanderror():
         CliTransport(run=run).whoami()
 
 
-@pytest.mark.xfail(reason="McpTransport lands in Task 4", strict=True, raises=ImportError)
 def test_make_transport_uses_the_cli_without_a_key_and_mcp_with_one():
     from talos.c3_mcp import McpTransport
     assert isinstance(make_transport(None), CliTransport)

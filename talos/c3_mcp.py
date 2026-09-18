@@ -6,9 +6,13 @@ Cloudflare rejects the default urllib User-Agent with 403 error 1010, every requ
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import re
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Callable
 
 from talos import __version__
@@ -135,3 +139,111 @@ class McpClient:
             return json.loads(text)
         except ValueError:
             return {"text": text}
+
+
+class McpTransport:
+    """C3 over the hosted MCP endpoint. No `c3` binary is needed."""
+
+    name = "mcp"
+
+    def __init__(self, api_key: str, client: McpClient | None = None,
+                 fetch_url: Callable | None = None, timeout_s: int = 60):
+        self._c = client or McpClient(api_key, timeout_s=timeout_s)
+        self._fetch_url = fetch_url or _download
+        self._timeout_s = timeout_s
+
+    def whoami(self) -> dict:
+        return self._c.tool("whoami", {})
+
+    def balance_gbp(self) -> float | None:
+        v = self._c.tool("balance", {}).get("balance_gbp")
+        return float(v) if isinstance(v, (int, float)) else None
+
+    def deploy(self, job_dir: Path) -> str:
+        from talos.c3_jobdir import job_settings
+        job_dir = Path(job_dir)
+        files = []
+        for p in sorted(job_dir.rglob("*")):
+            if not p.is_file() or p.name == ".c3":
+                continue
+            rel = p.relative_to(job_dir).as_posix()
+            entry = {"path": rel, "content": p.read_text(encoding="utf-8")}
+            if rel == "job.sh":
+                entry["executable"] = True  # mode 0755; Windows cannot set it on disk
+            files.append(entry)
+        challenge, purpose, seconds = _job_dir_settings_inputs(job_dir)
+        args = {**job_settings(challenge, purpose, seconds), "files": files}
+        doc = self._c.tool("deploy", args)
+        job_id = doc.get("job_id") or doc.get("id")
+        if not job_id:
+            raise C3CommandError("c3 deploy returned no job id")
+        return str(job_id)
+
+    def status(self, job_id: str) -> str:
+        doc = self._c.tool("get_job", {"job_id": job_id})
+        st = doc.get("status")
+        if not st:
+            raise C3CommandError(f"c3 get_job returned no status for {job_id}")
+        return str(st).upper()
+
+    def cancel(self, job_id: str) -> None:
+        try:
+            self._c.tool("cancel_job", {"job_id": job_id})
+        except C3CommandError:
+            pass  # best effort: the job may already be terminal
+
+    def fetch(self, job_id: str, name: str, dest: Path) -> bool:
+        path = name if "/" in name else f"artifacts/{name}"
+        try:
+            doc = self._c.tool("read_artifact", {"job_id": job_id, "path": path})
+        except McpAuthError:
+            raise
+        except C3CommandError as e:
+            if "NOT_FOUND" in str(e):
+                return False
+            raise
+        if doc.get("inline"):
+            content = doc.get("content") or ""
+            raw = (base64.b64decode(content) if doc.get("encoding") == "base64"
+                   else content.encode("utf-8"))
+        else:
+            url = doc.get("download_url")
+            if not url:
+                raise C3CommandError(f"c3 read_artifact gave neither content nor a URL for {path}")
+            raw = self._fetch_url(url, self._timeout_s)
+        want = doc.get("sha256")
+        if want and hashlib.sha256(raw).hexdigest() != want:
+            # the GPU-box lesson: a matching hash is the only proof of a complete transfer
+            raise C3CommandError(f"c3 artifact {path} did not match its sha256")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(raw)
+        return True
+
+
+def _download(url: str, timeout_s: int) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": f"talos/{__version__}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as r:
+            return r.read()
+    except Exception as e:
+        raise C3CommandError(f"artifact download failed: {_redact(str(e))[:200]}") from None
+
+
+def _job_dir_settings_inputs(job_dir: Path) -> tuple[str, str, int]:
+    """Recover (challenge, purpose, walltime seconds) from the job dir write_job_dir produced:
+    the challenge from payload.json, and the purpose and walltime from the `.c3` the same
+    function rendered, so both paths use one set of values. AUDIT: the purpose first came from
+    the directory name, which the deploy test's own job dir ("job", purpose "3") disproves."""
+    try:
+        challenge = json.loads((job_dir / "payload.json").read_text(encoding="utf-8"))["challenge"]
+        text = (job_dir / ".c3").read_text(encoding="utf-8")
+    except (OSError, ValueError, KeyError) as e:
+        raise C3CommandError(f"job dir is not one write_job_dir wrote: "
+                             f"{_redact(str(e))[:200]}") from None
+    t = re.search(r'^time:\s*"(\d+):(\d\d):(\d\d)"', text, re.M)
+    prefix = f"talos-{challenge}-"
+    n = re.search(r"^job_name:\s*(\S+)\s*$", text, re.M)
+    if not t or not n or not n.group(1).startswith(prefix):
+        raise C3CommandError("job dir has no usable time: or job_name: in .c3")
+    h, mi, sec = (int(x) for x in t.groups())
+    return challenge, n.group(1)[len(prefix):], h * 3600 + mi * 60 + sec

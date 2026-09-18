@@ -1,10 +1,12 @@
+import hashlib
 import json
 
 import pytest
 
 from talos import __version__
 from talos.c3_bench import C3CommandError
-from talos.c3_mcp import McpAuthError, McpClient
+from talos.c3_jobdir import job_settings, write_job_dir
+from talos.c3_mcp import McpAuthError, McpClient, McpTransport
 
 KEY = "c3_key_" + "a" * 20
 
@@ -173,3 +175,149 @@ def test_response_headers_are_read_whatever_their_case():
     # mutation: a case-sensitive lookup misses the lower-case names an HTTP/2 front end sends
     assert McpClient(KEY, post=post).tool("whoami", {}) == {"n": 1}
     assert post.calls[-1][1]["Mcp-Session-Id"] == "sess-9"
+
+
+class FakeClient:
+    """Records tool calls; returns scripted documents."""
+
+    def __init__(self, docs):
+        self.docs = docs
+        self.calls = []
+
+    def tool(self, name, arguments):
+        self.calls.append((name, arguments))
+        doc = self.docs[name]
+        return doc(arguments) if callable(doc) else doc
+
+
+def job_dir_for(tmp_path):
+    from tests.test_c3_jobdir import req
+    # The directory is deliberately not named after the purpose: the settings come from `.c3`.
+    return write_job_dir(tmp_path / "job", req(), "3")
+
+
+def test_deploy_sends_the_files_with_job_sh_executable_and_the_c3_settings(tmp_path):
+    c = FakeClient({"deploy": {"job_id": "job_5"}})
+    d = job_dir_for(tmp_path)
+    assert McpTransport("k", client=c).deploy(d) == "job_5"
+    name, args = c.calls[0]
+    assert name == "deploy"
+    files = {f["path"]: f for f in args["files"]}
+    # mutation: no executable flag means C3 cannot run job.sh from a Windows upload
+    assert files["job.sh"]["executable"] is True
+    assert all(f.get("executable") is not True for p, f in files.items() if p != "job.sh")
+    # mutation: shipping .c3 duplicates the settings and can carry an api_key upstream
+    assert ".c3" not in files
+    assert "payload.json" in files and "talos/c3_job.py" in files
+    assert files["job.sh"]["content"].startswith("#!/bin/bash")
+    # mutation: a hard-coded profile breaks invariant 1
+    for k, v in job_settings("knapsack", "3", args["walltime_seconds"]).items():
+        assert args[k] == v
+
+
+def test_deploy_reads_the_job_id_under_either_key(tmp_path):
+    d = job_dir_for(tmp_path)
+    for doc in ({"job_id": "job_7"}, {"id": "job_7"}):
+        c = FakeClient({"deploy": doc})
+        assert McpTransport("k", client=c).deploy(d) == "job_7"
+    with pytest.raises(C3CommandError):  # mutation: KeyError escapes as a crash, not a retry
+        McpTransport("k", client=FakeClient({"deploy": {"nothing": 1}})).deploy(d)
+
+
+def test_status_reads_the_top_level_status_upper_cased():
+    c = FakeClient({"get_job": {"status": "running", "current_activity":
+                                {"event_type": "JOB_SUCCEEDED"}}})
+    # mutation: reading current_activity.event_type reports SUCCEEDED for a running job
+    assert McpTransport("k", client=c).status("job_1") == "RUNNING"
+    assert c.calls[0] == ("get_job", {"job_id": "job_1"})
+
+
+def test_cancel_is_best_effort():
+    def boom(args):
+        raise C3CommandError("already terminal")
+
+    # mutation: letting this raise turns a stop request into a crash
+    McpTransport("k", client=FakeClient({"cancel_job": boom})).cancel("job_1")
+
+
+def test_fetch_writes_inline_content_and_checks_its_sha256(tmp_path):
+    body = '{"compile": {"ok": true}}'
+    doc = {"inline": True, "encoding": "utf8", "content": body, "size_bytes": len(body),
+           "sha256": hashlib.sha256(body.encode()).hexdigest()}
+    c = FakeClient({"read_artifact": doc})
+    dest = tmp_path / "artifacts" / "results.json"
+    assert McpTransport("k", client=c).fetch("job_1", "results.json", dest) is True
+    assert dest.read_text(encoding="utf-8") == body
+    # mutation: a name sent without the artifacts/ prefix is NOT_FOUND on every job
+    assert c.calls[0] == ("read_artifact", {"job_id": "job_1", "path": "artifacts/results.json"})
+
+
+def test_fetch_rejects_content_that_does_not_match_its_hash(tmp_path):
+    doc = {"inline": True, "encoding": "utf8", "content": "truncated",
+           "sha256": hashlib.sha256(b"the whole file").hexdigest()}
+    t = McpTransport("k", client=FakeClient({"read_artifact": doc}))
+    with pytest.raises(C3CommandError):  # mutation: no hash check lets a truncated file score
+        t.fetch("job_1", "results.json", tmp_path / "results.json")
+    assert not (tmp_path / "results.json").exists()
+
+
+def test_fetch_downloads_when_the_artifact_is_too_big_for_inline(tmp_path):
+    body = b"x" * 2_000_000
+    doc = {"inline": False, "size_bytes": len(body), "download_url": "https://storage/x",
+           "sha256": hashlib.sha256(body).hexdigest()}
+    seen = {}
+
+    def fetch_url(url, timeout_s):
+        seen["url"] = url
+        return body
+
+    t = McpTransport("k", client=FakeClient({"read_artifact": doc}), fetch_url=fetch_url)
+    dest = tmp_path / "build.log"
+    assert t.fetch("job_1", "build.log", dest) is True
+    # mutation: inline-only fetch silently truncates a build log over 1 MiB
+    assert seen["url"] == "https://storage/x" and dest.read_bytes() == body
+
+
+def test_fetch_decodes_base64_content(tmp_path):
+    import base64
+    raw = b"\x00\x01binary"
+    doc = {"inline": True, "encoding": "base64", "content": base64.b64encode(raw).decode(),
+           "sha256": hashlib.sha256(raw).hexdigest()}
+    t = McpTransport("k", client=FakeClient({"read_artifact": doc}))
+    dest = tmp_path / "blob"
+    assert t.fetch("job_1", "blob", dest) is True
+    # mutation: writing the base64 text corrupts the file
+    assert dest.read_bytes() == raw
+
+
+def test_fetch_returns_false_for_a_missing_artifact_but_raises_on_other_errors(tmp_path):
+    def missing(args):
+        raise C3CommandError("c3 read_artifact failed: NOT_FOUND artifact not found: x")
+
+    def auth(args):
+        raise McpAuthError("the C3 API key was rejected")
+
+    def server_error(args):
+        raise C3CommandError("c3 read_artifact failed with HTTP 500")
+
+    t = McpTransport("k", client=FakeClient({"read_artifact": missing}))
+    # mutation: raising here turns "job produced no results" into an infrastructure error
+    assert t.fetch("job_1", "results.json", tmp_path / "r.json") is False
+    t2 = McpTransport("k", client=FakeClient({"read_artifact": auth}))
+    with pytest.raises(McpAuthError):  # mutation: swallowing every error hides a revoked key
+        t2.fetch("job_1", "results.json", tmp_path / "r.json")
+    t3 = McpTransport("k", client=FakeClient({"read_artifact": server_error}))
+    # mutation: treating every C3CommandError as "not found" hides a server outage as a no-op
+    with pytest.raises(C3CommandError):
+        t3.fetch("job_1", "results.json", tmp_path / "r.json")
+
+
+def test_balance_and_whoami_read_the_structured_fields():
+    c = FakeClient({"balance": {"balance_gbp": 9.32, "low_balance": True},
+                    "whoami": {"email": "x@example.com", "user_id": "u1"}})
+    t = McpTransport("k", client=c)
+    assert t.balance_gbp() == 9.32  # mutation: parsing text finds no number here
+    assert t.whoami()["user_id"] == "u1"
+    c2 = FakeClient({"balance": {"tier": "free"}})
+    # mutation: returning 0.0 invents a balance the server never reported
+    assert McpTransport("k", client=c2).balance_gbp() is None
