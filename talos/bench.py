@@ -29,7 +29,7 @@ def _redact(text: str) -> str:
     """A job's rand_hash must never reach a log line or a timeline event. Modal exceptions
     quote the failing argv, so every message built from one goes through here first.
     A C3 API key must not reach one either."""
-    return _C3_KEY_RE.sub("<c3-key>", _HASH_RE.sub("<hash>", text))
+    return _HASH_RE.sub("<hash>", _C3_KEY_RE.sub("<c3-key>", text))
 
 
 class BenchUnavailable(Exception):

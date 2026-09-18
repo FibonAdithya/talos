@@ -104,6 +104,13 @@ def test_redact_hides_a_c3_api_key():
     assert "c3_key_" not in out and "Ab-9_z" not in out and "to the server" in out
 
 
+def test_redact_hides_a_long_key_even_when_the_hash_pattern_matches_inside_it():
+    # a 64-char key body contains a 64-hex-char run, which the hash regex alone would consume,
+    # leaving the tail of the key exposed in the output
+    out = _redact("Bearer c3_key_" + "ab" * 32 + "ZZTOPSECRET")
+    assert "ZZTOPSECRET" not in out and "c3_key_" not in out
+
+
 class FakeClock:
     """Wall clock the tests advance by hand, so retry behaviour is exercised without sleeping."""
 
