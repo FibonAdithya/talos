@@ -14,7 +14,7 @@ from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, EvalResul
 from talos.budget import BudgetExhausted, exhausted
 from talos.challenges import CHALLENGES
 from talos.edits import EditError, EditOutcome, apply_edit_response
-from talos.diagnostics import dead_new_functions, defined_functions
+from talos.diagnostics import dead_new_functions, defined_functions, first_error
 from talos.inside import NONCE_TIMEOUT_S
 from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
                            dead_code_fix_prompts, distill_prompts, edit_prompts,
@@ -330,7 +330,9 @@ class Loop:
                 self._event("dead_code", names=dead)
                 system, user = dead_code_fix_prompts(ctx, files, dead)
             else:
-                self._event("compile_failed", output=res.compile.output[-2000:])
+                # `error` is read from the whole output: the tail kept here is often all warnings
+                self._event("compile_failed", error=first_error(res.compile.output),
+                            output=res.compile.output[-2000:])
                 system, user = compile_fix_prompts(ctx, files, res.compile.output)
             try:
                 fixed = apply_edit_response(files, self._llm(system, user).text)

@@ -82,3 +82,22 @@ def test_dead_new_methods_grouped_in_one_warning_are_all_reported():
            "   --> tig-algorithms/src/knapsack/talos_cand/track1.rs:80:8\n")
     assert dead_new_functions(out, base) == ["track1.rs: relax", "track1.rs: polish",
                                             "track1.rs: mk", "track1.rs: go"]
+
+
+def test_first_error_is_the_first_error_line_not_cargos_summary():
+    # mutation: taking the last line prints cargo's summary ("could not compile ... due to 2
+    # previous errors") whenever a real error exists; taking the first line prints a warning
+    from talos.diagnostics import first_error
+    output = ("warning: unused variable: `hp`\n   --> src/a.rs:1:1\n"
+              "error[E0382]: borrow of moved value: `order`\n    --> src/t.rs:9:5\n"
+              "error[E0004]: non-exhaustive patterns\n"
+              "error: could not compile `tig-algorithms` (lib) due to 2 previous errors\n")
+    assert first_error(output) == "error[E0382]: borrow of moved value: `order`"
+    assert first_error("  error: expected `;`\nerror: aborting due to 1 previous error\n") == \
+        "error: expected `;`"
+    # only the summary survives: better than nothing
+    assert first_error("warning: x\nerror: could not compile `t` (lib) due to 2 previous errors") \
+        == "error: could not compile `t` (lib) due to 2 previous errors"
+    # no error line at all (a linker message, a timeout note): the last non-empty line
+    assert first_error("note: a\nkilled after 600s\n\n") == "killed after 600s"
+    assert first_error("") == ""

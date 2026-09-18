@@ -86,16 +86,18 @@ Run per job. Interactive unless every value is given as a flag.
 
 1. Challenge: one of the eight TIG challenges. GPU challenges are marked `(GPU)`. No GPU
    class or cost figure is shown in the prompt; estimated compute spend is reported in the
-   status line and the end-of-job summary.
+   per-iteration summary line and the end-of-job summary.
 2. Direction: free text, multi-line, or a path to a file. This becomes the first entry in
    the job's tacit knowledge.
 3. Budget: for API providers, dollars of LLM spend and hours of wall clock. For CLI
    providers, iterations and hours. Modal spend is always shown and capped in dollars.
 4. Mode for CLI providers: `single-shot` (default) or `agentic`, with the cost warning that
    agentic uses roughly five to twenty times the tokens.
-5. Starts the loop. The terminal shows a status line (job id, iteration, best delta vs
-   baseline, spend, time left) and streams one line per event. `Ctrl-C` stops cleanly at
-   the next safe point and packages the best-so-far.
+5. Starts the loop. The terminal streams one line per event, each a short sentence prefixed
+   with the time and iteration number, and ends every iteration with a summary line
+   (outcome, best delta vs baseline, spend, time left). The job id is printed once at job
+   start. Full event fields are in `timeline.jsonl` only. `Ctrl-C` stops cleanly at the
+   next safe point and packages the best-so-far.
 
 Flags: `--challenge`, `--direction`/`--direction-file`, `--budget-usd`, `--budget-hours`,
 `--budget-iterations`, `--mode`, `--resume <job_id>`, `--yes`.

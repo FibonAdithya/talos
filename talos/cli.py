@@ -1,6 +1,6 @@
 """`talos setup | run | compile | status`. Wizard prompts go through `ask` so tests can script
-them; after every finished iteration a plain one-line status is printed to stdout with the job id,
-iteration, best delta, LLM and compute spend and the wall-clock time left."""
+them; each loop event is printed to stdout as one line, and every finished iteration ends with a
+summary line: outcome, best delta, LLM and compute spend and the wall-clock time left."""
 from __future__ import annotations
 
 import argparse
@@ -27,6 +27,7 @@ from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_im
                               hardware_class)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
+from talos.diagnostics import first_error
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
@@ -309,8 +310,83 @@ def _status_line(spec: JobSpec, state: JobState, now: float) -> str:
     else:
         left = f"{max(0.0, spec.budget.hours - (now - state.spend.started_at) / 3600):.1f}h"
     llm = "unpriced" if unpriced(spec.provider, spec.model) else f"${state.spend.llm_usd:.2f}"
-    return (f"[status] job={spec.job_id} it={state.iteration} best={best} "
-            f"llm={llm} compute≈${state.spend.compute_usd:.2f} left={left}")
+    return f"best {best} | llm {llm} | compute ≈${state.spend.compute_usd:.2f} | {left} left"
+
+
+EVENT_LINE_WIDTH = 100
+OUTCOME_TEXT = {
+    "failed:score": "no improvement",
+    "failed:edit": "no candidate: edit failed",
+    "failed:compile": "no candidate: did not compile",
+    "failed:dead_code": "no candidate: new code never called",
+    "failed:runtime": "rejected: error rate over the ceiling",
+}
+
+
+def _one_line(text: str, width: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[:width - 3] + "..."
+
+
+def _holdout_text(data: dict) -> str:
+    if "holdout" not in data:
+        return str(data.get("error", ""))
+    h = data["holdout"]
+    return (f"held-out {h['mean_rel_delta']:+.3%} vs baseline "
+            f"(worst track {h['worst_rel_delta']:+.3%})")
+
+
+def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | None:
+    """One loop event as one terminal line, or None for an event the terminal does not show.
+    timeline.jsonl keeps every event with every field; this is the summary of it."""
+    if kind == "stopped":
+        return None  # the summary block printed after the loop reports it
+    if kind == "baseline":
+        text = data["message"]
+    elif kind == "baseline_ready":
+        text = "baseline ready"
+    elif kind == "hypothesis":
+        tag = f" ({data['strategy_tag']})" if data.get("strategy_tag") else ""
+        text = f"trying: {data.get('title', '')}{tag}"
+    elif kind == "scored":
+        runtime = data.get("runtime_ratio")
+        text = (f"scored {data['mean_rel_delta']:+.3%} vs baseline "
+                f"(worst track {data['worst_rel_delta']:+.3%}, errors {data['error_rate']:.1%}"
+                + (f", runtime x{runtime:.2f})" if runtime is not None else ")"))
+    elif kind == "compile_failed":
+        # a timeline written before the loop recorded `error` has only the output's tail
+        error = data.get("error") or first_error(data.get("output") or "")
+        text = f"compile failed: {error}" if error else "compile failed"
+    elif kind == "edits_rejected":
+        text = f"edit rejected: {len(data['paths'])} path(s) outside the algorithm files"
+    elif kind == "dead_code":
+        text = "new code never called: " + ", ".join(data["names"])
+    elif kind == "iteration_done":
+        text = OUTCOME_TEXT.get(data["outcome"], data["outcome"])
+        if data["outcome"] == "improved":
+            text = "new best"
+        else:
+            text += f" ({data['runs_since_improvement']} in a row)"
+    elif kind == "reset":
+        text = f"switching strategy to: {data['forced_tag']}"
+    elif kind == "distilled":
+        text = f"lesson: {data['lesson']}"
+    elif kind == "confirming":
+        text = "confirming on held-out nonces"
+    elif kind == "won":
+        text = f"won: {_holdout_text(data)}"
+    elif kind == "false_positive":
+        text = f"not confirmed: {_holdout_text(data)}"
+    elif kind == "rate_limited":
+        text = f"rate limited, waiting {data['wait_s']}s"
+    elif kind == "resumed_pending":
+        text = f"reattached to bench job {data['job_id']}"
+    elif kind == "discarded_incomplete":
+        text = f"discarded {data['discarded']} unfinished iteration(s) from the previous run"
+    else:
+        # A kind added to the loop later still reaches the terminal.
+        text = f"{kind} " + " ".join(f"{k}={v}" for k, v in data.items())
+    return _one_line(text, width)
 
 
 def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> int:
@@ -382,13 +458,18 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
 
     def on_event(kind, data):
         # loop._n is the iteration the event belongs to; state.iteration only catches up when an
-        # iteration finishes, so it labels iteration 1's events "it=0".
+        # iteration finishes, so it labels iteration 1's events "#0".
         n = getattr(loop, "_n", state.iteration)
-        line = f"[{time.strftime('%H:%M:%S')}] it={n} {kind} " + \
-               " ".join(f"{k}={str(v)[:60]}" for k, v in data.items())
-        print(line, flush=True)
+        prefix = f"[{time.strftime('%H:%M:%S')}] " + (f"#{n} " if n else "")
+        width = shutil.get_terminal_size((EVENT_LINE_WIDTH + len(prefix), 24)).columns
+        text = _event_line(kind, data, max(40, width - len(prefix)))
+        if text is None:
+            return
         if kind == "iteration_done":
-            print(_status_line(spec, state, time.time()), flush=True)
+            text = f"{text} | {_status_line(spec, state, time.time())}"
+        if kind == "hypothesis":
+            print(flush=True)  # a blank line between iterations
+        print(prefix + text, flush=True)
 
     loop = Loop(spec, state, store, provider, bench, template_rs="", on_event=on_event)
     if cfg.mode == "agentic":

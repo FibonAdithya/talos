@@ -434,6 +434,33 @@ def test_compile_fix_rejects_out_of_scope_edits(tmp_path):
     assert [e["paths"] for e in events if e["kind"] == "edits_rejected"] == [["Cargo.toml"]]
 
 
+def test_compile_failed_event_names_the_error_even_when_the_tail_is_all_warnings(tmp_path):
+    # The event keeps the last 2000 characters of output; on a real C3 job that tail was 46
+    # warnings and cargo's summary, so the terminal could not say what the error was.
+    # mutation: reading the error out of the 2000-character tail instead of the whole output
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit("BUG"), "no edit blocks here"], budget=b)
+    fb._compile_ok = lambda files: "BUG" not in files["mod.rs"]
+    real = fb.evaluate
+    long_output = ("error[E0382]: borrow of moved value: `order`\n"
+                   + "warning: unused variable: `hp`\n" * 100
+                   + "error: could not compile `tig-algorithms` (lib) due to 1 previous error\n")
+    assert len(long_output) > 2000 + 50
+
+    def evaluate(request):
+        res = real(request)
+        if not res.compile.ok:
+            res.compile.output = long_output
+        return res
+
+    fb.evaluate = evaluate
+    loop.run()
+    events = [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
+    failed = [e for e in events if e["kind"] == "compile_failed"]
+    assert [e["error"] for e in failed] == ["error[E0382]: borrow of moved value: `order`"]
+    assert "E0382" not in failed[0]["output"] and len(failed[0]["output"]) == 2000
+
+
 def test_win_is_recorded_before_the_time_cap_bites(tmp_path):
     # mutation: checking the hours cap between the evaluate call and recording the win would
     # strand a proven winner as "exhausted" with best.holdout set but confirmed == []

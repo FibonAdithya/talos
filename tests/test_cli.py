@@ -279,9 +279,16 @@ def test_fake_run_end_to_end_wins_and_packages(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert "Status: won" in out
     assert "Best delta vs baseline: +1.000%" in out
-    assert "[status] job=" in out and "best=+1.000%" in out and "left=∞" in out
-    # mutation: stamping the printed prefix with state.iteration labels iteration 1's events it=0
-    assert "it=1 hypothesis" in out and "it=0 hypothesis" not in out
+    # one summary line per iteration: the outcome, then best, spend and time left
+    assert "#1 new best | best +1.000% | llm $0.02 | compute ≈$1.28 | ∞ left" in out
+    assert "[status]" not in out and "iteration_done" not in out and "job=" not in out
+    # mutation: stamping the printed prefix with state.iteration labels iteration 1's events #0
+    assert "#1 trying: " in out and "#0 trying" not in out
+    # mutation: printing raw event fields puts 16-digit floats and key=value pairs on the terminal
+    assert "mean_rel_delta" not in out and "strategy_tag=" not in out
+    assert "#1 scored +1.000% vs baseline" in out
+    assert "#1 won: held-out " in out
+    assert "stopped status=" not in out  # the summary block below reports it
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     assert f"Package: {run_dir / 'package'}" in out
     assert (run_dir / "package" / "scores.md").exists()
@@ -551,9 +558,124 @@ def test_status_line_says_unpriced_instead_of_zero_dollars(tmp_path):
                            created_at=0.0, monorepo_ref="r", challenge_id="c003")
         return cli._status_line(spec, JobState.fresh(Spend(started_at=0.0)), 0.0)
 
-    assert "llm=unpriced" in line("openai", "gpt-5")
-    assert "llm=$0.00" in line("anthropic", "claude-opus-5")
-    assert "llm=$0.00" in line("claude-cli", "claude-opus-5")  # a CLI provider bills no tokens
+    assert line("openai", "gpt-5") == "best n/a | llm unpriced | compute ≈$0.00 | ∞ left"
+    assert line("anthropic", "claude-opus-5") == "best n/a | llm $0.00 | compute ≈$0.00 | ∞ left"
+    # a CLI provider bills no tokens
+    assert "llm $0.00" in line("claude-cli", "claude-opus-5")
+
+
+def test_status_line_reports_hours_left(tmp_path):
+    # mutation: dropping the elapsed time prints the whole budget as still left
+    from talos.budget import Budget, Spend
+    from talos.state import JobState
+    spec = cli.JobSpec(job_id="j", challenge="knapsack", direction="d", provider="claude-cli",
+                       model="m", mode="single-shot",
+                       budget=Budget(usd=None, hours=4.0, iterations=None, compute_usd=1.0),
+                       rand_hash="ab" * 32, tracks=["t"], training=[], holdout=[], fuel=1,
+                       created_at=0.0, monorepo_ref="r", challenge_id="c003")
+    state = JobState.fresh(Spend(started_at=0.0))
+    assert cli._status_line(spec, state, 5400.0).endswith("| 2.5h left")
+
+
+# Payloads below are copied from runs/20260916-095103-knapsack/timeline.jsonl (a real C3 job),
+# with the expected lines written by hand.
+def test_event_line_hypothesis_shows_title_and_tag_only():
+    # mutation: printing the description puts a sentence cut at 60 characters on every iteration
+    data = {"title": "Beam-Greedy Reconstruction",
+            "description": "Replace single-path greedy reconstruction after perturbation",
+            "strategy_tag": "hybrid"}
+    assert cli._event_line("hypothesis", data) == "trying: Beam-Greedy Reconstruction (hybrid)"
+    assert cli._event_line("hypothesis", {"title": "T"}) == "trying: T"
+
+
+def test_event_line_scored_prints_percentages():
+    # mutation: printing the floats as they are gives -0.00019886764555467371
+    data = {"mean_rel_delta": -0.00019886764555467371,
+            "worst_rel_delta": -0.0009943382277733685, "error_rate": 0.0,
+            "runtime_ratio": 1.2345}
+    assert cli._event_line("scored", data) == \
+        "scored -0.020% vs baseline (worst track -0.099%, errors 0.0%, runtime x1.23)"
+    del data["runtime_ratio"]  # timelines written before the field existed
+    assert cli._event_line("scored", data) == \
+        "scored -0.020% vs baseline (worst track -0.099%, errors 0.0%)"
+
+
+def test_event_line_compile_failed_is_one_line_with_the_first_error():
+    # mutation: printing the output as it is spills rustc's multi-line diagnostic over the
+    # terminal; taking the last line instead of the first error prints "error: aborting due to"
+    output = ("warning: unused variable: `budget`\n    --> src/track1.rs:12:9\n"
+              "error[E0004]: non-exhaustive patterns: `None` not covered\n    --> src/t.rs:1896:5\n"
+              "     |\n1896 |     for &(i, score) in &order {\n"
+              "error: aborting due to 1 previous error; 1 warning emitted\n")
+    line = cli._event_line("compile_failed", {"output": output})
+    assert line == "compile failed: error[E0004]: non-exhaustive patterns: `None` not covered"
+    # mutation: ignoring the event's `error` field, which the loop reads from the whole output
+    assert cli._event_line("compile_failed", {"output": output, "error": "error[E0382]: moved"}) \
+        == "compile failed: error[E0382]: moved"
+    # timelines written before that field: only the last 2000 characters are there
+    tail_only = "     |\n1896 |     for &(i, score) in &order {\n\n"
+    assert cli._event_line("compile_failed", {"output": tail_only}) == \
+        "compile failed: 1896 | for &(i, score) in &order {"  # whitespace runs collapse
+    assert cli._event_line("compile_failed", {"output": ""}) == "compile failed"
+
+
+def test_event_line_iteration_done_words_each_outcome():
+    # mutation: printing outcome=failed:edit runs_since_improvement=3 as it is
+    def done(outcome, runs):
+        return cli._event_line("iteration_done",
+                               {"outcome": outcome, "runs_since_improvement": runs})
+    assert done("improved", 0) == "new best"
+    assert done("failed:score", 4) == "no improvement (4 in a row)"
+    assert done("failed:edit", 1) == "no candidate: edit failed (1 in a row)"
+    assert done("failed:compile", 2) == "no candidate: did not compile (2 in a row)"
+    assert done("failed:dead_code", 2) == "no candidate: new code never called (2 in a row)"
+    assert done("failed:runtime", 3) == "rejected: error rate over the ceiling (3 in a row)"
+    assert done("failed:novel", 5) == "failed:novel (5 in a row)"  # an outcome added later
+
+
+def test_event_line_other_events_are_sentences():
+    # mutation: any of these falling back to key=value prints a Python repr on the terminal
+    line = cli._event_line
+    assert line("baseline", {"message": "baseline knap_lean: cache hit abc"}) == \
+        "baseline knap_lean: cache hit abc"
+    assert line("baseline_ready", {"name": "knap_lean", "adoption": 860122008192060065}) == \
+        "baseline ready"
+    assert line("edits_rejected", {"paths": ["a/track1.rs", "a/track2.rs"]}) == \
+        "edit rejected: 2 path(s) outside the algorithm files"
+    assert line("dead_code", {"names": ["polish", "swap"]}) == \
+        "new code never called: polish, swap"
+    assert line("reset", {"forced_tag": "construction"}) == "switching strategy to: construction"
+    assert line("confirming", {}) == "confirming on held-out nonces"
+    assert line("won", {"holdout": {"mean_rel_delta": 0.0125, "worst_rel_delta": 0.001,
+                                    "error_rate": 0.0}}) == \
+        "won: held-out +1.250% vs baseline (worst track +0.100%)"
+    assert line("false_positive", {"holdout": {"mean_rel_delta": -0.002,
+                                               "worst_rel_delta": -0.01,
+                                               "error_rate": 0.0}}) == \
+        "not confirmed: held-out -0.200% vs baseline (worst track -1.000%)"
+    assert line("false_positive", {"error": "held-out not scored (timeout)"}) == \
+        "not confirmed: held-out not scored (timeout)"
+    assert line("rate_limited", {"wait_s": 60}) == "rate limited, waiting 60s"
+    assert line("resumed_pending", {"job_id": "job_17_hffwm0"}) == \
+        "reattached to bench job job_17_hffwm0"
+    assert line("discarded_incomplete", {"discarded": 1}) == \
+        "discarded 1 unfinished iteration(s) from the previous run"
+    assert line("stopped", {"status": "exhausted", "reason": "hours"}) is None
+
+
+def test_event_line_cuts_long_text_to_one_line():
+    # mutation: an uncut lesson wraps over several terminal rows
+    lesson = "When greedy reconstruction and bounded swaps repeatedly fail, " * 5
+    out = cli._event_line("distilled", {"lesson": lesson + "\nsecond line"})
+    assert out.startswith("lesson: When greedy reconstruction")
+    assert "\n" not in out and len(out) == 100 and out.endswith("...")
+    assert cli._event_line("distilled", {"lesson": "Short."}) == "lesson: Short."
+
+
+def test_event_line_unknown_kind_falls_back_to_one_line_of_fields():
+    # mutation: returning None for a kind with no formatter hides every event added later
+    out = cli._event_line("brand_new", {"a": 1, "b": "x\ny" * 100})
+    assert out.startswith("brand_new a=1 b=x y") and "\n" not in out and len(out) == 100
 
 
 def test_run_refuses_agentic_codex_without_the_opt_in(tmp_path, monkeypatch, capsys):
