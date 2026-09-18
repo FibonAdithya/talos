@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import re
-import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable
@@ -31,25 +32,23 @@ class _SessionGone(C3CommandError):
     """404 on a request that carried a session id: the server dropped the session."""
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """The default opener follows a 3xx and resends every header but Content-Length/-Type —
-    including Authorization — to whatever host the Location points at, with no same-host check.
-    Returning None here makes urllib raise HTTPError for the 3xx instead of resending anything."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_opener = urllib.request.build_opener(_NoRedirect)
-
-
 def _urllib_post(url: str, headers: dict, body: bytes, timeout_s: int):
-    req = urllib.request.Request(url, body, headers, method="POST")
+    """Raw HTTP, never through an OpenerDirector: urllib's default opener resends every header
+    but Content-Length/-Type — including Authorization — to wherever a 3xx Location points, with
+    no same-host check. http.client makes one request and never follows a redirect on its own."""
+    parsed = urllib.parse.urlsplit(url)
+    conn_cls = (http.client.HTTPSConnection if parsed.scheme == "https"
+               else http.client.HTTPConnection)
+    conn = conn_cls(parsed.hostname, parsed.port, timeout=timeout_s)
     try:
-        with _opener.open(req, timeout=timeout_s) as r:
-            return r.status, dict(r.headers), r.read()
-    except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers), e.read()
+        target = parsed.path or "/"
+        if parsed.query:
+            target += "?" + parsed.query
+        conn.request("POST", target, body=body, headers=headers)
+        resp = conn.getresponse()
+        return resp.status, dict(resp.getheaders()), resp.read()
+    finally:
+        conn.close()
 
 
 class McpClient:
@@ -94,7 +93,7 @@ class McpClient:
         if status == 404 and self._session:
             raise _SessionGone(f"c3 {method} failed with HTTP 404: the session is gone")
         if status >= 300:
-            # includes 3xx: a redirect is never followed (see _NoRedirect), and the Location
+            # includes 3xx: a redirect is never followed (see _urllib_post), and the Location
             # value is deliberately not included here
             raise C3CommandError(f"c3 {method} failed with HTTP {status}")
         self._session = headers.get("mcp-session-id") or self._session
