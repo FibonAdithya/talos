@@ -54,6 +54,10 @@
 
 **Interfaces:**
 - Consumes: `talos.c3_bench.C3CommandError`, `talos.bench._redact`, `talos.__version__`.
+- Also modifies `talos/bench.py` and `tests/test_bench.py`: `_redact` strips C3 API keys as well as
+  rand hashes (spec §4.3, and the Global Constraint that `_redact` is the one scrubber). The
+  replacement text is `<c3-key>`; it must not contain `c3_key_`, or an assertion that the prefix is
+  absent fails on the redacted text itself.
 - Produces:
   - `class McpAuthError(C3CommandError)` — bad or revoked key (HTTP 401/403).
   - `McpClient(api_key: str, url: str = "https://api.cthree.cloud/mcp", post: Callable | None = None, timeout_s: int = 60)`
@@ -197,6 +201,57 @@ def test_transport_exception_becomes_c3commanderror_without_the_key():
     with pytest.raises(C3CommandError) as ei:
         McpClient(KEY, post=FakePost({"initialize": boom})).tool("whoami", {})
     assert KEY not in str(ei.value)  # mutation: str(e) passed through unredacted
+
+
+def test_a_404_for_a_stale_session_starts_a_new_session_once():
+    state = {"inits": 0, "calls": 0}
+
+    def init(doc):
+        state["inits"] += 1
+        return 200, {"Content-Type": "application/json",
+                     "Mcp-Session-Id": f"sess-{state['inits']}"}, rpc(doc["id"], {})
+
+    def first_call_is_gone(doc):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return 404, {}, b""
+        return 200, {"Content-Type": "application/json"}, rpc(
+            doc["id"], {"structuredContent": {"ok": True}})
+
+    post = FakePost({"initialize": init, "tools/call": first_call_is_gone})
+    # mutation: a 404 raised straight through pauses the run on a session the server dropped
+    assert McpClient(KEY, post=post).tool("whoami", {}) == {"ok": True}
+    assert state["inits"] == 2 and post.calls[-1][1]["Mcp-Session-Id"] == "sess-2"
+
+    post2 = FakePost({"initialize": init, "tools/call": lambda doc: (404, {}, b"")})
+    with pytest.raises(C3CommandError):
+        McpClient(KEY, post=post2).tool("whoami", {})
+    # mutation: retrying without a bound loops for ever against a server that always says 404
+    assert [d["method"] for _u, _h, d in post2.calls].count("tools/call") == 2
+
+
+def test_response_headers_are_read_whatever_their_case():
+    def init(doc):
+        return 200, {"content-type": "application/json", "mcp-session-id": "sess-9"}, rpc(
+            doc["id"], {})
+
+    def call(doc):
+        return 200, {"content-type": "text/event-stream"}, (
+            b"data: " + rpc(doc["id"], {"structuredContent": {"n": 1}}) + b"\n\n")
+
+    post = FakePost({"initialize": init, "tools/call": call})
+    # mutation: a case-sensitive lookup misses the lower-case names an HTTP/2 front end sends
+    assert McpClient(KEY, post=post).tool("whoami", {}) == {"n": 1}
+    assert post.calls[-1][1]["Mcp-Session-Id"] == "sess-9"
+```
+
+And in `tests/test_bench.py`, next to `test_redact_hides_a_rand_hash`:
+
+```python
+def test_redact_hides_a_c3_api_key():
+    out = _redact("sending Bearer c3_key_Ab-9_z to the server")
+    # mutation: a key echoed by C3 or by an exception reaches the pause message and state.json
+    assert "c3_key_" not in out and "Ab-9_z" not in out and "to the server" in out
 ```
 
 - [ ] **Step 2: Run the tests and watch them fail**
@@ -216,7 +271,6 @@ Cloudflare rejects the default urllib User-Agent with 403 error 1010, every requ
 from __future__ import annotations
 
 import json
-import re
 import urllib.error
 import urllib.request
 from typing import Callable
@@ -227,16 +281,14 @@ from talos.c3_bench import C3CommandError
 
 MCP_URL = "https://api.cthree.cloud/mcp"
 PROTOCOL_VERSION = "2025-06-18"
-_KEY_RE = re.compile(r"c3_key_[A-Za-z0-9_-]+")
-
-
-def _scrub(text: str) -> str:
-    """No key and no rand hash in any message this module raises."""
-    return _KEY_RE.sub("c3_key_<redacted>", _redact(text))
 
 
 class McpAuthError(C3CommandError):
     """The key was rejected (401/403). Setup reports this as a key problem, not an outage."""
+
+
+class _SessionGone(C3CommandError):
+    """404 on a request that carried a session id: the server dropped the session."""
 
 
 def _urllib_post(url: str, headers: dict, body: bytes, timeout_s: int):
@@ -280,15 +332,19 @@ class McpClient:
                                               json.dumps(body).encode(), self._timeout_s)
         except Exception as e:  # OSError, URLError, anything the injected post raises
             raise C3CommandError(f"c3 {method} could not be sent: "
-                                 f"{_scrub(str(e))[:200]}") from None
+                                 f"{_redact(str(e))[:200]}") from None
+        # urllib capitalises names ("Mcp-session-id") and HTTP/2 front ends lower-case them
+        headers = {str(k).lower(): v for k, v in (headers or {}).items()}
         if status in (401, 403):
             raise McpAuthError("the C3 API key was rejected (check `c3 apikey list`)")
+        if status == 404 and self._session:
+            raise _SessionGone(f"c3 {method} failed with HTTP 404: the session is gone")
         if status >= 400:
             raise C3CommandError(f"c3 {method} failed with HTTP {status}")
-        self._session = headers.get("Mcp-Session-Id") or self._session
+        self._session = headers.get("mcp-session-id") or self._session
         if notify:
             return None
-        return self._result(method, headers.get("Content-Type", ""), raw, self._id)
+        return self._result(method, headers.get("content-type", ""), raw, self._id)
 
     def _result(self, method: str, content_type: str, raw: bytes, id_: int) -> dict:
         text = raw.decode("utf-8", "replace")
@@ -305,12 +361,13 @@ class McpClient:
                 docs = [json.loads(text)]
             except ValueError:
                 raise C3CommandError(f"c3 {method} returned no JSON") from None
+        docs = [d for d in docs if isinstance(d, dict)]
         doc = next((d for d in docs if d.get("id") == id_), docs[-1] if docs else None)
         if doc is None:
             raise C3CommandError(f"c3 {method} returned no reply for this request")
         if doc.get("error"):
             msg = str(doc["error"].get("message", doc["error"]))
-            raise C3CommandError(f"c3 {method} failed: {_scrub(msg)[:300]}")
+            raise C3CommandError(f"c3 {method} failed: {_redact(msg)[:300]}")
         return doc.get("result") or {}
 
     def _ensure_ready(self) -> None:
@@ -324,11 +381,18 @@ class McpClient:
     def tool(self, name: str, arguments: dict) -> dict:
         """Calls one tool and returns its result document."""
         self._ensure_ready()
-        res = self._send("tools/call", {"name": name, "arguments": arguments}) or {}
+        params = {"name": name, "arguments": arguments}
+        try:
+            res = self._send("tools/call", params) or {}
+        except _SessionGone:
+            # spec §4.3: start a new session once. A second 404 raises as a C3CommandError.
+            self._session, self._ready = None, False
+            self._ensure_ready()
+            res = self._send("tools/call", params) or {}
         text = " ".join(c.get("text", "") for c in res.get("content", [])
                         if isinstance(c, dict))
         if res.get("isError"):
-            raise C3CommandError(f"c3 {name} failed: {_scrub(text)[:300]}")
+            raise C3CommandError(f"c3 {name} failed: {_redact(text)[:300]}")
         if res.get("structuredContent") is not None:
             return res["structuredContent"]
         try:
@@ -337,10 +401,22 @@ class McpClient:
             return {"text": text}
 ```
 
+Extend `talos/bench.py::_redact` (keep `_HASH_RE` as it is):
+
+```python
+_C3_KEY_RE = re.compile(r"c3_key_[A-Za-z0-9_-]+")
+
+
+def _redact(text: str) -> str:
+    # docstring unchanged, plus: "A C3 API key must not reach one either."
+    return _C3_KEY_RE.sub("<c3-key>", _HASH_RE.sub("<hash>", text))
+```
+
 - [ ] **Step 4: Run the tests and watch them pass**
 
-Run: `/tmp/v312/bin/python -m pytest -q -p no:cacheprovider tests/test_c3_mcp.py`
-Expected: 9 passed.
+Run: `/tmp/v312/bin/python -m pytest -q -p no:cacheprovider tests/test_c3_mcp.py tests/test_bench.py`
+Expected: `tests/test_c3_mcp.py` 11 passed (10 tests, one parametrised twice); `tests/test_bench.py`
+all passed, one more than before.
 
 - [ ] **Step 5: Mutation-check every new test**
 
@@ -355,12 +431,16 @@ For each, edit `talos/c3_mcp.py`, run the one test, confirm it fails, restore:
 | in `tool`, return `res["structuredContent"]` unconditionally | `test_content_text_json_is_used...` |
 | in `tool`, delete the `if res.get("isError")` branch | `test_tool_error_and_rpc_error_raise_c3commanderror` |
 | raise `C3CommandError(text)` instead of `McpAuthError(...)` for 401/403 | both `test_auth_failures_...` cases |
-| in `_send`'s `except`, use `str(e)` instead of `_scrub(str(e))` | `test_transport_exception_becomes_c3commanderror_without_the_key` |
+| in `_send`'s `except`, use `str(e)` instead of `_redact(str(e))` | `test_transport_exception_becomes_c3commanderror_without_the_key` |
+| in `tool`, drop the `except _SessionGone` retry | `test_a_404_for_a_stale_session_starts_a_new_session_once` (first half) |
+| in `tool`, wrap the retry in `while True` | same test (second half; it must fail, not hang — give the mutation run `timeout 60`) |
+| in `_send`, drop the `.lower()` normalisation and look up `"Mcp-Session-Id"` | `test_response_headers_are_read_whatever_their_case` |
+| in `_redact`, drop the `_C3_KEY_RE` substitution | `test_redact_hides_a_c3_api_key` and `test_transport_exception_...` |
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add talos/c3_mcp.py tests/test_c3_mcp.py
+git add talos/c3_mcp.py talos/bench.py tests/test_c3_mcp.py tests/test_bench.py
 git commit -m "feat: an MCP JSON-RPC client for C3, keyed and redacted"
 ```
 
@@ -368,19 +448,27 @@ git commit -m "feat: an MCP JSON-RPC client for C3, keyed and redacted"
 
 ### Task 2: `C3Transport` protocol and `CliTransport`
 
-Pure refactor: the CLI code moves out of `C3Bench` behind an interface, with behaviour unchanged. `tests/test_c3_bench.py` must pass untouched at the end of this task — that is the regression proof.
+Pure refactor: the CLI code moves out of `C3Bench` behind an interface, with behaviour unchanged. Every existing test in `tests/test_c3_bench.py` must pass unedited at the end of this task — that is the regression proof. New tests are appended to that file; none of the existing ones is changed.
+
+Two tests elsewhere reach into the private methods this task deletes and must be rewritten here (AUDIT: the plan first claimed no other test file changes):
+
+- `tests/test_portability.py::test_c3_calls_start_the_resolved_cli` calls `C3Bench(...)._c3("whoami")` inside `try/except Exception`, so after the move it would swallow an `AttributeError` and fail on `bench == []`. Change that one call to `C3Bench(tmp_path, run=recorder(bench))._t.whoami()`.
+- `tests/test_cli.py::test_make_bench_hands_the_c3_key_to_c3bench` uses `b._run` and `b._c3`. Replace its body with the version in Step 1.
 
 **Files:**
 - Create: `talos/c3_transport.py`
 - Create: `tests/test_c3_transport.py`
-- Modify: `talos/c3_bench.py` (remove `_c3`, `_deploy`, `_status`, `_cancel`, `_pull`; add `self._t`)
+- Modify: `talos/c3_bench.py` (remove `_c3`, `_deploy`, `_status`, `_cancel`, `_pull`, `self._run`, `self._env` and the imports they leave unused — `shutil`, `argv0`; add `self._t`)
+- Modify: `tests/test_c3_bench.py` (append the transport-injected policy tests; edit nothing)
+- Modify: `tests/test_portability.py`, `tests/test_cli.py` (the two tests named above)
 
 **Interfaces:**
 - Produces:
   - `class C3Transport(Protocol)` with `whoami() -> dict`, `balance_gbp() -> float | None`, `deploy(job_dir: Path) -> str`, `status(job_id: str) -> str`, `cancel(job_id: str) -> None`, `fetch(job_id: str, name: str, dest: Path) -> bool`.
   - `CliTransport(run=subprocess.run, api_key: str | None = None)` — same behaviour as today's `C3Bench._c3` and friends, including `c3_env`, the 600 s default timeout, the 60 s timeouts for `squeue`/`cancel`, `parse_json_stdout`, and the two-attempt pull.
   - `make_transport(api_key: str | None, run=subprocess.run) -> C3Transport` — `McpTransport` when `api_key` is set (added in Task 4; until then `CliTransport`), else `CliTransport`.
-  - `CliTransport.fetch(job_id, name, dest)` runs `c3 pull <job_id> --json` once per call, finds `name` under the pulled directory (`artifacts/` first, then the directory itself), copies it to `dest`, and returns `False` when absent.
+  - `CliTransport.fetch(job_id, name, dest)` runs `c3 pull <job_id> --json` **once per job, not once per file** (the pulled directory is cached on the transport), finds `name` in it, and returns `False` when absent. AUDIT: `C3Bench` fetches two files per job; one pull per file made `test_pull_failure_is_retried_once_against_the_same_job` see 3 pulls where it asserts 2, and doubled every download.
+  - When `dest` is `<X>/<job_id>/artifacts/<name>` the pull runs in `<X>`, so the file lands on `dest` and the on-disk layout under `runs/<job>/c3/<n>/` is what it is today. Any other `dest` gets a pull in `dest.parent` and a copy.
 - Consumes: `talos.c3_bench.C3CommandError`, `parse_json_stdout`, `c3_env`, `talos.executables.argv0`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -409,7 +497,8 @@ def runner(script):
 
 
 def test_cli_transport_deploy_returns_the_job_id_from_the_job_dir(tmp_path):
-    run, calls = runner(lambda word, kw: (0, "Warning: experimental\n" + json.dumps({"id": "job_9"})))
+    out = "Warning: experimental\n" + json.dumps({"id": "job_9"})
+    run, calls = runner(lambda word, kw: (0, out))
     assert CliTransport(run=run).deploy(tmp_path) == "job_9"
     # mutation: deploying outside the job dir uploads the wrong workspace
     assert calls[0][1]["cwd"] == str(tmp_path)
@@ -433,13 +522,30 @@ def test_cli_transport_fetch_copies_the_named_artifact_and_reports_absence(tmp_p
         (d / "results.json").write_text('{"compile": {}}', encoding="utf-8", newline="\n")
         return 0, json.dumps({"jobs": [{"job_id": "job_1", "directory": str(d.parent)}]})
 
-    run, _ = runner(script)
+    run, calls = runner(script)
     t = CliTransport(run=run)
     dest = tmp_path / "out" / "results.json"
     assert t.fetch("job_1", "results.json", dest) is True
     assert json.loads(dest.read_text(encoding="utf-8")) == {"compile": {}}
     # mutation: returning True for a file the job never wrote makes _collect read a stale path
     assert t.fetch("job_1", "build.log", tmp_path / "out" / "build.log") is False
+    # mutation: one pull per file downloads every job twice
+    assert [c[0][1] for c in calls].count("pull") == 1
+
+
+def test_cli_transport_fetch_pulls_in_place_when_dest_is_where_c3_pull_writes(tmp_path):
+    def script(word, kw):
+        d = Path(kw["cwd"]) / "job_1" / "artifacts"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "results.json").write_text("{}", encoding="utf-8", newline="\n")
+        return 0, json.dumps({"jobs": [{"job_id": "job_1", "directory": str(d.parent)}]})
+
+    run, calls = runner(script)
+    dest = tmp_path / "jobdir" / "job_1" / "artifacts" / "results.json"
+    assert CliTransport(run=run).fetch("job_1", "results.json", dest) is True
+    # mutation: pulling in dest.parent nests a second job_1/artifacts/ under the first
+    assert calls[0][1]["cwd"] == str(tmp_path / "jobdir") and dest.read_text() == "{}"
+    assert not (dest.parent / "job_1").exists()
 
 
 def test_cli_transport_balance_parses_the_printed_amount_and_survives_garbage():
@@ -465,10 +571,109 @@ def test_make_transport_uses_the_cli_without_a_key_and_mcp_with_one():
     assert isinstance(make_transport("c3_key_" + "a" * 20), McpTransport)
 ```
 
+Replace the body of `tests/test_cli.py::test_make_bench_hands_the_c3_key_to_c3bench`:
+
+```python
+def test_make_bench_hands_the_c3_key_to_c3bench(tmp_path, monkeypatch):
+    from talos import c3_transport
+    from talos.bench import PendingJobStore
+    seen = []
+
+    def fake_make(api_key, run=None):
+        seen.append(api_key)
+        return object()
+    monkeypatch.setattr(c3_transport, "make_transport", fake_make)
+    cli.make_bench("c3", tmp_path, PendingJobStore.memory(), c3_api_key="c3_key_1")
+    # mutation: make_bench accepting the key but not forwarding it
+    assert seen == ["c3_key_1"]
+```
+
+Append to `tests/test_c3_bench.py` (spec §5: the policy holds for any transport; this is also the
+only coverage of the `transport=` parameter):
+
+```python
+def _no_cli(cmd, **kw):
+    # Safety: if C3Bench ever ignored `transport=`, this stops it reaching a logged-in `c3`.
+    raise AssertionError(f"a transport was injected; C3Bench must not run {cmd[:2]}")
+
+
+class FakeTransport:
+    """A C3Transport with no CLI and no HTTP behind it."""
+
+    name = "fake"
+
+    def __init__(self, statuses, results=None):
+        self.statuses, self.results = list(statuses), results
+        self.job_ids = ["job_1", "job_2", "job_3"]
+        self.calls = []
+
+    def deploy(self, job_dir):
+        self.calls.append(("deploy", str(job_dir)))
+        return self.job_ids.pop(0)
+
+    def status(self, job_id):
+        self.calls.append(("status", job_id))
+        return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+
+    def cancel(self, job_id):
+        self.calls.append(("cancel", job_id))
+
+    def fetch(self, job_id, name, dest):
+        self.calls.append(("fetch", job_id, name))
+        if name != "results.json" or self.results is None:
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(self.results), encoding="utf-8", newline="\n")
+        return True
+
+
+def tbench(tmp_path, t):
+    clock = Clock()
+
+    def sleep(s):
+        clock.t += s
+    return C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
+                   clock=clock, sleep=sleep, poll_s=20.0, pending_timeout_s=1800)
+
+
+def test_an_injected_transport_carries_the_whole_job(tmp_path):
+    t = FakeTransport(["PENDING", "RUNNING", "SUCCEEDED"], results_doc())
+    r = tbench(tmp_path, t).evaluate(req())
+    # mutation: C3Bench ignoring `transport=` and building its own CliTransport
+    assert r.compile.ok and ("fetch", "job_1", "results.json") in t.calls
+    assert [c[0] for c in t.calls].count("deploy") == 1
+
+
+def test_pending_timeout_cancels_through_the_transport(tmp_path):
+    t = FakeTransport(["PENDING"])
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: a cancel left on the deleted CLI helper leaves a queued job billing later
+    assert "no C3 capacity" in str(ei.value) and ("cancel", "job_1") in t.calls
+
+
+def test_a_failed_job_is_resubmitted_once_through_the_transport(tmp_path):
+    t = FakeTransport(["FAILED"], results=None)
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: treating fetch() == False as a pull error skips the one resubmission
+    assert "failed twice" in str(ei.value)
+    assert [c[0] for c in t.calls].count("deploy") == 2
+
+
+def test_success_without_results_is_unavailable_not_a_resubmission(tmp_path):
+    t = FakeTransport(["SUCCEEDED"], results=None)
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: ignoring fetch's return value reads a results.json that is not there
+    assert "without results.json" in str(ei.value)
+    assert [c[0] for c in t.calls].count("deploy") == 1
+```
+
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `/tmp/v312/bin/python -m pytest -q -p no:cacheprovider tests/test_c3_transport.py`
-Expected: `ModuleNotFoundError: No module named 'talos.c3_transport'`. The `make_transport` test also fails on `McpTransport` until Task 4; leave it failing and note it — Task 4 Step 4 is where it must pass. (If you prefer a green suite at every commit, mark only that one test `@pytest.mark.xfail(reason="McpTransport lands in Task 4", strict=True)` and remove the marker in Task 4.)
+Expected: `ModuleNotFoundError: No module named 'talos.c3_transport'`. The `make_transport` test cannot pass until Task 4 adds `McpTransport`. Mark that one test `@pytest.mark.xfail(reason="McpTransport lands in Task 4", strict=True, raises=ImportError)`; Task 4 removes the marker. (AUDIT: this was optional. It is required, because Tasks 1–3 run in parallel lanes and each lane's suite must be green at its commit. `raises=ImportError` covers both "no `talos.c3_mcp` yet" and "module present, class absent".)
 
 - [ ] **Step 3: Write `talos/c3_transport.py`**
 
@@ -504,6 +709,7 @@ class CliTransport:
     def __init__(self, run=subprocess.run, api_key: str | None = None):
         self._run = run
         self._env = c3_env(api_key)
+        self._pulled: dict[tuple[str, str], Path] = {}
 
     def _c3(self, *args: str, cwd: Path | None = None, timeout: int = 600) -> str:
         # body moved verbatim from C3Bench._c3, with argv0("c3") as argv[0]
@@ -532,28 +738,27 @@ class CliTransport:
         except C3CommandError:
             pass  # best effort: the job may already be terminal
 
+    def _pull(self, job_id: str, root: Path) -> Path:
+        """Body moved verbatim from C3Bench._pull (two attempts, and the rmtree of a "skipped"
+        pull that left nothing on disk), with `job_dir` renamed `root`."""
+        ...
+
     def fetch(self, job_id: str, name: str, dest: Path) -> bool:
-        """`c3 pull` writes into cwd; copy the one file out. Keeps today's two-attempt pull."""
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        pull_root = dest.parent
-        for attempt in range(2):
-            try:
-                doc = parse_json_stdout(self._c3("pull", job_id, "--json", cwd=pull_root))
-            except (C3CommandError, ValueError):
-                if attempt == 1:
-                    raise
-                continue
-            jobs = doc.get("jobs") or []
-            d = Path(jobs[0]["directory"]) if jobs and jobs[0].get("directory") else pull_root / job_id
-            if not d.is_absolute():
-                d = pull_root / d
-            for cand in (d / "artifacts" / name, d / name):
-                if cand.exists():
-                    if cand != dest:
-                        shutil.copy2(cand, dest)
-                    return True
+        dest = Path(dest)
+        # `c3 pull` run in X writes X/<job_id>/artifacts/<name>. When dest is that path, pull in
+        # X so the file lands on dest: the layout C3Bench has always left on disk.
+        in_place = dest.parent.name == "artifacts" and dest.parent.parent.name == job_id
+        root = dest.parents[2] if in_place else dest.parent
+        key = (job_id, str(root))
+        if key not in self._pulled:  # one pull per job, however many files are fetched
+            self._pulled[key] = self._pull(job_id, root)
+        src = self._pulled[key] / name
+        if not src.exists():
             return False
-        return False
+        if src.resolve() != dest.resolve():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+        return True
 
 
 def make_transport(api_key: str | None, run=subprocess.run) -> C3Transport:
@@ -599,8 +804,8 @@ Replace the call sites:
 
 - [ ] **Step 5: Run the C3 suites**
 
-Run: `/tmp/v312/bin/python -m pytest -q -p no:cacheprovider tests/test_c3_bench.py tests/test_c3_transport.py tests/test_cli.py`
-Expected: `test_c3_bench.py` and `test_cli.py` fully pass (unchanged files — this is the refactor's regression proof); in `test_c3_transport.py` only `test_make_transport_...` fails, on `McpTransport`.
+Run: `/tmp/v312/bin/python -m pytest -q -p no:cacheprovider tests/test_c3_bench.py tests/test_c3_transport.py tests/test_cli.py tests/test_portability.py`
+Expected: all pass, with exactly one `xfailed` (`test_make_transport_...`). Then run the whole unit suite (`-m "not live"`): other files import `C3Bench` too.
 
 - [ ] **Step 6: Mutation-check the new tests**
 
@@ -612,11 +817,17 @@ Expected: `test_c3_bench.py` and `test_cli.py` fully pass (unchanged files — t
 | in `fetch`, `return True` after the loop | `test_cli_transport_fetch_copies_the_named_artifact...` |
 | in `balance_gbp`, `return 0.0` when the regex misses | `test_cli_transport_balance_parses...` |
 | in `_c3`, drop the `except OSError` branch | `test_cli_transport_missing_binary_is_a_c3commanderror` |
+| in `fetch`, drop the `_pulled` cache | `test_cli_transport_fetch_copies...` (pull count) and the existing `test_pull_failure_is_retried_once...` |
+| in `fetch`, always `root = dest.parent` | `test_cli_transport_fetch_pulls_in_place...` |
+| in `C3Bench.__init__`, ignore `transport` | `test_an_injected_transport_carries_the_whole_job` (fails on `_no_cli`, never reaches `c3`) |
+| in `_collect`, ignore `fetch`'s return value | `test_success_without_results_is_unavailable_not_a_resubmission` |
+| in `make_bench`, drop `api_key=c3_api_key` | `test_make_bench_hands_the_c3_key_to_c3bench` |
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add talos/c3_transport.py talos/c3_bench.py tests/test_c3_transport.py
+git add talos/c3_transport.py talos/c3_bench.py tests/test_c3_transport.py tests/test_c3_bench.py \
+        tests/test_portability.py tests/test_cli.py
 git commit -m "refactor: put the c3 CLI behind a C3Transport seam"
 ```
 
@@ -739,6 +950,7 @@ class FakeClient:
 
 def job_dir_for(tmp_path):
     from tests.test_c3_jobdir import req
+    # The directory is deliberately not named after the purpose: the settings come from `.c3`.
     return write_job_dir(tmp_path / "job", req(), "3")
 
 
@@ -958,23 +1170,30 @@ def _download(url: str, timeout_s: int) -> bytes:
         with urllib.request.urlopen(req, timeout=timeout_s) as r:
             return r.read()
     except Exception as e:
-        raise C3CommandError(f"artifact download failed: {_scrub(str(e))[:200]}") from None
+        raise C3CommandError(f"artifact download failed: {_redact(str(e))[:200]}") from None
 
 
 def _job_dir_settings_inputs(job_dir: Path) -> tuple[str, str, int]:
     """Recover (challenge, purpose, walltime seconds) from the job dir write_job_dir produced:
-    the challenge from payload.json, the purpose from the directory name, and the walltime from
-    the `.c3` the same function rendered, so both paths use one number."""
-    payload = json.loads((job_dir / "payload.json").read_text(encoding="utf-8"))
-    text = (job_dir / ".c3").read_text(encoding="utf-8")
-    m = re.search(r'^time:\s*"(\d+):(\d\d):(\d\d)"', text, re.M)
-    if not m:
-        raise C3CommandError("job dir has no time: in .c3")
-    h, mi, s = (int(x) for x in m.groups())
-    return payload["challenge"], job_dir.name, h * 3600 + mi * 60 + s
+    the challenge from payload.json, and the purpose and walltime from the `.c3` the same
+    function rendered, so both paths use one set of values. AUDIT: the purpose first came from
+    the directory name, which the deploy test's own job dir ("job", purpose "3") disproves."""
+    try:
+        challenge = json.loads((job_dir / "payload.json").read_text(encoding="utf-8"))["challenge"]
+        text = (job_dir / ".c3").read_text(encoding="utf-8")
+    except (OSError, ValueError, KeyError) as e:
+        raise C3CommandError(f"job dir is not one write_job_dir wrote: "
+                             f"{_redact(str(e))[:200]}") from None
+    t = re.search(r'^time:\s*"(\d+):(\d\d):(\d\d)"', text, re.M)
+    prefix = f"talos-{challenge}-"
+    n = re.search(r"^job_name:\s*(\S+)\s*$", text, re.M)
+    if not t or not n or not n.group(1).startswith(prefix):
+        raise C3CommandError("job dir has no usable time: or job_name: in .c3")
+    h, mi, sec = (int(x) for x in t.groups())
+    return challenge, n.group(1)[len(prefix):], h * 3600 + mi * 60 + sec
 ```
 
-Also add the imports this needs at the top of the module: `base64`, `hashlib`, `from pathlib import Path`.
+Also add the imports this needs at the top of the module: `base64`, `hashlib`, `re`, `from pathlib import Path`.
 
 - [ ] **Step 4: Run the tests**
 
@@ -989,6 +1208,7 @@ Expected: all pass, `test_make_transport_uses_the_cli_without_a_key_and_mcp_with
 | set `executable` on every file | same test |
 | include `.c3` in `files` | same test |
 | `"hardware": "l40"` in the `args` dict | same test (settings loop) |
+| in `_job_dir_settings_inputs`, return `job_dir.name` as the purpose | same test (`job_name` is `talos-knapsack-3`, the directory is `job`) |
 | in `status`, read `doc["current_activity"]["event_type"]` | `test_status_reads_the_top_level_status_upper_cased` |
 | in `cancel`, remove the `try` | `test_cancel_is_best_effort` |
 | skip the `sha256` comparison in `fetch` | `test_fetch_rejects_content_that_does_not_match_its_hash` |
@@ -1027,7 +1247,8 @@ def test_real_urllib_post_round_trip_against_a_local_server():
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             body = self.rfile.read(int(self.headers["Content-Length"]))
-            seen.append((dict(self.headers), _json.loads(body)))
+            # Not dict(): urllib sends "User-agent", and only the Message lookup ignores case.
+            seen.append((self.headers, _json.loads(body)))
             doc = _json.loads(body)
             if doc.get("method") == "notifications/initialized":
                 self.send_response(202)
@@ -1116,8 +1337,12 @@ def test_check_c3_with_a_key_uses_mcp_and_never_shells_out(monkeypatch, capsys):
 
     monkeypatch.setattr(cli.subprocess, "run", no_subprocess)
     made = {}
-    monkeypatch.setattr(cli, "make_transport",
-                        lambda api_key, run=None: made.setdefault("key", api_key) or T())
+
+    def fake_make(api_key, run=None):
+        # AUDIT: was `made.setdefault("key", api_key) or T()`, which returns the key string.
+        made["key"] = api_key
+        return T()
+    monkeypatch.setattr(cli, "make_transport", fake_make)
     assert cli.check_c3(api_key="c3_key_" + "a" * 20) == 0.5
     assert calls == ["whoami", "balance"]  # mutation: skipping whoami accepts a revoked key
     assert made["key"] == "c3_key_" + "a" * 20
@@ -1146,6 +1371,8 @@ def test_check_c3_reports_a_rejected_key_as_a_key_problem(monkeypatch):
 
 
 def test_check_c3_without_a_key_still_asks_the_cli_to_log_in(monkeypatch):
+    monkeypatch.delenv("C3_API_KEY", raising=False)  # check_c3 reads it to pick the hint
+
     class T:
         name = "cli"
 
@@ -1176,7 +1403,40 @@ def test_check_c3_unreadable_balance_warns_and_returns_zero(monkeypatch, capsys)
     # mutation: returning a number the server never reported ("£0.00 is low")
     assert cli.check_c3(api_key="k") == 0.0
     assert "could not read the C3 balance" in capsys.readouterr().err
+
+
+def test_check_c3_with_an_injected_run_drives_the_cli_even_with_a_key(monkeypatch):
+    def no_mcp(api_key, run=None):
+        raise AssertionError("an injected `run` means the CLI; this would be a network call")
+    monkeypatch.setattr(cli, "make_transport", no_mcp)
+    # mutation: routing run= + api_key= to make_transport sends the existing keyed check_c3
+    # tests to the real api.cthree.cloud
+    assert cli.check_c3(run=_c3_runner(), api_key="c3_key_secret") == 9.89
+
+
+def test_setup_checks_c3_with_the_environment_key_and_says_which_transport(tmp_path, monkeypatch,
+                                                                            capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("C3_API_KEY", "c3_key_env")
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    checked = []
+    monkeypatch.setattr(cli, "check_c3", lambda run=None, api_key=None: checked.append(api_key))
+    assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", ""])) == 0
+    # mutation: checking with the typed key alone makes setup demand the c3 CLI from a user
+    # whose runs go over MCP on the C3_API_KEY in their environment
+    assert checked == ["c3_key_env"]
+    assert "MCP" in capsys.readouterr().out
+    monkeypatch.delenv("C3_API_KEY")
+    assert cli.main(["setup"], ask=scripted(["c3", "claude-cli", "", "", ""])) == 0
+    # mutation: a fixed line tells a CLI user that nothing needs installing
+    assert checked[-1] is None and "c3 CLI" in capsys.readouterr().out
 ```
+
+AUDIT: two existing tests, `test_check_c3_passes_the_api_key_in_the_environment_not_argv` and
+`test_check_c3_failure_names_the_api_key_option`, call `check_c3(run=..., api_key=...)`. As first
+written, `check_c3` sent any key to `make_transport`, so after Task 4 both would have made a real
+HTTPS call to `api.cthree.cloud` from the unit suite. `check_c3` therefore follows the same rule as
+`C3Bench`: an injected `run` means "drive the CLI".
 
 Keep the existing `test_setup_*` C3 tests working: they drive `cli.subprocess` with a fake and pass no key, so they must continue to exercise `CliTransport`.
 
@@ -1192,14 +1452,20 @@ def check_c3(run=None, api_key: str | None = None, transport=None) -> float:
     """Confirms C3 is reachable and authenticated — over MCP when a key is configured, over the
     `c3` CLI otherwise — and returns the credit balance in GBP. 0.0 means "could not read it"."""
     from talos.c3_mcp import McpAuthError
-    t = transport or make_transport(api_key, run=run or subprocess.run)
+    if transport is not None:
+        t = transport
+    elif run is not None:
+        t = CliTransport(run=run, api_key=api_key)  # an injected runner means the CLI, keyed or not
+    else:
+        t = make_transport(api_key, run=subprocess.run)  # resolved now: tests patch cli.subprocess
     try:
         t.whoami()
     except McpAuthError as e:
         raise ConfigError(f"C3 rejected the API key: {e}; check `c3 apikey list` and "
                           f"run `talos setup` again") from None
     except C3CommandError as e:
-        fix = ("check the C3 API key (`c3 apikey list`)" if (api_key or os.environ.get("C3_API_KEY"))
+        keyed = api_key or os.environ.get("C3_API_KEY")
+        fix = ("check the C3 API key (`c3 apikey list`)" if keyed
                else "install the `c3` CLI and run `c3 login`, or give setup a C3 API key "
                     "(`c3 apikey create`),")
         raise ConfigError(f"C3 login check failed: {e}; {fix} and retry") from None
@@ -1217,12 +1483,27 @@ def check_c3(run=None, api_key: str | None = None, transport=None) -> float:
     return balance
 ```
 
-Import `make_transport` and `C3CommandError` at the top of `talos/cli.py`. Delete the old inner `c3()` helper, the `re.search` over `Credit balance`, and the `ConfigError("the c3 CLI is not on PATH; install it and run `c3 login`")` branch — `CliTransport` now raises `C3CommandError` for a missing binary and the message above covers both cases.
+Import `CliTransport`, `make_transport` and `C3CommandError` at the top of `talos/cli.py`.
+
+In `cmd_setup`, check with the key a run would use and say which transport that is (spec §4.2:
+"`talos setup` prints which one it will use"; `resolve_c3_api_key` falls back to `C3_API_KEY`, so a
+blank answer with that variable set still means MCP at run time):
+
+```python
+        if backend == "c3":
+            check_key = c3_api_key or os.environ.get("C3_API_KEY") or None
+            print("C3: using the hosted MCP endpoint with your API key; no c3 CLI needed."
+                  if check_key else "C3: using the c3 CLI and its `c3 login` session.")
+            check_c3(api_key=check_key)
+```
+
+`save(...)` still receives the typed `c3_api_key` only; the environment key is never written to disk.
+ Delete the old inner `c3()` helper, the `re.search` over `Credit balance`, and the `ConfigError("the c3 CLI is not on PATH; install it and run `c3 login`")` branch — `CliTransport` now raises `C3CommandError` for a missing binary and the message above covers both cases.
 
 - [ ] **Step 4: Run the CLI suite**
 
 Run: `/tmp/v312/bin/python -m pytest -q -p no:cacheprovider tests/test_cli.py`
-Expected: all pass. If an existing setup test asserted the old wording, update that assertion — the new message must still name `c3 login` for a keyless user (that is the test above).
+Expected: all pass, after one edit: `test_setup_c3_without_the_c3_binary_reports_it_instead_of_tracebacking` asserts the old wording `"c3 CLI is not on PATH"`; change that assertion to `"install the `c3` CLI" in ...err` (the keyless message above). Add `monkeypatch.delenv("C3_API_KEY", raising=False)` to that test and to `test_setup_c3_fails_when_the_session_has_expired`, since the hint now depends on it. No other existing assertion changes; if one fails, that is a regression in `check_c3`, not wording to update.
 
 - [ ] **Step 5: Update the README**
 
@@ -1252,6 +1533,9 @@ Then run the docs gate, which checks every reference in the authoritative docs r
 | catch `McpAuthError` in the same branch as `C3CommandError` | `test_check_c3_reports_a_rejected_key_as_a_key_problem` |
 | `return 0.0` when `balance_gbp()` is `None`, without the warning | `test_check_c3_unreadable_balance_warns_and_returns_zero` |
 | make the keyless message say `c3 apikey list` | `test_check_c3_without_a_key_still_asks_the_cli_to_log_in` |
+| drop the `elif run is not None` branch | `test_check_c3_with_an_injected_run_drives_the_cli_even_with_a_key` — **stub first**: this mutation is the one that reaches the network, so confirm the test's `no_mcp` stub is in place before running it |
+| in `cmd_setup`, `check_c3(api_key=c3_api_key)` | `test_setup_checks_c3_with_the_environment_key...` |
+| in `cmd_setup`, print the MCP line unconditionally | same test, second half |
 
 - [ ] **Step 7: Commit**
 
@@ -1301,7 +1585,7 @@ Expected: no output. ruff does not enforce E501 here.
 - [ ] **Step 4: Confirm no key can leak**
 
 ```bash
-grep -rn "c3_key_" talos/ | grep -v "c3_key_<redacted>\|c3_key_\[A-Za-z0-9\|apikey"
+grep -rn "c3_key_" talos/ | grep -v "c3_key_\[A-Za-z0-9\|apikey"
 ```
 
 Expected: no line that interpolates a key into a message. Then, with a key configured, run the
@@ -1356,3 +1640,32 @@ git commit -m "test: the live C3 job runs over MCP when a key is configured"
 - **`deploy` with inline `files` is unmeasured.** Every other MCP call is measured (spec §2), but not this one, and it is the one that costs money. Task 7 Step 5 is where it is proved. If the tool rejects the payload, the fallback inside this design is `prepare_upload` (spec §7 lists it as out of scope, so that would be a new spec).
 - **No output schemas.** C3 publishes no `outputSchema`, so field names (`job_id`, `status`, `balance_gbp`, `inline`, `sha256`, `download_url`) are observed, not contracted. Task 4 accepts `job_id` or `id`, and every reader raises `C3CommandError` rather than `KeyError` when a field is missing, so a C3 change surfaces as a paused run with a clear message.
 - **Terminal statuses other than `SUCCEEDED` were never seen over MCP.** `C3Bench._wait` already tolerates an unrecognised status up to `poll_failures_max` and then raises `BenchUnavailable`, so a spelling difference pauses the run instead of scoring wrongly.
+
+## Audit (2026-09-18, before dispatch)
+
+Every row was checked against the repo at 4fe87f7; the fixes are in the task text above, marked `AUDIT:`.
+
+| Sev | Task | Defect | Fix |
+|---|---|---|---|
+| Critical | 6 (and 2) | `check_c3(run=…, api_key=…)` went to `make_transport`, so two existing unit tests would make real HTTPS calls to `api.cthree.cloud` once Task 4 landed | an injected `run` means the CLI, in `check_c3` as in `C3Bench`; a test pins it |
+| Critical | 2 | one `c3 pull` per fetched file: the existing `test_pull_failure_is_retried_once…` sees 3 pulls, asserts 2; pulls also nested under `<job_id>/artifacts/` | pull once per job (cached), in place when `dest` is where `c3 pull` writes |
+| Critical | 2 | "test files unchanged" was false: `test_portability.py` and `test_cli.py` each have a test calling the deleted `C3Bench._c3` (one inside `except Exception`, so it fails silently on an empty list) | both rewritten in Task 2; Step 5 runs them |
+| Critical | 4 | purpose taken from `job_dir.name`; the task's own test writes purpose `"3"` into a directory named `job`, so the settings assertion cannot pass | purpose parsed from `.c3`'s `job_name` |
+| Critical | 6 | `made.setdefault("key", api_key) or T()` returns the key string, not the fake transport | a plain function |
+| Critical | 5 | `dict(self.headers)["User-Agent"]` raises `KeyError`: urllib sends `User-agent` (MEASURED: `Request(...).headers` → `{'User-agent': …}`) | keep the case-insensitive `Message` |
+| Blocking | 1 | response headers read case-sensitively from a plain dict; a lower-case `mcp-session-id` or `content-type` is missed | normalise to lower case in `_send`; a test pins it |
+| Blocking | 1 | spec §4.3 "on `404` for a session start a new one once" not implemented | `_SessionGone`, one bounded retry, a test for both halves |
+| Blocking | 1 | key scrubbing lived in a private `_scrub`, against the spec and the plan's own constraint; its replacement text contained `c3_key_` | `_redact` extended, replacement `<c3-key>` |
+| Blocking | 2 | spec §5 "policy tests against both transports" and the `transport=` parameter had no test | four `FakeTransport` policy tests, guarded by `_no_cli` |
+| Blocking | 6 | spec §4.2 "setup prints which one it will use" missing; setup checked the CLI for a user whose runs use `C3_API_KEY` over MCP | `cmd_setup` checks with the key a run would use and prints the transport |
+| Blocking | 6 | keyless-message test depended on the caller's `C3_API_KEY` | `delenv` |
+| Blocking | 2 | the xfail marker was optional; parallel lanes need each lane green | required, `strict=True, raises=ImportError` |
+| Nit | 2, 6 | three transcribed code lines over 100 columns | rewrapped |
+
+Left alone, deliberately: `urllib` re-sends `Authorization` on a cross-host redirect (C3's endpoint does not redirect, MEASURED in spec §2; worth a follow-up); a Cloudflare `403 error 1010` is reported as a rejected key (it cannot occur while the `User-Agent` test passes).
+
+## Execution lanes
+
+Tasks 1, 2 and 3 share no file and run in parallel worktrees. Task 4 needs all three; Task 6 needs
+Tasks 1 and 2 and shares no file with Tasks 4–5, so lane A runs Task 4 then Task 5 (both append to
+`tests/test_c3_mcp.py`) while lane B runs Task 6. Task 7 runs last, in the main checkout.
