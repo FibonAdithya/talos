@@ -147,12 +147,14 @@ class McpClient:
                         if isinstance(c, dict))
         if res.get("isError"):
             raise C3CommandError(f"c3 {name} failed: {_redact(text)[:300]}")
-        if res.get("structuredContent") is not None:
-            return res["structuredContent"]
+        sc = res.get("structuredContent")
+        if isinstance(sc, dict):
+            return sc
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
         except ValueError:
             return {"text": text}
+        return parsed if isinstance(parsed, dict) else {"text": text}
 
 
 class McpTransport:

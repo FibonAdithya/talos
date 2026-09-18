@@ -94,6 +94,26 @@ def test_content_text_json_is_used_when_there_is_no_structured_content():
     assert out == {"balance_gbp": 1.5}
 
 
+def test_a_non_dict_structured_content_falls_back_to_the_text_content():
+    """A server that sends a non-dict structuredContent (or none at all, with unparseable text)
+    must give McpTransport a dict to call .get on, or the AttributeError escapes _collect/_submit
+    and turns a pause into a hard failure."""
+
+    def call(doc):
+        return 200, {"Content-Type": "application/json"}, rpc(
+            doc["id"], {"structuredContent": [1, 2], "content": []})
+
+    out = McpClient(KEY, post=FakePost({"tools/call": call})).tool("get_job", {})
+    # mutation: `return res["structuredContent"]` unconditionally when not None
+    assert isinstance(out, dict)
+
+
+def test_an_unreadable_status_document_fails_loudly_instead_of_crashing():
+    c = FakeClient({"get_job": {"text": ""}})
+    with pytest.raises(C3CommandError):
+        McpTransport("k", client=c).status("j")
+
+
 def test_tool_error_and_rpc_error_raise_c3commanderror():
     def is_error(doc):
         return 200, {"Content-Type": "application/json"}, rpc(doc["id"], {
