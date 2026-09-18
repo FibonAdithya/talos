@@ -173,11 +173,12 @@ It asks, in order:
 3. **Model**: press Enter for the default. For `codex-cli` it first prints the models your
    login accepts; for `claude-cli` an alias such as `fable`, `opus` or `sonnet` works.
 4. **API base URL**: `custom` provider only.
-5. **API key**: API providers only; input is hidden.
+5. **API key**: API providers only. Each character you type or paste shows as `*`, so you can
+   see that a paste arrived; the key itself is never shown.
 6. **Mode** (`single-shot` or `agentic`): CLI providers only. This is the default; `talos
    run --mode` overrides it per job.
-7. **Modal token id and secret**: `modal` backend only.
-8. **C3 API key**: `c3` backend only; input is hidden. Leave it blank to use your `c3 login`
+7. **Modal token id and secret**: `modal` backend only; the secret shows as `*`.
+8. **C3 API key**: `c3` backend only; shows as `*`. Leave it blank to use your `c3 login`
    session. With it blank, a `C3_API_KEY` environment variable is used if set.
 
 It then checks everything before writing anything:
