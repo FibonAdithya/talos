@@ -98,6 +98,12 @@ def test_redact_hides_a_rand_hash():
     assert _redact("x " + "ab" * 32 + " y") == "x <hash> y"
 
 
+def test_redact_hides_a_c3_api_key():
+    out = _redact("sending Bearer c3_key_Ab-9_z to the server")
+    # mutation: a key echoed by C3 or by an exception reaches the pause message and state.json
+    assert "c3_key_" not in out and "Ab-9_z" not in out and "to the server" in out
+
+
 class FakeClock:
     """Wall clock the tests advance by hand, so retry behaviour is exercised without sleeping."""
 

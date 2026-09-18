@@ -22,12 +22,14 @@ GPU_USD_PER_SECOND = {"L40S": 0.000542}
 HOLDOUT_REASONS = ("won", "not_won", "forced", "not_compiled", "timeout", "dead_code")
 
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
+_C3_KEY_RE = re.compile(r"c3_key_[A-Za-z0-9_-]+")
 
 
 def _redact(text: str) -> str:
     """A job's rand_hash must never reach a log line or a timeline event. Modal exceptions
-    quote the failing argv, so every message built from one goes through here first."""
-    return _HASH_RE.sub("<hash>", text)
+    quote the failing argv, so every message built from one goes through here first.
+    A C3 API key must not reach one either."""
+    return _C3_KEY_RE.sub("<c3-key>", _HASH_RE.sub("<hash>", text))
 
 
 class BenchUnavailable(Exception):
