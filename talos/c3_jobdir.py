@@ -29,12 +29,22 @@ def hhmmss(seconds: int) -> str:
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
-def c3_config_text(challenge: str, purpose: str, seconds: int) -> str:
+def job_settings(challenge: str, purpose: str, seconds: int) -> dict:
+    """The job's settings, named as C3's MCP `deploy` tool names them. `.c3` renders these same
+    values, so the two submission paths cannot disagree about hardware, image or time limit."""
     spec = CHALLENGES[challenge]
-    accel = "cuda" if spec.is_gpu else "none"
-    return (f"project: talos\njob_name: talos-{challenge}-{purpose}\nscript: job.sh\n"
-            f"hardware: {c3_profile(spec)}\ntime: \"{hhmmss(seconds)}\"\n"
-            f"docker:\n  image: {c3_image(challenge)}\n  requires_accelerator: {accel}\n")
+    return {"project": "talos", "job_name": f"talos-{challenge}-{purpose}", "script": "job.sh",
+            "hardware": c3_profile(spec), "walltime_seconds": seconds,
+            "docker_image": c3_image(challenge),
+            "docker_requires_accelerator": "cuda" if spec.is_gpu else "none"}
+
+
+def c3_config_text(challenge: str, purpose: str, seconds: int) -> str:
+    s = job_settings(challenge, purpose, seconds)
+    return (f"project: {s['project']}\njob_name: {s['job_name']}\nscript: {s['script']}\n"
+            f"hardware: {s['hardware']}\ntime: \"{hhmmss(s['walltime_seconds'])}\"\n"
+            f"docker:\n  image: {s['docker_image']}\n"
+            f"  requires_accelerator: {s['docker_requires_accelerator']}\n")
 
 
 def job_sh_text(monorepo_ref: str) -> str:

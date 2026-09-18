@@ -43,6 +43,23 @@ def test_time_limit_formula_and_cap():
     assert c3_jobdir.hhmmss(1380) == "00:23:00" and c3_jobdir.hhmmss(21600) == "06:00:00"
 
 
+def test_job_settings_and_the_c3_file_agree():
+    s = c3_jobdir.job_settings("knapsack", "3", 1380)
+    text = c3_jobdir.c3_config_text("knapsack", "3", 1380)
+    assert set(s) == {"project", "job_name", "script", "hardware", "walltime_seconds",
+                      "docker_image", "docker_requires_accelerator"}
+    # mutation: a hardware profile hard-coded on either path scores the baseline and the
+    # candidate on different hardware (AGENTS.md invariant 1)
+    assert f"hardware: {s['hardware']}\n" in text
+    assert f"  image: {s['docker_image']}\n" in text
+    assert f"  requires_accelerator: {s['docker_requires_accelerator']}\n" in text
+    assert f"job_name: {s['job_name']}\n" in text and f"script: {s['script']}\n" in text
+    assert f"project: {s['project']}\n" in text
+    assert s["walltime_seconds"] == 1380 and 'time: "00:23:00"' in text
+    g = c3_jobdir.job_settings("hypergraph", "1", 60)
+    assert g["docker_requires_accelerator"] == "cuda" and g["hardware"] == "l40"
+
+
 def test_c3_config_text_is_exact():
     text = c3_jobdir.c3_config_text("knapsack", "3", 1380)
     assert text == (
