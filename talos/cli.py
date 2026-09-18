@@ -4,7 +4,6 @@ iteration, best delta, LLM and compute spend and the wall-clock time left."""
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import re
@@ -28,6 +27,7 @@ from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_im
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
+from talos.masked_input import ask_secret
 from talos.nonces import draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
 from talos.providers.codex_cli import list_codex_models
@@ -47,7 +47,7 @@ MIRROR_HINT = ("the C3 backend needs the dev image on Docker Hub; a maintainer r
 
 def default_ask(prompt: str, default: str | None = None, secret: bool = False) -> str:
     suffix = f" [{default}]" if default else ""
-    v = getpass.getpass(f"{prompt}{suffix}: ") if secret else input(f"{prompt}{suffix}: ")
+    v = ask_secret(f"{prompt}{suffix}: ") if secret else input(f"{prompt}{suffix}: ")
     return v.strip() or (default or "")
 
 
