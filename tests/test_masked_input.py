@@ -32,13 +32,15 @@ def _settings(fd):
 
 
 @pytest.fixture
-def pty_pair():
+def pty_pair(capfd):
     """A real terminal pair, with the master drained the way a terminal emulator drains it. On
     macOS the echo of typed input queues as the slave's output, and restoring the mode with
     TCSADRAIN waits for that queue to empty; with nobody reading the master it waits for ever.
     A read that finds no input blocks too, and a signal handler cannot run while the main thread
     is inside the call, so the guard is faulthandler's watchdog thread: it prints where the
-    thread is stuck and exits, instead of leaving a hung CI job."""
+    thread is stuck and exits, instead of leaving a hung CI job. It writes to a copy of the real
+    stderr taken with capture off: pytest points fd 2 at a temporary file, and that file is lost
+    when the watchdog exits the process."""
     pytest.importorskip("termios")
     import pty
 
@@ -56,11 +58,14 @@ def pty_pair():
 
     drainer = threading.Thread(target=drain, daemon=True)
     drainer.start()
-    faulthandler.dump_traceback_later(20, exit=True)
+    with capfd.disabled():
+        real_stderr = os.dup(2)
+    faulthandler.dump_traceback_later(20, exit=True, file=real_stderr)
     try:
         yield master, slave
     finally:
         faulthandler.cancel_dump_traceback_later()
+        os.close(real_stderr)
         stop.set()
         drainer.join()
         os.close(master)
