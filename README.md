@@ -326,16 +326,25 @@ time plus the challenge name.
 
 ### Watch
 
-The terminal prints one line per event (`hypothesis`, `compile_failed`, `scored`,
-`confirming`, `won`, ...) and, after each finished iteration, a status line:
+The terminal prints one line per event, prefixed with the time and the iteration number.
+Each iteration ends with a summary line: the outcome, then the best delta so far, the spend
+and the time left.
 
 ```
-[status] job=20260917-101006-knapsack it=1 best=+1.000% llm=$0.02 compute≈$1.28 left=3.9h
+[10:41:02] #1 trying: bump k (local_search)
+[10:49:12] #1 scored +1.000% vs baseline (worst track +1.000%, errors 0.0%, runtime x1.00)
+[10:49:12] #1 new best | best +1.000% | llm $0.02 | compute ≈$1.28 | 3.9h left
+[10:49:12] #1 confirming on held-out nonces
+[10:49:12] #1 won: held-out +1.000% vs baseline (worst track +1.000%)
 ```
 
 `best` is the best candidate's mean relative delta versus the baseline on training nonces.
-`compute≈` is an estimate (see [Budget](#budget)). `left` is the wall-clock budget
-remaining, or `∞` without `--budget-hours`.
+`compute ≈` is an estimate (see [Budget](#budget)). The last field is the wall-clock budget
+remaining, or `∞ left` without `--budget-hours`. An iteration that did not improve reads
+`no improvement (4 in a row)` or `no candidate: did not compile (2 in a row)`; a failed
+compile prints the first `error` line of the compiler output. Lines are cut to the terminal
+width. `runs/<job_id>/timeline.jsonl` records every event with every field in full,
+including hypothesis descriptions and the compiler output.
 
 ### Stop
 

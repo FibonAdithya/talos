@@ -73,3 +73,11 @@ def dead_new_functions(output: str, prior_functions: dict[str, list[str]]) -> li
             if name not in prior_functions.get(rel, ()):
                 found.append(f"{rel}: {name}")
     return found
+
+
+def first_error(output: str) -> str:
+    """The line that says what went wrong: rustc's first `error` line, which comes before
+    cargo's closing summaries; with no error line at all, the last non-empty line."""
+    lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+    errors = [ln for ln in lines if ln.startswith("error")]
+    return (errors or lines[-1:] or [""])[0]

@@ -88,7 +88,9 @@ def resolve_baseline(challenge: str, training: list[NonceSet], holdout: list[Non
             log(f"baseline {name}: cache hit {key}")
             return rec, template
     files = mainnet.fetch_algorithm_files(challenge, name)
-    log(f"baseline {name} (adoption {adoption}): compiling and scoring {len(files)} file(s)")
+    # mainnet adoption is a fixed-point fraction of the challenge's benchmarker usage, 10**18 = 100%
+    log(f"baseline {name} (adoption {adoption / 10**18:.2%}): "
+        f"compiling and scoring {len(files)} file(s)")
     r = bench.evaluate(EvalRequest(challenge=challenge, files=files, training=training,
                                    holdout=holdout, fuel=fuel, baseline_training=None, rule=rule,
                                    hyperparameters=hyperparameters))
