@@ -1,6 +1,8 @@
+import faulthandler
 import io
 import os
-import signal
+import select
+import threading
 
 import pytest
 
@@ -21,22 +23,36 @@ class _Tty(io.StringIO):
 
 @pytest.fixture
 def pty_pair():
-    """A real terminal pair. A read that finds no input blocks for ever, so an alarm turns a
-    regression into a failure instead of a hung CI job."""
+    """A real terminal pair, with the master drained the way a terminal emulator drains it. On
+    macOS the echo of typed input queues as the slave's output, and restoring the mode with
+    TCSADRAIN waits for that queue to empty; with nobody reading the master it waits for ever.
+    A read that finds no input blocks too, and a signal handler cannot run while the main thread
+    is inside the call, so the guard is faulthandler's watchdog thread: it prints where the
+    thread is stuck and exits, instead of leaving a hung CI job."""
     pytest.importorskip("termios")
     import pty
 
-    def too_slow(signum, frame):
-        raise TimeoutError("the masked read blocked on the pty")
-
-    previous = signal.signal(signal.SIGALRM, too_slow)
-    signal.alarm(10)
     master, slave = pty.openpty()
+    stop = threading.Event()
+
+    def drain():
+        while not stop.is_set():
+            readable, _, _ = select.select([master], [], [], 0.05)
+            if readable:
+                try:
+                    os.read(master, 4096)
+                except OSError:
+                    return
+
+    drainer = threading.Thread(target=drain, daemon=True)
+    drainer.start()
+    faulthandler.dump_traceback_later(20, exit=True)
     try:
         yield master, slave
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
+        faulthandler.cancel_dump_traceback_later()
+        stop.set()
+        drainer.join()
         os.close(master)
         os.close(slave)
 
