@@ -56,6 +56,13 @@ def test_job_settings_and_the_c3_file_agree():
     assert f"job_name: {s['job_name']}\n" in text and f"script: {s['script']}\n" in text
     assert f"project: {s['project']}\n" in text
     assert s["walltime_seconds"] == 1380 and 'time: "00:23:00"' in text
+    # literal expectations (not derived from job_settings/c3_image), so a hard-coded value on
+    # either path that happens to still agree with itself does not slip past this test
+    assert s["project"] == "talos" and s["job_name"] == "talos-knapsack-3"
+    assert s["script"] == "job.sh"
+    assert s["hardware"] == "cpu-d3-4vcpu-16gb"
+    assert s["docker_requires_accelerator"] == "none"
+    assert s["docker_image"] == f"docker.io/fibonadithya/tig-knapsack-dev:{DEV_IMAGE_TAG}"
     g = c3_jobdir.job_settings("hypergraph", "1", 60)
     assert g["docker_requires_accelerator"] == "cuda" and g["hardware"] == "l40"
 
