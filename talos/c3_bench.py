@@ -68,21 +68,14 @@ class C3Bench:
                  api_key: str | None = None, transport: "C3Transport | None" = None):
         self.run_dir = Path(run_dir)
         self._pending = pending or PendingJobStore.memory()
-        self._run = run
         self._clock, self._sleep = clock, sleep
         self.poll_s, self.pending_timeout_s = poll_s, pending_timeout_s
         self.poll_failures_max = poll_failures_max
         self._cost = 0.0
         self._stop = False
         from talos.c3_transport import CliTransport, make_transport
-
-        def _dispatch(*a, **kw):
-            # a trampoline, not a direct reference to `run`: it reads self._run afresh on every
-            # call, so a test that reassigns `bench._run` after construction still intercepts it
-            return self._run(*a, **kw)
-        self._t = transport or (CliTransport(run=_dispatch, api_key=api_key)
-                                if run is not subprocess.run
-                                else make_transport(api_key, run=_dispatch))
+        self._t = transport or (CliTransport(run=run, api_key=api_key) if run is not subprocess.run
+                                else make_transport(api_key, run=run))
 
     def _wait(self, job_id: str, profile: str) -> tuple[str, float | None, float]:
         """Returns (status, first_running_time, terminal_time). Poll failures — a CLI error, an

@@ -272,17 +272,18 @@ def test_pending_too_long_cancels_and_pauses(tmp_path):
 def test_request_stop_cancels_the_job_and_raises_cancelled(tmp_path):
     c3 = FakeC3(["RUNNING"], results_doc())
     pending = PendingJobStore.memory()
-    b, _ = bench(tmp_path, c3, pending=pending)
     calls = 0
     real_c3 = c3.__call__
+    holder = {}  # `b` does not exist until `bench()` returns; a one-slot holder closes the loop
 
     def counting(cmd, **kw):
         nonlocal calls
         calls += 1
         if calls == 3:
-            b.request_stop()
+            holder["b"].request_stop()
         return real_c3(cmd, **kw)
-    b._run = counting
+    b, _ = bench(tmp_path, counting, pending=pending)
+    holder["b"] = b
     with pytest.raises(BenchCancelled):
         b.evaluate(req())
     assert any(c[1] == "cancel" for (c, _) in c3.calls)
@@ -503,3 +504,25 @@ def test_success_without_results_is_unavailable_not_a_resubmission(tmp_path):
     # mutation: ignoring fetch's return value reads a results.json that is not there
     assert "without results.json" in str(ei.value)
     assert [c[0] for c in t.calls].count("deploy") == 1
+
+
+class FakeTransportWithStaleResults(FakeTransport):
+    """fetch writes a results.json to `dest` (as a real pull sometimes leaves one behind from an
+    earlier, unrelated attempt) but still reports the fetch as having found nothing."""
+
+    def fetch(self, job_id, name, dest):
+        self.calls.append(("fetch", job_id, name))
+        if name == "results.json":
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(json.dumps(results_doc()), encoding="utf-8", newline="\n")
+        return False
+
+
+def test_a_stale_results_file_on_disk_is_not_mistaken_for_a_successful_fetch(tmp_path):
+    t = FakeTransportWithStaleResults(["FAILED"])
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: checking results.exists() instead of trusting fetch's return value would read
+    # this stale file left on disk and report a result instead of failing twice
+    assert "failed twice" in str(ei.value)
+    assert [c[0] for c in t.calls].count("deploy") == 2
