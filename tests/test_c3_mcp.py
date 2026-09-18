@@ -108,6 +108,24 @@ def test_a_non_dict_structured_content_falls_back_to_the_text_content():
     assert isinstance(out, dict)
 
 
+@pytest.mark.parametrize("reply", [
+    {"jsonrpc": "2.0", "error": "boom"},         # mutation: doc["error"].get on a str
+    {"jsonrpc": "2.0", "result": [1]},           # mutation: res.get on a list result
+    {"jsonrpc": "2.0", "result": {"content": None}},  # mutation: iterating a null content
+])
+def test_a_malformed_reply_raises_c3commanderror_not_a_bare_exception(reply):
+    """_submit and check_c3 catch C3CommandError only. An AttributeError or TypeError from a
+    reply that is valid JSON but not the JSON-RPC shape tracebacks out of `talos setup` and
+    turns a paused run into a hard failure."""
+
+    def call(doc):
+        return 200, {"Content-Type": "application/json"}, json.dumps(
+            {**reply, "id": doc["id"]}).encode()
+
+    with pytest.raises(C3CommandError):
+        McpClient(KEY, post=FakePost({"tools/call": call})).tool("get_job", {})
+
+
 def test_an_unreadable_status_document_fails_loudly_instead_of_crashing():
     c = FakeClient({"get_job": {"text": ""}})
     with pytest.raises(C3CommandError):

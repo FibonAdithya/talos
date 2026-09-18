@@ -133,10 +133,16 @@ class McpClient:
         doc = next((d for d in docs if d.get("id") == id_), docs[-1] if docs else None)
         if doc is None:
             raise C3CommandError(f"c3 {method} returned no reply for this request")
-        if doc.get("error"):
-            msg = str(doc["error"].get("message", doc["error"]))
+        err = doc.get("error")
+        if err:
+            msg = str(err.get("message", err) if isinstance(err, dict) else err)
             raise C3CommandError(f"c3 {method} failed: {_redact(msg)[:300]}")
-        return doc.get("result") or {}
+        res = doc.get("result") or {}
+        if not isinstance(res, dict):
+            # callers catch C3CommandError only; a bare AttributeError from `.get` on a list
+            # tracebacks out of `talos setup` and turns a paused run into a hard failure
+            raise C3CommandError(f"c3 {method} returned a result that is not an object")
+        return res
 
     def _ensure_ready(self) -> None:
         if self._ready:
@@ -158,8 +164,10 @@ class McpClient:
             self._session, self._ready = None, False
             self._ensure_ready()
             res = self._send("tools/call", params, timeout_s=timeout_s) or {}
-        text = " ".join(c.get("text", "") for c in res.get("content", [])
-                        if isinstance(c, dict))
+        content = res.get("content", [])
+        if not isinstance(content, list):
+            raise C3CommandError(f"c3 {name} returned content that is not a list")
+        text = " ".join(str(c.get("text", "")) for c in content if isinstance(c, dict))
         if res.get("isError"):
             raise C3CommandError(f"c3 {name} failed: {_redact(text)[:300]}")
         sc = res.get("structuredContent")
