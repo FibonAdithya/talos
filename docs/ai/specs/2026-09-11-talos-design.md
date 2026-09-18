@@ -84,8 +84,9 @@ Writes `talos.config.json` (provider, model, mode, defaults) and `.talos/secrets
 
 Run per job. Interactive unless every value is given as a flag.
 
-1. Challenge: one of the eight TIG challenges. GPU challenges are labelled with their
-   Modal GPU class and approximate cost per benchmark.
+1. Challenge: one of the eight TIG challenges. GPU challenges are marked `(GPU)`. No GPU
+   class or cost figure is shown in the prompt; estimated compute spend is reported in the
+   status line and the end-of-job summary.
 2. Direction: free text, multi-line, or a path to a file. This becomes the first entry in
    the job's tacit knowledge.
 3. Budget: for API providers, dollars of LLM spend and hours of wall clock. For CLI

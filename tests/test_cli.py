@@ -118,10 +118,10 @@ def test_setup_rejects_the_fake_provider(tmp_path, monkeypatch, capsys):
 
 def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, monkeypatch,
                                                                    capsys):
-    # spec §5.2: GPU challenges carry their GPU class and approximate cost; CLI providers are
+    # spec §5.2: GPU challenges are marked (GPU), with no class or cost figure; CLI providers are
     # asked for a mode, after the 5-20x token warning.
-    # mutation: an unlabelled challenge list hides that a GPU challenge costs ~$2/h while a CPU
-    # one costs cents; dropping the mode prompt means agentic can only be reached by flag
+    # mutation: an unlabelled challenge list hides which challenges run on a GPU; dropping the
+    # mode prompt means agentic can only be reached by flag
     # mutation: float(ask(...)) on a non-numeric answer tracebacks out of the wizard
     monkeypatch.chdir(tmp_path)
     save(tmp_path, Config(provider="claude-cli", model="claude-opus-5", mode="single-shot",
@@ -140,7 +140,8 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     assert cli.main(["run"], ask=ask) == 0
     captured = capsys.readouterr()
     assert "not a number: 'abc'" in captured.err
-    assert "hypergraph (GPU: L40S, ≈$1.95/h estimated)" in prompts[0]
+    assert "hypergraph (GPU)" in prompts[0] and "L40S" not in prompts[0]
+    assert "$" not in prompts[0] and "estimated" not in prompts[0]
     assert "knapsack" in prompts[0] and "knapsack (GPU" not in prompts[0]
     assert prompts.count("Iteration budget") == 2  # the typo was re-asked, not fatal
     assert prompts[-3] == "Mode (single-shot or agentic)"

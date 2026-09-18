@@ -249,16 +249,9 @@ def _ask_number(ask, prompt: str, default: str, cast=float, tries: int = 3):
 
 
 def _challenge_prompt() -> str:
-    """spec §5.2: GPU challenges are labelled with their Modal GPU class and approximate cost,
-    so the expensive choices are visible before one is picked."""
-    from talos.bench import GPU_USD_PER_SECOND
-    names = []
-    for name, cs in CHALLENGES.items():
-        if cs.is_gpu:
-            names.append(f"{name} (GPU: {cs.gpu}, "
-                         f"≈${GPU_USD_PER_SECOND[cs.gpu] * 3600:.2f}/h estimated)")
-        else:
-            names.append(name)
+    """spec §5.2: GPU challenges are marked, so the expensive choices are visible before one
+    is picked."""
+    names = [f"{name} (GPU)" if cs.is_gpu else name for name, cs in CHALLENGES.items()]
     return f"Challenge ({', '.join(names)})"
 
 
