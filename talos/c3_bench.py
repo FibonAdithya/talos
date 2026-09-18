@@ -87,6 +87,9 @@ class C3Bench:
         self._cost = 0.0
         self._stop = False
         from talos.c3_transport import CliTransport, make_transport
+        # An injected `run` (run is not subprocess.run) always means "drive the CLI" — that is
+        # how every test stays off the network and the real `c3` binary. Only the default `run`
+        # lets a configured key select MCP instead.
         self._t = transport or (CliTransport(run=run, api_key=api_key) if run is not subprocess.run
                                 else make_transport(api_key, run=run))
 
