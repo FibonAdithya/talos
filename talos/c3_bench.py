@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from talos.bench import (BenchCancelled, BenchUnavailable, EvalRequest, EvalResult,
                          PendingJobStore, _redact)
 from talos.c3_jobdir import request_hash, write_job_dir
 from talos.challenges import CHALLENGES, c3_profile
-from talos.executables import argv0
 from talos.inside import NONCE_TIMEOUT_S
 from talos.types import CompileResult, NonceResult, NonceSet
+
+if TYPE_CHECKING:
+    from talos.c3_transport import C3Transport
 
 GBP_PER_HOUR = {"cpu-d3-4vcpu-16gb": 0.11, "l40": 1.49}  # ESTIMATE: `c3 list`, 2026-09-15
 USD_PER_GBP = 1.35                                          # ESTIMATE
@@ -64,9 +65,8 @@ class C3Bench:
                  run: Callable = subprocess.run, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep, poll_s: float = 20.0,
                  pending_timeout_s: int = 1800, poll_failures_max: int = 15,
-                 api_key: str | None = None):
+                 api_key: str | None = None, transport: "C3Transport | None" = None):
         self.run_dir = Path(run_dir)
-        self._env = c3_env(api_key)
         self._pending = pending or PendingJobStore.memory()
         self._run = run
         self._clock, self._sleep = clock, sleep
@@ -74,38 +74,15 @@ class C3Bench:
         self.poll_failures_max = poll_failures_max
         self._cost = 0.0
         self._stop = False
+        from talos.c3_transport import CliTransport, make_transport
 
-    # ── CLI plumbing ───────────────────────────────────────────────────
-    def _c3(self, *args: str, cwd: Path | None = None, timeout: int = 600) -> str:
-        try:
-            r = self._run([argv0("c3"), *args], capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout,
-                          cwd=str(cwd) if cwd else None, env=self._env)
-        except OSError as e:
-            # FileNotFoundError included: a `c3` that is not on PATH must pause the run like
-            # any other CLI failure, not traceback out of evaluate into "job failed".
-            raise C3CommandError(f"c3 {args[0]} could not be run: "
-                                 f"{_redact(str(e))[:200]}") from None
-        except subprocess.TimeoutExpired:
-            # Not an OSError. A CLI call that hangs past its timeout is a CLI failure too.
-            raise C3CommandError(f"c3 {args[0]} timed out after {timeout}s") from None
-        if r.returncode != 0:
-            raise C3CommandError(f"c3 {args[0]} failed ({r.returncode}): "
-                                 f"{_redact((r.stderr or r.stdout)[-500:])}")
-        return r.stdout
-
-    def _deploy(self, job_dir: Path) -> str:
-        try:
-            doc = parse_json_stdout(self._c3("deploy", "--json", cwd=job_dir))
-        except (C3CommandError, ValueError) as e:
-            raise BenchUnavailable(f"C3 deploy failed: {_redact(str(e))[:300]}") from None
-        return doc["id"]
-
-    def _status(self, job_id: str) -> str:
-        for row in parse_json_stdout(self._c3("squeue", "--json", timeout=60)):
-            if row.get("job_id") == job_id:
-                return str(row.get("status", "UNKNOWN")).upper()
-        raise C3CommandError(f"job {job_id} not listed by squeue")
+        def _dispatch(*a, **kw):
+            # a trampoline, not a direct reference to `run`: it reads self._run afresh on every
+            # call, so a test that reassigns `bench._run` after construction still intercepts it
+            return self._run(*a, **kw)
+        self._t = transport or (CliTransport(run=_dispatch, api_key=api_key)
+                                if run is not subprocess.run
+                                else make_transport(api_key, run=_dispatch))
 
     def _wait(self, job_id: str, profile: str) -> tuple[str, float | None, float]:
         """Returns (status, first_running_time, terminal_time). Poll failures — a CLI error, an
@@ -118,11 +95,11 @@ class C3Bench:
         failures = 0
         while True:
             if self._stop:
-                self._cancel(job_id)
+                self._t.cancel(job_id)
                 self._pending.set(None)
                 raise BenchCancelled(job_id)
             try:
-                status = self._status(job_id)
+                status = self._t.status(job_id)
                 if status not in ACTIVE and status not in TERMINAL:
                     raise C3CommandError(f"unrecognised job status {status!r}")
             except (C3CommandError, ValueError, KeyError, AttributeError, TypeError) as e:
@@ -141,7 +118,7 @@ class C3Bench:
             if status in TERMINAL:
                 return status, first_running, now
             if status in QUEUED and now - submitted > self.pending_timeout_s:
-                self._cancel(job_id)
+                self._t.cancel(job_id)
                 self._pending.set(None)  # else the next resume reattaches to a cancelled job
                 raise BenchUnavailable(f"no C3 capacity for {profile} in "
                                        f"{self.pending_timeout_s}s; job {job_id} cancelled")
@@ -155,33 +132,6 @@ class C3Bench:
         self._pending.set({k: v for k, v in rec.items()
                            if k not in ("job_id", "request_hash", "job_dir")})
 
-    def _cancel(self, job_id: str) -> None:
-        try:
-            self._c3("cancel", job_id, timeout=60)
-        except C3CommandError:
-            pass  # best effort: the job may already be terminal
-
-    def _pull(self, job_id: str, job_dir: Path) -> Path:
-        job_dir.mkdir(parents=True, exist_ok=True)  # a reattach never wrote the job dir
-        pulled = job_dir / job_id
-        d = pulled
-        for attempt in range(2):
-            try:
-                doc = parse_json_stdout(self._c3("pull", job_id, "--json", cwd=job_dir))
-            except (C3CommandError, ValueError):
-                if attempt == 1:  # a transient pull failure gets one retry, same job id
-                    raise
-                continue
-            jobs = doc.get("jobs") or []
-            d = Path(jobs[0]["directory"]) if jobs and jobs[0].get("directory") else pulled
-            if not d.is_absolute():
-                d = job_dir / d
-            for cand in (d / "artifacts", d):
-                if (cand / "results.json").exists() or (cand / "build.log").exists():
-                    return cand
-            shutil.rmtree(pulled, ignore_errors=True)  # a "skipped" pull with nothing on disk
-        return d
-
     # ── evaluate ───────────────────────────────────────────────────────
     def evaluate(self, request: EvalRequest) -> EvalResult:
         pend = self._pending.get() or {}
@@ -191,7 +141,7 @@ class C3Bench:
             # request_hash — only when no job_id is on record is there nothing to cancel
             stale_job_id = pend.get("job_id")
             if stale_job_id:
-                self._cancel(stale_job_id)
+                self._t.cancel(stale_job_id)
             self._pending.set(None)
             raise BenchCancelled(stale_job_id or "stop requested before submission")
         purpose = str(pend.get("purpose", "adhoc"))
@@ -212,7 +162,10 @@ class C3Bench:
 
     def _submit(self, job_dir: Path, request: EvalRequest, purpose: str, rh: str) -> str:
         write_job_dir(job_dir, request, purpose)
-        job_id = self._deploy(job_dir)
+        try:
+            job_id = self._t.deploy(job_dir)
+        except (C3CommandError, ValueError) as e:
+            raise BenchUnavailable(f"C3 deploy failed: {_redact(str(e))[:300]}") from None
         self._pending.set({**(self._pending.get() or {}), "backend": "c3", "job_id": job_id,
                            "job_dir": str(job_dir), "request_hash": rh})
         return job_id
@@ -225,13 +178,15 @@ class C3Bench:
             # undercounting whatever ran before this process started polling; reattaching to
             # a job that is already terminal bills nothing for it at all.
             self._cost += (t_end - t_run) / 3600 * GBP_PER_HOUR[profile] * USD_PER_GBP
+        artifacts = job_dir / job_id / "artifacts"
         try:
-            artifacts = self._pull(job_id, job_dir)
+            have_results = self._t.fetch(job_id, "results.json", artifacts / "results.json")
+            self._t.fetch(job_id, "build.log", artifacts / "build.log")
         except (C3CommandError, ValueError, KeyError, IndexError) as e:
             raise BenchUnavailable(
                 f"C3 pull failed for {job_id}: {_redact(str(e))[:300]}") from None
         results = artifacts / "results.json"
-        if not results.exists():
+        if not have_results:
             # every branch below is terminal for this job id: forget it, or the pause leaves a
             # record that makes every later resume reattach to a dead job and re-pause
             self._forget_job()

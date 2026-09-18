@@ -1315,19 +1315,18 @@ def test_compile_uses_the_c3_key_from_the_config(tmp_path, monkeypatch):
     assert seen["key"] == "c3_key_1"
 
 
-def test_make_bench_hands_the_c3_key_to_c3bench(tmp_path):
+def test_make_bench_hands_the_c3_key_to_c3bench(tmp_path, monkeypatch):
+    from talos import c3_transport
     from talos.bench import PendingJobStore
-    runs = []
+    seen = []
 
-    def run(cmd, **kw):
-        runs.append(kw.get("env"))
-        raise FileNotFoundError(2, "no c3", "c3")
-    b = cli.make_bench("c3", tmp_path, PendingJobStore.memory(), c3_api_key="c3_key_1")
-    b._run = run
-    with pytest.raises(Exception):
-        b._c3("squeue", "--json")
+    def fake_make(api_key, run=None):
+        seen.append(api_key)
+        return object()
+    monkeypatch.setattr(c3_transport, "make_transport", fake_make)
+    cli.make_bench("c3", tmp_path, PendingJobStore.memory(), c3_api_key="c3_key_1")
     # mutation: make_bench accepting the key but not forwarding it
-    assert runs[0]["C3_API_KEY"] == "c3_key_1"
+    assert seen == ["c3_key_1"]
 
 
 def test_setup_with_no_keys_left_removes_the_old_secrets(tmp_path, monkeypatch):
