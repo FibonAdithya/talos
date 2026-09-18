@@ -166,7 +166,7 @@ def test_c3_calls_start_the_resolved_cli(tmp_path, windows_path):
     except Exception:
         pass  # only argv[0] matters here, not how the stub output parses
     try:
-        C3Bench(tmp_path, run=recorder(bench))._c3("whoami")
+        C3Bench(tmp_path, run=recorder(bench))._t.whoami()
     except Exception:
         pass
     # mutation: either c3 call site building argv from the bare name

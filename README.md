@@ -15,6 +15,7 @@ one opt-in exception: [agentic codex](#agentic-mode)).
 - [How it works](#how-it-works)
 - [Try it with no accounts](#try-it-with-no-accounts)
 - [Setup](#setup)
+- [Running on Windows](#running-on-windows)
 - [Running a job](#running-a-job)
 - [Command reference](#command-reference)
 - [Agentic mode](#agentic-mode)
@@ -127,11 +128,8 @@ source .venv/bin/activate      # puts `talos` on PATH for this shell
 talos --help
 ```
 
-On Windows the virtualenv's interpreter is `.venv\Scripts\python.exe`, so the install line is
-`uv pip install --python .venv\Scripts\python.exe -e .`, and `.venv\Scripts\activate`
-activates it. Windows has no owner-only file permissions, so `.talos/secrets.json` is not
-restricted to your user there the way it is on Linux and macOS (mode `0600`); keep the
-repository in a folder only you can read.
+These commands are for bash or zsh. On Windows, follow [Running on Windows](#running-on-windows)
+for this step, then come back for steps 3 to 6.
 
 `talos setup` and `talos run` read and write `talos.config.json`, `.talos/secrets.json` and
 `runs/` in the **current directory**. Always run Talos from the same directory, normally
@@ -144,7 +142,7 @@ Candidates are compiled and scored on one of two backends. You choose one in `ta
 | Backend | What you need before setup | Cost per iteration |
 |---|---|---|
 | `modal` (default) | A [Modal](https://modal.com) account (the free tier works) and an API token created at modal.com/settings/tokens. Keep the token id and secret to hand. | Container seconds only; no fixed per-job overhead. |
-| `c3` | The `c3` CLI ([cthree.cloud](https://cthree.cloud)) installed, either logged in with `c3 login` or with a C3 API key (create one with `c3 apikey create`), and credit on the account. Top up with `c3 topup`. | One batch job of about 12 minutes before the first nonce is scored. See [Compute backends in detail](#compute-backends-in-detail). |
+| `c3` | With a C3 API key (`c3 apikey create`): nothing to install — Talos talks to C3 over HTTPS. Without a key: the `c3` CLI ([cthree.cloud](https://cthree.cloud)) installed and logged in with `c3 login`. Either way, credit on the account; top up with `c3 topup`. | One batch job of about 12 minutes before the first nonce is scored. See [Compute backends in detail](#compute-backends-in-detail). |
 
 ### 4. Pick an LLM provider
 
@@ -206,6 +204,101 @@ message naming `talos setup`. The C3 backend ships its code with each job and ne
 
 Run the [live smoke test](#live-smoke-test) for your backend once. It spends a small amount
 of real compute and confirms the backend can compile and score the real mainnet algorithm.
+
+## Running on Windows
+
+Talos runs natively in PowerShell or `cmd.exe`; WSL is not needed. (Inside WSL, follow the
+Linux instructions instead.) CI runs the full test suite on `windows-latest` for every pull
+request. No maintainer has run a real job end to end on a Windows machine yet, so if
+something fails there, please open an issue with the command and its output.
+
+### Install
+
+You need Python 3.10 or newer, [Git for Windows](https://git-scm.com/download/win) and
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/). Either of these installs
+`uv`:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+winget install --id=astral-sh.uv -e
+```
+
+Then, in PowerShell:
+
+```powershell
+git clone https://github.com/FibonAdithya/talos.git
+cd talos
+uv venv --python 3.10 .venv
+uv pip install --python .venv\Scripts\python.exe -e .
+.venv\Scripts\activate         # puts `talos` on PATH for this shell
+talos --help
+```
+
+If PowerShell refuses to run the activation script ("running scripts is disabled on this
+system"), either allow scripts for that one window with
+`Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned` and activate again, or skip
+activation and call `.venv\Scripts\talos.exe` wherever this README says `talos`.
+
+The no-accounts demo from [Try it with no accounts](#try-it-with-no-accounts) is:
+
+```powershell
+.venv\Scripts\talos.exe run --challenge knapsack --direction "demo" --budget-iterations 3 --yes --fake
+```
+
+Continue with [Setup, step 3](#3-pick-a-compute-backend). `talos setup` and `talos run` ask
+the same questions on every OS.
+
+### Translating the other commands in this README
+
+The examples elsewhere are written for bash:
+
+| In this README | PowerShell | `cmd.exe` |
+|---|---|---|
+| `.venv/bin/python`, `.venv/bin/pytest` | `.venv\Scripts\python.exe`, `.venv\Scripts\pytest.exe` | the same |
+| `source .venv/bin/activate` | `.venv\Scripts\activate` | `.venv\Scripts\activate.bat` |
+| a trailing `\` to continue a line | a trailing backtick `` ` ``, or put the command on one line | a trailing `^` |
+| `VAR=value command` | `$env:VAR = "value"` on its own line, then `command` | `set VAR=value` on its own line, then `command` |
+| `~/.talos/baselines/` | `$env:USERPROFILE\.talos\baselines\` | `%USERPROFILE%\.talos\baselines\` |
+
+For example, the live smoke test for the Modal backend is:
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe pytest
+$env:TALOS_LIVE_CHALLENGE = "knapsack"
+.venv\Scripts\python.exe -m pytest -m live tests/test_live.py -s
+```
+
+### What differs on Windows
+
+- **Modal backend**: nothing extra. `talos setup` runs the `modal` client that was installed
+  into the virtualenv, whether or not the virtualenv is activated.
+- **C3 backend**: use a C3 API key. Create one on the
+  [C3 dashboard settings page](https://cthree.cloud/dashboard/settings) and paste it at the
+  **C3 API key** prompt in `talos setup`. With a key, Talos talks to C3 over HTTPS and nothing
+  from C3 needs installing. This path is covered by unit tests, and one real C3 job ran over
+  it from Linux on 2026-09-18 (MEASURED, `docs/ai/specs/2026-09-17-c3-mcp-transport-design.md`
+  §8). None has run from Windows, so run the [live smoke test](#live-smoke-test) before a real
+  run. The `c3` CLI path (key left blank) has not been tried on Windows:
+  C3's documented installer is a shell script, and Windows cannot mark job.sh executable on
+  disk, so it is unknown whether a job uploaded by the CLI from Windows would start.
+- **CLI providers**: `npm` installs `claude` and `codex` as `.cmd` wrappers. Talos finds them
+  through `PATH`, so `claude --version` (or `codex --version`) must work in the same window
+  you run `talos` from. [Agentic mode](#agentic-mode) uses the same sandbox as on other
+  systems; the codex opt-in is `$env:TALOS_ALLOW_CODEX_AGENTIC = "1"`.
+- **Secrets**: Windows has no owner-only file permissions, so `.talos\secrets.json` is not
+  restricted to your user the way it is on Linux and macOS (mode `0600`). Keep the repository
+  in a folder only you can read.
+- **Development**: `make` is not installed by default. The [development](#development) install,
+  followed by the three commands `make check` runs, is:
+
+  ```powershell
+  uv venv --python 3.12 .venv
+  uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt -e .
+
+  .venv\Scripts\python.exe -m ruff check .
+  .venv\Scripts\python.exe -m pytest -q -m "not live"
+  .venv\Scripts\python.exe -m agentify check .
+  ```
 
 ## Running a job
 
@@ -437,6 +530,11 @@ other tracks' training nonces too, about a minute more per winning iteration on 
 (ESTIMATE, unverified).
 
 ## Compute backends in detail
+
+On the C3 backend Talos uses C3's hosted MCP endpoint (`https://api.cthree.cloud/mcp`) when a C3
+API key is configured, and the `c3` CLI when it is not. The key path needs no C3 install, which is
+what makes the C3 backend usable on Windows, and it uploads job.sh already marked executable.
+Both paths submit the same job directory, which is still written to `runs/<job_id>/c3/<n>/`.
 
 ### C3 timings
 

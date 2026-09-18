@@ -272,17 +272,18 @@ def test_pending_too_long_cancels_and_pauses(tmp_path):
 def test_request_stop_cancels_the_job_and_raises_cancelled(tmp_path):
     c3 = FakeC3(["RUNNING"], results_doc())
     pending = PendingJobStore.memory()
-    b, _ = bench(tmp_path, c3, pending=pending)
     calls = 0
     real_c3 = c3.__call__
+    holder = {}  # `b` does not exist until `bench()` returns; a one-slot holder closes the loop
 
     def counting(cmd, **kw):
         nonlocal calls
         calls += 1
         if calls == 3:
-            b.request_stop()
+            holder["b"].request_stop()
         return real_c3(cmd, **kw)
-    b._run = counting
+    b, _ = bench(tmp_path, counting, pending=pending)
+    holder["b"] = b
     with pytest.raises(BenchCancelled):
         b.evaluate(req())
     assert any(c[1] == "cancel" for (c, _) in c3.calls)
@@ -425,3 +426,113 @@ def test_without_an_api_key_c3_calls_inherit_the_environment(tmp_path):
     b.evaluate(req())
     # mutation: forcing C3_API_KEY into the env for a login-session user
     assert c3.envs and all(env is None for env in c3.envs)
+
+
+def _no_cli(cmd, **kw):
+    # Safety: if C3Bench ever ignored `transport=`, this stops it reaching a logged-in `c3`.
+    raise AssertionError(f"a transport was injected; C3Bench must not run {cmd[:2]}")
+
+
+class FakeTransport:
+    """A C3Transport with no CLI and no HTTP behind it."""
+
+    name = "fake"
+
+    def __init__(self, statuses, results=None):
+        self.statuses, self.results = list(statuses), results
+        self.job_ids = ["job_1", "job_2", "job_3"]
+        self.calls = []
+
+    def deploy(self, job_dir):
+        self.calls.append(("deploy", str(job_dir)))
+        return self.job_ids.pop(0)
+
+    def status(self, job_id):
+        self.calls.append(("status", job_id))
+        return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+
+    def cancel(self, job_id):
+        self.calls.append(("cancel", job_id))
+
+    def fetch(self, job_id, name, dest):
+        self.calls.append(("fetch", job_id, name))
+        if name != "results.json" or self.results is None:
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(self.results), encoding="utf-8", newline="\n")
+        return True
+
+
+def tbench(tmp_path, t):
+    clock = Clock()
+
+    def sleep(s):
+        clock.t += s
+    return C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
+                   clock=clock, sleep=sleep, poll_s=20.0, pending_timeout_s=1800)
+
+
+def test_an_injected_transport_carries_the_whole_job(tmp_path):
+    t = FakeTransport(["PENDING", "RUNNING", "SUCCEEDED"], results_doc())
+    r = tbench(tmp_path, t).evaluate(req())
+    # mutation: C3Bench ignoring `transport=` and building its own CliTransport
+    assert r.compile.ok and ("fetch", "job_1", "results.json") in t.calls
+    assert [c[0] for c in t.calls].count("deploy") == 1
+
+
+def test_an_unusable_job_id_is_rejected_before_any_status_or_fetch_call(tmp_path):
+    t = FakeTransport(["SUCCEEDED"], results_doc())
+    t.job_ids = ["../../x"]
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: dropping the job id check lets it become job_dir/../../x/artifacts on disk
+    assert "unusable job id" in str(ei.value)
+    assert not any(c[0] in ("status", "fetch") for c in t.calls)
+
+
+def test_pending_timeout_cancels_through_the_transport(tmp_path):
+    t = FakeTransport(["PENDING"])
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: a cancel left on the deleted CLI helper leaves a queued job billing later
+    assert "no C3 capacity" in str(ei.value) and ("cancel", "job_1") in t.calls
+
+
+def test_a_failed_job_is_resubmitted_once_through_the_transport(tmp_path):
+    t = FakeTransport(["FAILED"], results=None)
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: treating fetch() == False as a pull error skips the one resubmission
+    assert "failed twice" in str(ei.value)
+    assert [c[0] for c in t.calls].count("deploy") == 2
+
+
+def test_success_without_results_is_unavailable_not_a_resubmission(tmp_path):
+    t = FakeTransport(["SUCCEEDED"], results=None)
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: ignoring fetch's return value reads a results.json that is not there
+    assert "without results.json" in str(ei.value)
+    assert [c[0] for c in t.calls].count("deploy") == 1
+
+
+class FakeTransportWithStaleResults(FakeTransport):
+    """fetch writes a results.json to `dest` (as a real pull sometimes leaves one behind from an
+    earlier, unrelated attempt) but still reports the fetch as having found nothing."""
+
+    def fetch(self, job_id, name, dest):
+        self.calls.append(("fetch", job_id, name))
+        if name == "results.json":
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(json.dumps(results_doc()), encoding="utf-8", newline="\n")
+        return False
+
+
+def test_a_stale_results_file_on_disk_is_not_mistaken_for_a_successful_fetch(tmp_path):
+    t = FakeTransportWithStaleResults(["FAILED"])
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: checking results.exists() instead of trusting fetch's return value would read
+    # this stale file left on disk and report a result instead of failing twice
+    assert "failed twice" in str(ei.value)
+    assert [c[0] for c in t.calls].count("deploy") == 2

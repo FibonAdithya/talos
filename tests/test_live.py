@@ -37,7 +37,7 @@ def test_baseline_compiles_and_scores():
 def test_c3_knapsack_job(tmp_path):
     """Manual: one real C3 job. Run:
     TALOS_LIVE_BACKEND=c3 .venv/bin/pytest -m live tests/test_live.py -k c3 -s
-    Needs `c3 login` and about £0.05 of credit; takes about 20 minutes."""
+    Needs either a C3 API key or `c3 login`, and about £0.05 of credit; takes about 20 minutes."""
     if os.environ.get("TALOS_LIVE_BACKEND") != "c3":
         pytest.skip("set TALOS_LIVE_BACKEND=c3")
     from talos.bench import EvalRequest
@@ -48,7 +48,18 @@ def test_c3_knapsack_job(tmp_path):
     name, _algorithm_id, _adoption = mainnet.top_algorithm(ch)
     files = mainnet.fetch_algorithm_files(ch, name)
     tr, ho = draw_nonce_sets(info.tracks[:1], new_rand_hash(), training_count=2, holdout_count=2)
-    b = C3Bench(tmp_path)
+    # With a C3 API key in .talos/secrets.json or C3_API_KEY this runs over MCP; with no key it
+    # runs over the `c3` CLI and needs `c3 login`. Print which, so the run's evidence says so.
+    from pathlib import Path
+
+    from talos.config import ConfigError, load, resolve_c3_api_key
+    try:
+        cfg = load(Path.cwd())
+    except ConfigError:
+        cfg = None  # no `talos setup` here: C3_API_KEY alone still selects MCP
+    key = resolve_c3_api_key(cfg)
+    b = C3Bench(tmp_path, api_key=key)
+    print({"transport": b._t.name, "keyed": bool(key)})
     r = b.evaluate(EvalRequest(ch, files, tr, ho, info.max_fuel, None, CHALLENGES[ch].beat))
     assert r.compile.ok, r.compile.output[-3000:]
     assert len(r.training) == 2 and r.holdout is not None and len(r.holdout) == 2
