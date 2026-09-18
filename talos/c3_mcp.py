@@ -212,7 +212,11 @@ class McpTransport:
                 raise C3CommandError(f"c3 read_artifact gave neither content nor a URL for {path}")
             raw = self._fetch_url(url, self._timeout_s)
         want = doc.get("sha256")
-        if want and hashlib.sha256(raw).hexdigest() != want:
+        if not isinstance(want, str) or not want:
+            # fail loudly on missing (spec §2): a document with no sha256 has nothing to verify
+            # against, so treating it as "nothing to check" would write and score unverified bytes
+            raise C3CommandError(f"c3 artifact {path} gave no sha256")
+        if hashlib.sha256(raw).hexdigest() != want:
             # the GPU-box lesson: a matching hash is the only proof of a complete transfer
             raise C3CommandError(f"c3 artifact {path} did not match its sha256")
         dest.parent.mkdir(parents=True, exist_ok=True)

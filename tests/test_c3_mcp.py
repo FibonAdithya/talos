@@ -261,6 +261,18 @@ def test_fetch_rejects_content_that_does_not_match_its_hash(tmp_path):
     assert not (tmp_path / "results.json").exists()
 
 
+def test_fetch_rejects_a_document_with_no_sha256(tmp_path):
+    for doc in ({"inline": True, "encoding": "utf8", "content": "ok"},
+                {"inline": True, "encoding": "utf8", "content": "ok", "sha256": ""}):
+        t = McpTransport("k", client=FakeClient({"read_artifact": doc}))
+        dest = tmp_path / "results.json"
+        # mutation: `if want and ...` treats a missing/empty sha256 as "nothing to check" and
+        # writes unverified bytes that later get scored
+        with pytest.raises(C3CommandError):
+            t.fetch("job_1", "results.json", dest)
+        assert not dest.exists()
+
+
 def test_fetch_downloads_when_the_artifact_is_too_big_for_inline(tmp_path):
     body = b"x" * 2_000_000
     doc = {"inline": False, "size_bytes": len(body), "download_url": "https://storage/x",
