@@ -333,3 +333,50 @@ def test_balance_and_whoami_read_the_structured_fields():
     c2 = FakeClient({"balance": {"tier": "free"}})
     # mutation: returning 0.0 invents a balance the server never reported
     assert McpTransport("k", client=c2).balance_gbp() is None
+
+
+def test_real_urllib_post_round_trip_against_a_local_server():
+    """The only test that exercises _urllib_post. Binds 127.0.0.1 on a free port."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            # Not dict(): urllib sends "User-agent", and only the Message lookup ignores case.
+            seen.append((self.headers, _json.loads(body)))
+            doc = _json.loads(body)
+            if doc.get("method") == "notifications/initialized":
+                self.send_response(202)
+                self.end_headers()
+                return
+            payload = _json.dumps({"jsonrpc": "2.0", "id": doc["id"],
+                                   "result": {"structuredContent": {"balance_gbp": 3.5}}})
+            out = f"event: message\ndata: {payload}\n\n".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        client = McpClient(KEY, url=f"http://127.0.0.1:{srv.server_port}/mcp", timeout_s=10)
+        assert client.tool("balance", {}) == {"balance_gbp": 3.5}
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        t.join(timeout=5)
+    headers, _doc = seen[-1]
+    # mutation: header names that only the fake honoured (Cloudflare needs the real User-Agent)
+    assert headers["Authorization"] == f"Bearer {KEY}"
+    assert headers["User-Agent"] == f"talos/{__version__}"
+    assert "text/event-stream" in headers["Accept"]
