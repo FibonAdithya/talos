@@ -7,6 +7,7 @@ from talos import __version__
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import job_settings, write_job_dir
 from talos.c3_mcp import McpAuthError, McpClient, McpTransport
+from talos.challenges import CHALLENGES
 
 KEY = "c3_key_" + "a" * 20
 
@@ -197,8 +198,13 @@ def job_dir_for(tmp_path):
 
 
 def test_deploy_sends_the_files_with_job_sh_executable_and_the_c3_settings(tmp_path):
+    from tests.test_c3_jobdir import req as jobdir_req
+    from talos.c3_jobdir import time_limit_s
+    from talos.challenges import c3_workers
+
     c = FakeClient({"deploy": {"job_id": "job_5"}})
-    d = job_dir_for(tmp_path)
+    request = jobdir_req()
+    d = write_job_dir(tmp_path / "job", request, "3")
     assert McpTransport("k", client=c).deploy(d) == "job_5"
     name, args = c.calls[0]
     assert name == "deploy"
@@ -210,9 +216,30 @@ def test_deploy_sends_the_files_with_job_sh_executable_and_the_c3_settings(tmp_p
     assert ".c3" not in files
     assert "payload.json" in files and "talos/c3_job.py" in files
     assert files["job.sh"]["content"].startswith("#!/bin/bash")
+    # Walltime computed independently of _job_dir_settings_inputs, exactly as write_job_dir
+    # derived it, so a broken formula there (e.g. dropping the minutes term) cannot pass by
+    # comparing the code's output against itself.
+    # mutation: `h * 3600 + sec` in _job_dir_settings_inputs (dropping the minutes term)
+    nonces = sum(n.count for n in request.training) + sum(n.count for n in request.holdout)
+    expected_walltime = time_limit_s(max(nonces, 1), c3_workers(CHALLENGES["knapsack"]))
+    assert args["walltime_seconds"] == expected_walltime
+    assert isinstance(args["walltime_seconds"], int)
+    assert args["walltime_seconds"] > 0
     # mutation: a hard-coded profile breaks invariant 1
-    for k, v in job_settings("knapsack", "3", args["walltime_seconds"]).items():
+    for k, v in job_settings("knapsack", "3", expected_walltime).items():
         assert args[k] == v
+
+
+def test_deploy_sends_gpu_hardware_and_accelerator_for_a_gpu_challenge(tmp_path):
+    from tests.test_c3_jobdir import req as jobdir_req
+
+    c = FakeClient({"deploy": {"job_id": "job_6"}})
+    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3")
+    assert McpTransport("k", client=c).deploy(d) == "job_6"
+    _name, args = c.calls[0]
+    # mutation: "docker_requires_accelerator": "none" forced in the deploy args
+    assert args["hardware"] == "l40"
+    assert args["docker_requires_accelerator"] == "cuda"
 
 
 def test_deploy_reads_the_job_id_under_either_key(tmp_path):
