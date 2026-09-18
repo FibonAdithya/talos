@@ -1,7 +1,8 @@
 # C3 over its hosted MCP endpoint, not the `c3` CLI
 
-Status: draft, 2026-09-17. The key check has run (§8). Q1–Q7 are answered by measurement; deploy
-and cancel through MCP, and rate limits, are still unmeasured and are settled by the live job in §6.
+Status: implemented 2026-09-18, PR #12. The key check has run (§8). Q1–Q7 are answered by
+measurement, and the live job in §6 ran over MCP on 2026-09-18 (§8 Q8, Q9). Still unmeasured:
+`cancel_job` (the live job succeeded, so nothing cancelled it) and an explicit count of `429`s.
 
 ## 1. Problem
 
@@ -231,5 +232,5 @@ the transport before mutation-checking.
 | Q5 | `balance` shape | `structuredContent.balance_gbp`, a number | MEASURED |
 | Q6 | Can MCP read a CLI-submitted job? | Yes: `get_job`, `list_artifacts`, `read_artifact` | MEASURED |
 | Q7 | Artifact paths | `artifacts/results.json`, `artifacts/build.log`; inline when small, `sha256` and `download_url` always given | MEASURED |
-| Q8 | Rate limits at a 20 s poll interval | unknown | UNVERIFIED; watch for `429` in §6.2 |
-| Q9 | Does `deploy` with `files` run `job.sh` marked `executable`, and does `cancel_job` cancel? | not yet run | UNVERIFIED; §6.2 (costs credit) |
+| Q8 | Rate limits at a 20 s poll interval | No rate limit stopped a job polled every 20 s for 12 min 16 s (about 36 `get_job` calls, ESTIMATE from the duration). A single `429` would have been absorbed by `_wait`'s failure tolerance without being logged, so "no `429` at all" is UNVERIFIED | MEASURED 2026-09-18, job `job_1789723631604_rlzgbv`: `1 passed in 736.27s` |
+| Q9 | Does `deploy` with `files` run `job.sh` marked `executable`, and does `cancel_job` cancel? | `deploy`: yes. An inline upload with `executable: true` on `job.sh` and the settings as tool arguments ran to `SUCCEEDED`, `exit_code 0`, on `cpu-d3-4vcpu-16gb` (the profile `.c3` names); `results.json` (15,339 bytes) and `build.log` (31,115 bytes) were fetched with `read_artifact` and passed the sha256 check; compile ok, 2 training and 2 held-out results. `cancel_job`: UNVERIFIED, the job was never cancelled | MEASURED 2026-09-18, job `job_1789723631604_rlzgbv`, `{'transport': 'mcp', 'keyed': True}`; `get_job`: started 09:28:32.024Z, finished 09:38:59.487Z (627.5 s running). Cost: Talos's own figure is $0.0266 (ESTIMATE, from the £0.11/h list price); the balance read £9.306636 afterwards against £9.322322 on 2026-09-17 (£0.0157 lower, with no record of what else ran between the two readings) |
