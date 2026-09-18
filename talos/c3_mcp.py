@@ -31,10 +31,22 @@ class _SessionGone(C3CommandError):
     """404 on a request that carried a session id: the server dropped the session."""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The default opener follows a 3xx and resends every header but Content-Length/-Type —
+    including Authorization — to whatever host the Location points at, with no same-host check.
+    Returning None here makes urllib raise HTTPError for the 3xx instead of resending anything."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def _urllib_post(url: str, headers: dict, body: bytes, timeout_s: int):
     req = urllib.request.Request(url, body, headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as r:
+        with _opener.open(req, timeout=timeout_s) as r:
             return r.status, dict(r.headers), r.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
@@ -79,7 +91,9 @@ class McpClient:
             raise McpAuthError("the C3 API key was rejected (check `c3 apikey list`)")
         if status == 404 and self._session:
             raise _SessionGone(f"c3 {method} failed with HTTP 404: the session is gone")
-        if status >= 400:
+        if status >= 300:
+            # includes 3xx: a redirect is never followed (see _NoRedirect), and the Location
+            # value is deliberately not included here
             raise C3CommandError(f"c3 {method} failed with HTTP {status}")
         self._session = headers.get("mcp-session-id") or self._session
         if notify:

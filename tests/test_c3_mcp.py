@@ -380,3 +380,60 @@ def test_real_urllib_post_round_trip_against_a_local_server():
     assert headers["Authorization"] == f"Bearer {KEY}"
     assert headers["User-Agent"] == f"talos/{__version__}"
     assert "text/event-stream" in headers["Accept"]
+
+
+def test_urllib_post_does_not_follow_a_redirect_to_a_second_host():
+    """A malicious or misconfigured 302 must not carry the Authorization header to its target.
+    mutation: going back to urllib.request.urlopen follows the redirect and leaks the key."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    second_hits = []
+
+    class SecondHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            second_hits.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def do_GET(self):
+            # urllib's default redirect handling turns a 302 to a POST into a GET; either
+            # verb reaching this server at all is the leak under test.
+            second_hits.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    second = HTTPServer(("127.0.0.1", 0), SecondHandler)
+    second_thread = threading.Thread(target=second.serve_forever, daemon=True)
+    second_thread.start()
+
+    class FirstHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{second.server_port}/mcp")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    first = HTTPServer(("127.0.0.1", 0), FirstHandler)
+    first_thread = threading.Thread(target=first.serve_forever, daemon=True)
+    first_thread.start()
+
+    try:
+        client = McpClient(KEY, url=f"http://127.0.0.1:{first.server_port}/mcp", timeout_s=10)
+        with pytest.raises(C3CommandError) as ei:
+            client.tool("whoami", {})
+        assert KEY not in str(ei.value) and "c3_key_" not in str(ei.value)
+    finally:
+        first.shutdown()
+        first.server_close()
+        first_thread.join(timeout=5)
+        second.shutdown()
+        second.server_close()
+        second_thread.join(timeout=5)
+    assert second_hits == []
