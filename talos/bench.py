@@ -194,6 +194,10 @@ class ModalBench:
         args = [(artifact_id, ns.track, ns.rand_hash, n, fuel, timeout_for(timeouts, ns.track),
                  hyperparameters_for(hyperparameters, ns.track))
                 for ns in nonce_sets for n in ns.nonces()]
+        if not args:
+            # A holdout count of 0 still yields one NonceSet per track, each with no nonces.
+            # modal 1.5.5 never returns from starmap([]), so the client would hang here.
+            return []
         rows = self._with_retry(
             lambda: list(self._fn(f"score_nonce_{challenge}").starmap(args)))
         results = [NonceResult.from_dict(r) for r in rows]

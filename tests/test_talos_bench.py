@@ -64,3 +64,23 @@ def test_score_impl_hands_the_hyperparameters_to_run_nonce(monkeypatch, tmp_path
     talos_bench._score_impl("knapsack", "c003", "art1", "t", "ab" * 32, 0, 5, 60, {"x": 1})
     # mutation: accepting the argument but not forwarding it runs Modal nonces without the map
     assert seen["hyperparameters"] == {"x": 1}
+
+
+def test_image_python_follows_the_deploying_interpreter(monkeypatch):
+    """Functions are serialized=True, and Modal refuses to deploy a serialized function whose
+    image Python differs in minor version from the interpreter that defined it."""
+    seen = {}
+
+    class _Chain:
+        def __getattr__(self, _name):
+            return lambda *a, **k: self
+
+    def fake_from_registry(tag, add_python=None, **_kw):
+        seen["add_python"] = add_python
+        return _Chain()
+    monkeypatch.setattr(talos_bench.modal.Image, "from_registry", fake_from_registry)
+    monkeypatch.setattr(talos_bench, "sys", types.SimpleNamespace(version_info=(3, 13, 2)),
+                        raising=False)
+    talos_bench._image("knapsack")
+    # mutation: a pinned "3.11" fails `modal deploy` from every interpreter that is not 3.11
+    assert seen["add_python"] == "3.13"

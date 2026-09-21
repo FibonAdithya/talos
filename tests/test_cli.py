@@ -3,6 +3,7 @@ import os
 import stat
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -1625,3 +1626,21 @@ def test_setup_checks_c3_with_the_environment_key_and_says_which_transport(tmp_p
     typed_out = capsys.readouterr().out
     assert checked[-1] == "c3_key_typed"
     assert "C3_API_KEY" not in typed_out and "MCP" in typed_out
+
+
+def test_deploy_bench_deploys_the_app_as_a_package_module():
+    """The functions are serialized=True. Deployed by file path, Modal imports the file as the
+    top-level module `talos_bench`, the pickle refers to that name, and every container dies
+    with "the 'talos_bench' module is not available in the remote environment": the image
+    only carries the packages `modal_app` and `talos`."""
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append((list(cmd), kw))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    cli.deploy_bench(None, None, run=run)
+    (cmd, kw), = seen
+    # mutation: deploying modal_app/talos_bench.py by path deploys an app no container can load
+    assert cmd[-3:] == ["deploy", "-m", "modal_app.talos_bench"]
+    # mutation: without the cwd, `-m` cannot import modal_app from outside the checkout
+    assert (Path(kw["cwd"]) / "modal_app" / "talos_bench.py").is_file()

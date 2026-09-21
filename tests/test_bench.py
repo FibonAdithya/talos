@@ -262,6 +262,36 @@ def test_modal_evaluate_skips_holdout_on_a_loss_and_charges_each_call(monkeypatc
     assert starmaps == [3, 3, 3] and r2.holdout_reason == "won" and len(r2.holdout) == 3
 
 
+def test_modal_score_never_starmaps_an_empty_nonce_list(monkeypatch):
+    """`draw_nonce_sets(..., holdout_count=0)` returns one NonceSet per track with count 0, so
+    `request.holdout` is a non-empty list that expands to no starmap args. Measured against
+    modal 1.5.5: `Function.starmap([])` never returns, so the client hung after a compile and a
+    training score that had both succeeded."""
+    starmaps = []
+
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": "ok"}
+
+        def starmap(self, args):
+            starmaps.append(len(args))
+            return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1000,
+                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    empty = [NonceSet(track="t", rand_hash="ab" * 32, start=1_000_000, count=0)]
+    r = ModalBench().evaluate(req(baseline=None, holdout=empty))
+    # mutation: starmapping the empty holdout hangs the real client forever
+    assert starmaps == [3]
+    assert r.holdout == [] and r.holdout_reason == "forced" and len(r.training) == 3
+
+
 DEAD_WARNING = ("warning: function `polish` is never used\n"
                 "   --> tig-algorithms/src/knapsack/talos_cand/mod.rs:3:4\n")
 

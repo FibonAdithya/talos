@@ -5,6 +5,7 @@ content hash of the submitted files."""
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 import modal
@@ -22,8 +23,11 @@ volume = modal.Volume.from_name("talos-artifacts", create_if_missing=True)
 
 
 def _image(name: str) -> modal.Image:
+    # The functions below are serialized=True, and Modal refuses to deploy a serialized function
+    # whose image Python differs in minor version from the interpreter that defined it.
+    python = "{}.{}".format(*sys.version_info[:2])
     return (
-        modal.Image.from_registry(dev_image(name), add_python="3.11")
+        modal.Image.from_registry(dev_image(name), add_python=python)
         .apt_install("git")
         .run_commands(
             "git clone https://github.com/tig-foundation/tig-monorepo.git /app",
