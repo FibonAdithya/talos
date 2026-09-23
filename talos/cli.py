@@ -549,7 +549,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
             try:
                 # Before the baseline: the first run per challenge pulls the image and does one
                 # clean build, and the user should see that happening rather than a silent wait.
-                gpu_name = prepare(spec.challenge, uid=host_uid())
+                gpu_name = prepare(spec.challenge)
             except C3CommandError as e:
                 state.status, state.stop_reason = "failed", f"docker: {str(e)[:120]}"
                 store.save(state)
@@ -844,7 +844,7 @@ def cmd_compile(args, ask) -> int:
         cfg = None  # the agentic sandbox: the key comes from C3_API_KEY
     if backend == "local":
         try:
-            prepare(args.challenge, uid=host_uid())
+            prepare(args.challenge)
         except C3CommandError as e:
             print(f"Docker failed while preparing {args.challenge}: {e}", file=sys.stderr)
             return 1

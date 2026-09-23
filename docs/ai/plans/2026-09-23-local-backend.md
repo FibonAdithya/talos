@@ -1809,3 +1809,25 @@ Before writing the PR body, list every number in it: `| claim | value | MEASURED
 - [ ] **Step 3: Push and open the PR**
 
 Probe first: `timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=8 -T git@github.com`. The PR targets `ghcr-images` if that branch is still unmerged, else `main`; say which in the body. The body states in words that the GPU branch is unverified (spec §7), and ends with the attribution line from the session reminder. Then follow the `review-pr` skill to green.
+
+## Spike results (Task 1, MEASURED 2026-09-23)
+
+Script: the session scratchpad's `spike.sh` (throwaway; log kept as `spike.log` there). Image
+`ghcr.io/tig-foundation/tig-monorepo/knapsack/dev:0.0.7`, 16-core / 30 GB Linux box.
+
+| Question | Result | Evidence |
+|---|---|---|
+| `CARGO_HOME` in the image | unset; cargo at `/root/.cargo` (`$HOME/.cargo`, HOME=/root) | `spike.log` image env line |
+| `RUSTUP_HOME` in the image | unset; `/root/.rustup` | same |
+| Offline incremental build as host uid | rc=127 in 0.016 s: `cargo: command not found` | `offline build rc=` line |
+| Why | `/root` is mode 700 root; a non-root user cannot traverse it, so neither cargo nor the rustup toolchain is reachable (`docker run --user 1000:1000 … ls /root/.cargo/bin` → Permission denied) | follow-up probe |
+| Bind-mount file owned by host uid | yes (`-rw-r--r-- 1 1000 1000 … x`) | `ls -ln` line |
+| Clean `build_algorithm fast_and_furious` | 12m0.168s real | `time` under "clean build" |
+| Incremental `build_algorithm` | not measured by the spike (the run failed before compiling); measured by the live test instead | — |
+
+Decision (spec §6 fallback 2, improved): the job container runs as root, without `--user` and
+without the `HOME=/tmp` override; the transport hands the artifacts mount back to the host
+user from a one-second helper container (`docker run --rm -v <artifacts>:/artifacts <image>
+chown -R <uid> /artifacts`) when the job reaches a terminal state, so nothing under `runs/`
+needs `sudo`. The `chown` of the volumes in prepare is dropped: root needs none. Whether an
+offline build works once the registry is warm is settled by the live test's second run.

@@ -29,8 +29,10 @@ LABEL_RUSTUP = "talos.rustup_home"
 
 
 def host_uid() -> str | None:
-    """`uid:gid` for `docker run --user`, so files on the bind mounts belong to the user. None
-    on Windows: there is no getuid, and Docker Desktop maps bind-mount ownership itself."""
+    """`uid:gid` the finished job's artifacts are handed to (DockerTransport.status). The job
+    itself runs as root: the dev image keeps cargo and rustup under /root, mode 700, so a
+    non-root user cannot build (spike, 2026-09-23). None on Windows: there is no getuid, and
+    Docker Desktop maps bind-mount ownership itself."""
     if os.name == "nt":
         return None
     return f"{os.getuid()}:{os.getgid()}"
@@ -68,21 +70,20 @@ def parse_time(s: str) -> datetime:
 
 
 def run_args(local: dict, job_dir: Path, artifacts: Path, name: str, key: str, cargo_home: str,
-             rustup_home: str, uid: str | None) -> list[str]:
+             rustup_home: str) -> list[str]:
     """The job container's argv. Each `-v` value is one element, so a path with a space stays
-    whole. The cargo and rustup homes are passed explicitly because HOME is overridden."""
+    whole. The cargo and rustup homes are passed explicitly so the mounted registry is the one
+    cargo uses whatever the image's profile does."""
     app_vol, cargo_vol = volume_names(local["challenge"])
     args = ["docker", "run", "-d", "--name", name,  # [0] is dropped by DockerTransport.docker
             "--label", f"{LABEL_LIMIT}={local['time_limit_s']}", "--label", f"{LABEL_RUN}={key}",
             "-v", f"{job_dir}:{WORK}:ro", "-v", f"{artifacts}:{ARTIFACTS}",
             "-v", f"{app_vol}:{APP}", "-v", f"{cargo_vol}:{cargo_home}",
             "-e", f"C3_JOB_WORKDIR={WORK}", "-e", f"C3_ARTIFACTS_DIR={ARTIFACTS}",
-            "-e", "HOME=/tmp", "-e", f"CARGO_HOME={cargo_home}", "-e", f"RUSTUP_HOME={rustup_home}",
+            "-e", f"CARGO_HOME={cargo_home}", "-e", f"RUSTUP_HOME={rustup_home}",
             "--cpus", str(local["cpus"]), "--memory", f"{local['memory_gib']}g",
             "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--pids-limit", str(PIDS_LIMIT)]
-    if uid:
-        args += ["--user", uid]
     if local["gpu"]:
         args += ["--gpus", "all"]
     return args + [local["image"], "bash", f"{WORK}/job.sh"]
@@ -135,8 +136,7 @@ class DockerTransport:
         artifacts.mkdir(parents=True, exist_ok=True)  # else Docker creates it root-owned
         self._prune(key)
         self.docker("rm", "-f", name, ok=(0, 1))  # a leftover with this exact name
-        self.docker(*run_args(local, job_dir, artifacts, name, key, cargo_home, rustup_home,
-                              self._uid)[1:])
+        self.docker(*run_args(local, job_dir, artifacts, name, key, cargo_home, rustup_home)[1:])
         return name
 
     def _prune(self, key: str) -> None:
@@ -167,10 +167,28 @@ class DockerTransport:
                 return "TIMED_OUT"
             return "RUNNING"
         if status in ("exited", "dead"):
+            self._hand_over(doc)
             if (parse_time(st["FinishedAt"]) - started).total_seconds() >= limit:
                 return "TIMED_OUT"  # the one we, or a previous process, killed
             return "SUCCEEDED" if st.get("ExitCode") == 0 else "FAILED"
         raise C3CommandError(f"unexpected container status {status!r}")
+
+    def _hand_over(self, doc: dict) -> None:
+        """The job ran as root, so its artifacts on the bind mount are root-owned; a one-second
+        helper container gives them to the user. Best effort and idempotent: a failure here
+        leaves files the user must `sudo rm`, not a failed job."""
+        if not self._uid:
+            return
+        src = next((m["Source"] for m in doc.get("Mounts", [])
+                    if m.get("Destination") == ARTIFACTS), None)
+        image = doc.get("Config", {}).get("Image")
+        if not src or not image:
+            return
+        try:
+            self.docker("run", "--rm", "-v", f"{src}:{ARTIFACTS}", image, "chown", "-R",
+                        self._uid, ARTIFACTS, timeout=120)
+        except C3CommandError:
+            pass
 
     def cancel(self, job_id: str) -> None:
         try:
@@ -224,18 +242,14 @@ def has_gpu_runtime(run: Callable = subprocess.run) -> bool:
     return "nvidia" in docker_runtimes(run)
 
 
-def _chown(uid: str | None, cargo_home: str) -> str:
-    return f"chown -R {uid} {APP} {cargo_home}\n" if uid else ""
-
-
-def clone_script(uid: str | None, cargo_home: str) -> str:
+def clone_script() -> str:
     return ("set -euo pipefail\n"
             f"curl -fsSL \"{MONOREPO_TARBALL}{MONOREPO_REF}\" | tar xz -C {APP} "
             "--strip-components=1\n"
-            f"touch {APP}/{READY_MARKER}\n" + _chown(uid, cargo_home))
+            f"touch {APP}/{READY_MARKER}\n")
 
 
-def warm_script(challenge: str, uid: str | None, cargo_home: str) -> str:
+def warm_script(challenge: str) -> str:
     """Builds the first algorithm the pinned monorepo ships for the challenge, so the registry
     volume is populated with networking on, once, by code that is not LLM-authored."""
     return ("set -euo pipefail\n"
@@ -243,19 +257,18 @@ def warm_script(challenge: str, uid: str | None, cargo_home: str) -> str:
             f"name=$(ls -d tig-algorithms/src/{challenge}/*/ | grep -v talos_cand | head -1 "
             "| xargs basename)\n"
             "build_algorithm \"$name\"\n"
-            f"touch {APP}/{WARM_MARKER}\n" + _chown(uid, cargo_home))
+            f"touch {APP}/{WARM_MARKER}\n")
 
 
-def prepare(challenge: str, run: Callable = subprocess.run, uid: str | None = None,
+def prepare(challenge: str, run: Callable = subprocess.run,
             log: Callable[[str], None] = print) -> str | None:
     """Idempotent: pull the image, create the volumes, clone the pin, warm the registry. Each
     step is skipped when its marker is present, and one line is printed per step performed.
     Returns the GPU name for a GPU challenge, None otherwise. Every container here runs with
-    networking on and as root; the chown at the end of each script hands the volumes to the
-    host user for the job containers."""
+    networking on, and none of them contains LLM-authored code."""
     spec = CHALLENGES[challenge]
     image = dev_image(challenge)
-    t = DockerTransport(run=run, uid=uid)
+    t = DockerTransport(run=run)
     gpu = ["--gpus", "all"] if spec.is_gpu else []
     if not t.image_present(image):
         log(f"pulling {image} (about 13 GB, once per image tag)")
@@ -285,12 +298,11 @@ def prepare(challenge: str, run: Callable = subprocess.run, uid: str | None = No
 
     if not marker(READY_MARKER):
         log(f"cloning tig-monorepo at {MONOREPO_REF[:12]} into {app_vol}")
-        t.docker("run", "--rm", *mounts, image, "bash", "-c", clone_script(uid, cargo_home),
-                 timeout=1800)
+        t.docker("run", "--rm", *mounts, image, "bash", "-c", clone_script(), timeout=1800)
     if not marker(WARM_MARKER):
         log("warm build: one clean build so later builds are incremental and offline")
-        t.docker("run", "--rm", *gpu, *mounts, image, "bash", "-c",
-                 warm_script(challenge, uid, cargo_home), timeout=7200)
+        t.docker("run", "--rm", *gpu, *mounts, image, "bash", "-c", warm_script(challenge),
+                 timeout=7200)
     if spec.is_gpu:
         out = t.docker("run", "--rm", *gpu, image, "nvidia-smi", "--query-gpu=name",
                        "--format=csv,noheader", timeout=120)

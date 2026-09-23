@@ -50,7 +50,10 @@ class FakeDocker:
                 rc, out = 1, "Error: No such object"
             else:
                 out = json.dumps([{"State": self.inspect,
-                                   "Config": {"Labels": {"talos.time_limit_s": "1800"}}}])
+                                   "Config": {"Labels": {"talos.time_limit_s": "1800"},
+                                              "Image": "img:1"},
+                                   "Mounts": [{"Source": "/host/art",
+                                               "Destination": "/artifacts"}]}])
         elif word == "ps":
             out = self.ps_ids
         elif word == "volume" and cmd[2] == "inspect":
@@ -99,12 +102,12 @@ def test_volume_and_container_names_are_keyed_on_the_pins_and_the_run(tmp_path):
 def test_run_args_carry_every_hardening_flag_and_the_mounts(tmp_path):
     jd, art = tmp_path / "job dir", tmp_path / "job dir" / "n" / "artifacts"
     args = run_args(local_doc(), jd, art, "n", "runkey12", "/usr/local/cargo",
-                    "/usr/local/rustup", "1000:1000")
+                    "/usr/local/rustup")
     assert args[:4] == ["docker", "run", "-d", "--name"] and args[4] == "n"
     joined = " ".join(args)
     for flag in ("--network none", "--cap-drop ALL", "--security-opt no-new-privileges",
-                 f"--pids-limit {PIDS_LIMIT}", "--cpus 8", "--memory 12g", "--user 1000:1000",
-                 "-e C3_JOB_WORKDIR=/work", "-e C3_ARTIFACTS_DIR=/artifacts", "-e HOME=/tmp",
+                 f"--pids-limit {PIDS_LIMIT}", "--cpus 8", "--memory 12g",
+                 "-e C3_JOB_WORKDIR=/work", "-e C3_ARTIFACTS_DIR=/artifacts",
                  "-e CARGO_HOME=/usr/local/cargo", "-e RUSTUP_HOME=/usr/local/rustup",
                  "--label talos.time_limit_s=1800", "--label talos.run=runkey12"):
         # mutation: any one hardening flag dropped
@@ -114,15 +117,16 @@ def test_run_args_carry_every_hardening_flag_and_the_mounts(tmp_path):
     assert f"{jd}:/work:ro" in args and f"{art}:/artifacts" in args
     assert args[-3:] == [dev_image("knapsack"), "bash", "/work/job.sh"]
     assert "--gpus" not in args
-    gpu = run_args(local_doc(gpu=True), jd, art, "n", "k", "/c", "/r", None)
+    gpu = run_args(local_doc(gpu=True), jd, art, "n", "k", "/c", "/r")
     assert "--gpus" in gpu and gpu[gpu.index("--gpus") + 1] == "all"
-    # mutation: `--user None` on Windows
-    assert "--user" not in gpu and "None" not in gpu
+    # The image keeps cargo and rustup under /root (mode 700), so the job runs as root and the
+    # transport hands the artifacts back to the user afterwards (test_status_chowns...).
+    assert "--user" not in args and "HOME=/tmp" not in joined
 
 
 def test_run_args_keeps_a_path_with_a_space_as_one_argument(tmp_path):
     jd = tmp_path / "my runs" / "j"
-    args = run_args(local_doc(), jd, jd / "n" / "artifacts", "n", "k", "/c", "/r", None)
+    args = run_args(local_doc(), jd, jd / "n" / "artifacts", "n", "k", "/c", "/r")
     assert args[args.index("-v") + 1] == f"{jd}:/work:ro"
 
 
@@ -183,6 +187,26 @@ def test_status_maps_docker_state_onto_the_c3_vocabulary(st, expect):
     assert transport(fake).status("n") == expect
     # mutation: killing a container that has already exited
     assert not any(c[1] == "kill" for c in fake.calls)
+
+
+@pytest.mark.parametrize("st", [
+    state("exited", 0, finished=T0 + timedelta(seconds=30)),
+    state("exited", 1, finished=T0 + timedelta(seconds=30)),
+    state("exited", 137, finished=T0 + timedelta(seconds=1800)),
+])
+def test_status_hands_the_artifacts_to_the_host_user_once_the_job_is_terminal(st):
+    fake = FakeDocker(inspect=st)
+    transport(fake, uid="1000:1000").status("n")
+    chown = [c for c in fake.calls if c[1] == "run"]
+    # mutation: root-owned results under runs/ that the user cannot delete
+    assert len(chown) == 1 and chown[0][1:] == ["run", "--rm", "-v", "/host/art:/artifacts",
+                                                  "img:1", "chown", "-R", "1000:1000",
+                                                  "/artifacts"]
+    # nothing to hand over while it runs, and nothing on Windows (no uid)
+    assert not any(c[1] == "run" for c in FakeDocker(inspect=state("running")).calls)
+    fake2 = FakeDocker(inspect=st)
+    transport(fake2, uid=None).status("n")
+    assert not any(c[1] == "run" for c in fake2.calls)
 
 
 def test_status_kills_a_running_container_past_its_limit_and_reports_timed_out():
@@ -287,7 +311,7 @@ def runs(fake):
 def test_prepare_from_nothing_pulls_creates_volumes_clones_and_warms(tmp_path):
     fake = FakePrepareDocker()
     lines = []
-    assert prepare("knapsack", run=fake, uid="1000:1000", log=lines.append) is None
+    assert prepare("knapsack", run=fake, log=lines.append) is None
     app, cargo = volume_names("knapsack")
     assert ["pull", dev_image("knapsack")] in [c[1:] for c in fake.calls]
     create = [c for c in fake.calls if c[1:3] == ["volume", "create"]]
@@ -305,9 +329,8 @@ def test_prepare_from_nothing_pulls_creates_volumes_clones_and_warms(tmp_path):
     # fails with --network none
     assert "tig-algorithms/src/knapsack" in warm and "talos_cand" in warm
     assert f"touch /app/{READY_MARKER}" in clone and f"touch /app/{WARM_MARKER}" in warm
-    # mutation: no chown, so the job container (host uid) cannot write /app
-    assert "chown -R 1000:1000 /app /usr/local/cargo" in clone
-    assert "chown -R 1000:1000 /app /usr/local/cargo" in warm
+    # the job runs as root (the image keeps cargo under /root, mode 700): nothing to chown
+    assert "chown" not in clone and "chown" not in warm
     # mutation: prepare's containers with --network none cannot download anything
     for c in runs(fake):
         assert "--network" not in c
@@ -323,20 +346,14 @@ def test_prepare_skips_each_step_whose_marker_is_present(tmp_path, have, absent_
         image=have in ("image", "volumes", "ready", "warm"),
         volumes=(app, cargo) if have in ("volumes", "ready", "warm") else (),
         markers={"ready": (READY_MARKER,), "warm": (READY_MARKER, WARM_MARKER)}.get(have, ()))
-    prepare("knapsack", run=fake, uid=None, log=lambda *a: None)
+    prepare("knapsack", run=fake, log=lambda *a: None)
     # mutation: a step that runs unconditionally re-clones (or re-pulls 13 GB) on every run
     assert not any(absent_step in " ".join(c) for c in fake.calls), absent_step
 
 
-def test_prepare_without_a_uid_does_not_chown(tmp_path):
-    fake = FakePrepareDocker()
-    prepare("knapsack", run=fake, uid=None, log=lambda *a: None)
-    assert not any("chown" in c[-1] for c in runs(fake))
-
-
 def test_prepare_for_a_gpu_challenge_warms_with_the_gpu_and_returns_its_name(tmp_path):
     fake = FakePrepareDocker(runtimes=("runc", "nvidia"), gpu_name="NVIDIA L40S")
-    assert prepare("hypergraph", run=fake, uid=None, log=lambda *a: None) == "NVIDIA L40S"
+    assert prepare("hypergraph", run=fake, log=lambda *a: None) == "NVIDIA L40S"
     warm = [c for c in runs(fake) if c[-2] == "-c" and "build_algorithm" in c[-1]][0]
     assert "--gpus" in warm
     smi = [c for c in runs(fake) if "nvidia-smi" in c][0]
