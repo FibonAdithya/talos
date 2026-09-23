@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -22,12 +23,14 @@ from pathlib import Path
 from talos import mainnet as mainnet_api
 from talos.budget import Budget, Spend
 from talos.c3_bench import C3CommandError
+from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
 from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_image,
-                              hardware_class)
+                              hardware_class, local_hardware_class)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.diagnostics import first_error
+from talos.local_transport import DockerTransport, docker_runtimes, has_gpu_runtime, host_uid, prepare
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.masked_input import ask_secret
 from talos.nonces import draw_nonce_sets, new_rand_hash
@@ -42,7 +45,9 @@ MODAL_APP_FILE = Path(__file__).resolve().parent.parent / "modal_app" / "talos_b
 CLI_PROVIDERS = ("claude-cli", "codex-cli")
 UNMETERED = CLI_PROVIDERS + ("fake",)
 DEFAULT_COMPUTE_USD = 20.0
-BACKENDS = ("modal", "c3")
+BACKENDS = ("modal", "c3", "local")
+LOCAL_DEFAULT_MEMORY_GIB = 8
+LOCAL_MIN_MEMORY_GIB = 4
 IMAGE_HINT = ("the C3 backend pulls the official TIG dev image from GHCR; check that "
               "`DEV_IMAGE_TAG` in talos/challenges.py names a published tag")
 
@@ -110,6 +115,40 @@ def check_c3(run=None, api_key: str | None = None, transport=None) -> float:
     return balance
 
 
+def _total_memory_gib() -> int | None:
+    """Physical memory in GiB, or None where os.sysconf cannot say (Windows)."""
+    try:
+        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2 ** 30)
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def default_local_memory_gib() -> int:
+    total = _total_memory_gib()
+    if total is None:
+        return LOCAL_DEFAULT_MEMORY_GIB
+    return max(LOCAL_MIN_MEMORY_GIB, total - 4)
+
+
+def local_settings(cfg: Config | None) -> LocalSettings:
+    """The container limits: from the config, or the machine's own for a `talos compile` in
+    the agentic sandbox, which has no config and scores no nonce (so no hardware class)."""
+    cpus = (cfg.local_cpus if cfg and cfg.local_cpus else None) or os.cpu_count() or 1
+    mem = ((cfg.local_memory_gib if cfg and cfg.local_memory_gib else None)
+           or default_local_memory_gib())
+    return LocalSettings(cpus=cpus, memory_gib=mem)
+
+
+def check_local(run=None) -> bool:
+    """Docker must answer; returns whether the nvidia runtime is present."""
+    try:
+        runtimes = docker_runtimes(run or subprocess.run)
+    except C3CommandError as e:
+        raise ConfigError(f"Docker check failed: {e}; install and start Docker "
+                          f"(docker.com), then run `talos setup` again") from None
+    return "nvidia" in runtimes
+
+
 def image_available(challenge: str, fetch=None) -> bool:
     """True when the manifest for the challenge's dev image tag is on GHCR, which is what C3
     pulls. Anonymous access to GHCR needs a pull-scoped token first, so this is two requests.
@@ -144,18 +183,27 @@ def image_available(challenge: str, fetch=None) -> bool:
     return status == 200
 
 
-def make_bench(backend: str, run_dir: Path, pending, c3_api_key: str | None = None):
+def make_bench(backend: str, run_dir: Path, pending, c3_api_key: str | None = None,
+               local: LocalSettings | None = None):
     if backend == "modal":
         from talos.bench import ModalBench
         return ModalBench()
     if backend == "c3":
         from talos.c3_bench import C3Bench
         return C3Bench(run_dir, pending=pending, api_key=c3_api_key)
+    if backend == "local":
+        from talos.c3_bench import C3Bench
+        return C3Bench(run_dir, pending=pending, transport=DockerTransport(uid=host_uid()),
+                       local=local or local_settings(None), usd_per_hour=0.0)
     raise ConfigError(f"unknown backend {backend!r}; run `talos setup`")
 
 
-def bench_hardware_class(backend: str, challenge: str) -> str:
+def bench_hardware_class(backend: str, challenge: str, local: LocalSettings | None = None,
+                         gpu_name: str | None = None, host: str | None = None) -> str:
     spec = CHALLENGES[challenge]
+    if backend == "local":
+        return local_hardware_class(spec, local.cpus, local.memory_gib, gpu_name,
+                                    host or socket.gethostname())
     return c3_hardware_class(spec) if backend == "c3" else hardware_class(spec)
 
 
@@ -227,6 +275,17 @@ def cmd_setup(args, ask) -> int:
     if backend == "modal":
         token_id = ask("Modal token id (create at modal.com/settings/tokens)")
         token_secret = ask("Modal token secret", secret=True)
+    local = None
+    if backend == "local":
+        try:
+            local = LocalSettings(
+                cpus=_ask_number(ask, "CPUs for the local container", str(os.cpu_count() or 1),
+                                 int),
+                memory_gib=_ask_number(ask, "Memory for the local container in GiB",
+                                       str(default_local_memory_gib()), int))
+        except ConfigError as e:  # three non-numbers, as the run wizard treats it
+            print(str(e), file=sys.stderr)
+            return 2
     provider = make_provider(kind, model, api_key=api_key, api_base=api_base)
     err = validate_provider(provider)
     if err:
@@ -244,13 +303,20 @@ def cmd_setup(args, ask) -> int:
             else:
                 print("C3: using the c3 CLI and its `c3 login` session.")
             check_c3(api_key=check_key)
+        elif backend == "local":
+            gpu = check_local()
+            print("Local: jobs run in Docker on this machine. GPU challenges: "
+                  + ("available (nvidia runtime found)." if gpu
+                     else "not available (no nvidia runtime)."))
         else:
             deploy_bench(token_id or None, token_secret or None)
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 1
     save(root, Config(provider=kind, model=model, mode=mode, api_base=api_base,
-                      backend=backend), api_key, c3_api_key=c3_api_key)
+                      backend=backend, local_cpus=local.cpus if local else None,
+                      local_memory_gib=local.memory_gib if local else None),
+         api_key, c3_api_key=c3_api_key)
     print("Setup complete. Run `talos run` to start a job.")
     return 0
 
@@ -445,6 +511,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     # The backend records the job it has in flight in the run's own state, so a resumed run
     # reattaches to it instead of abandoning one C3 is still billing for.
     pending = PendingJobStore(get=lambda: state.pending_job, set=_set_pending)
+    local = gpu_name = None
     if fake:
         from talos.bench import FakeBench
         from talos.providers.fake import FakeProvider
@@ -454,7 +521,9 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         provider = make_provider(cfg.provider, cfg.model, api_key=resolve_api_key(cfg),
                                  api_base=cfg.api_base)
         c3_api_key = resolve_c3_api_key(cfg) if cfg.backend == "c3" else None
-        bench = make_bench(cfg.backend, store.run_dir, pending, c3_api_key=c3_api_key)
+        local = local_settings(cfg) if cfg.backend == "local" else None
+        bench = make_bench(cfg.backend, store.run_dir, pending, c3_api_key=c3_api_key,
+                           local=local)
         if c3_api_key:
             # `talos compile` in the agentic sandbox has no secrets.json to read the key from.
             os.environ["C3_API_KEY"] = c3_api_key
@@ -469,8 +538,25 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
             print(f"image {c3_image(spec.challenge)} is not on GHCR (or GHCR is "
                   f"unreachable): {IMAGE_HINT}", file=sys.stderr)
             return 1
+        if cfg.backend == "local":
+            if CHALLENGES[spec.challenge].is_gpu and not has_gpu_runtime():
+                state.status, state.stop_reason = "failed", "no NVIDIA container runtime"
+                store.save(state)
+                print(f"{spec.challenge} needs a GPU and Docker reports no NVIDIA runtime; "
+                      f"install the NVIDIA container toolkit, or run this challenge on the "
+                      f"modal or c3 backend", file=sys.stderr)
+                return 1
+            try:
+                # Before the baseline: the first run per challenge pulls the image and does one
+                # clean build, and the user should see that happening rather than a silent wait.
+                gpu_name = prepare(spec.challenge, uid=host_uid())
+            except C3CommandError as e:
+                state.status, state.stop_reason = "failed", f"docker: {str(e)[:120]}"
+                store.save(state)
+                print(f"Docker failed while preparing {spec.challenge}: {e}", file=sys.stderr)
+                return 1
     from talos.loop import Loop
-    hardware = bench_hardware_class(cfg.backend, spec.challenge)
+    hardware = bench_hardware_class(cfg.backend, spec.challenge, local=local, gpu_name=gpu_name)
     # `talos compile` inside the agentic sandbox runs in a worktree with no talos.config.json.
     os.environ["TALOS_BACKEND"] = "modal" if fake else cfg.backend
 
@@ -613,10 +699,10 @@ def cmd_run(args, ask) -> int:
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return 2
-        # spec §5.2: compute spend is always capped. The default is applied only after the budget
-        # has been validated, so it can never stand in for the LLM/time/iteration cap the run
-        # needs.
-        if budget.compute_usd is None:
+        # spec §5.2: compute spend is always capped, except on the local backend where it is
+        # always zero. The default is applied only after the budget has been validated, so it
+        # can never stand in for the LLM/time/iteration cap the run needs.
+        if budget.compute_usd is None and cfg.backend != "local":
             if args.yes:
                 budget = replace(budget, compute_usd=DEFAULT_COMPUTE_USD)
                 print(f"No --budget-compute-usd given; capping compute spend at "
@@ -756,8 +842,15 @@ def cmd_compile(args, ask) -> int:
         cfg = load(Path.cwd())
     except ConfigError:
         cfg = None  # the agentic sandbox: the key comes from C3_API_KEY
+    if backend == "local":
+        try:
+            prepare(args.challenge, uid=host_uid())
+        except C3CommandError as e:
+            print(f"Docker failed while preparing {args.challenge}: {e}", file=sys.stderr)
+            return 1
     bench = make_bench(backend, Path.cwd() / ".talos" / "compile", PendingJobStore.memory(),
-                       c3_api_key=resolve_c3_api_key(cfg) if backend == "c3" else None)
+                       c3_api_key=resolve_c3_api_key(cfg) if backend == "c3" else None,
+                       local=local_settings(cfg) if backend == "local" else None)
     r = bench.evaluate(EvalRequest(args.challenge, files, [], [], 0, None,
                                    CHALLENGES[args.challenge].beat)).compile
     print(r.output[-4000:])

@@ -480,7 +480,7 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
                                                 output="compiler says"), [], None,
                                   "not_compiled" if not ok else "forced")
 
-        def make(backend, run_dir, pending, c3_api_key=None):
+        def make(backend, run_dir, pending, c3_api_key=None, local=None):
             seen["backend"] = backend
             return B()
         return make
@@ -1459,7 +1459,7 @@ def test_execute_job_gives_the_c3_key_to_the_bench_and_the_sandbox(tmp_path, mon
             seen["env"] = os.environ.get("C3_API_KEY")
             raise BenchCancelled("stop")
 
-    def make(backend, run_dir, pending, c3_api_key=None):
+    def make(backend, run_dir, pending, c3_api_key=None, local=None):
         seen["bench_key"] = c3_api_key
         return B("unreachable")
     monkeypatch.setattr(cli, "make_bench", make)
@@ -1485,7 +1485,7 @@ def test_compile_uses_the_c3_key_from_the_config(tmp_path, monkeypatch):
             return EvalResult(CompileResult(ok=True, artifact_id="a1", output="ok"), [], None,
                               "forced")
 
-    def make(backend, run_dir, pending, c3_api_key=None):
+    def make(backend, run_dir, pending, c3_api_key=None, local=None):
         seen["key"] = c3_api_key
         return B()
     monkeypatch.setattr(cli, "make_bench", make)
@@ -1678,3 +1678,193 @@ def test_setup_checks_c3_with_the_environment_key_and_says_which_transport(tmp_p
     typed_out = capsys.readouterr().out
     assert checked[-1] == "c3_key_typed"
     assert "C3_API_KEY" not in typed_out and "MCP" in typed_out
+
+
+def _local_docker(runtimes=("runc",), fail=False):
+    def run(cmd, **kw):
+        if fail:
+            return types.SimpleNamespace(returncode=1, stdout="",
+                                         stderr="Cannot connect to the Docker daemon")
+        assert cmd[:2] == ["docker", "info"], cmd
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({r: {} for r in runtimes}),
+                                     stderr="")
+    return run
+
+
+def test_setup_local_asks_limits_checks_docker_and_writes_no_secret(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "deploy_bench",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("deployed")))
+    monkeypatch.setattr(cli, "check_c3",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("c3")))
+    monkeypatch.setattr(cli, "subprocess", types.SimpleNamespace(run=_local_docker(("runc", "nvidia"))))
+    # prompts: backend, provider, model, mode, cpus, memory
+    rc = cli.main(["setup"], ask=scripted(["local", "claude-cli", "", "single-shot", "6", "10"]))
+    assert rc == 0
+    cfg = load(tmp_path)
+    assert cfg.backend == "local" and cfg.local_cpus == 6 and cfg.local_memory_gib == 10
+    assert not (tmp_path / ".talos" / "secrets.json").exists()
+    assert "GPU challenges: available" in capsys.readouterr().out
+
+
+def test_setup_local_without_docker_writes_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "subprocess", types.SimpleNamespace(run=_local_docker(fail=True)))
+    rc = cli.main(["setup"], ask=scripted(["local", "claude-cli", "", "single-shot", "", ""]))
+    # mutation: ignoring the docker check writes a config whose first run fails at the baseline
+    assert rc == 1 and "Docker" in capsys.readouterr().err
+    assert not (tmp_path / "talos.config.json").exists()
+
+
+def test_default_local_memory_floors_and_falls_back(monkeypatch):
+    monkeypatch.setattr(cli, "_total_memory_gib", lambda: 6)
+    assert cli.default_local_memory_gib() == 4
+    monkeypatch.setattr(cli, "_total_memory_gib", lambda: 30)
+    assert cli.default_local_memory_gib() == 26
+    monkeypatch.setattr(cli, "_total_memory_gib", lambda: None)
+    assert cli.default_local_memory_gib() == cli.LOCAL_DEFAULT_MEMORY_GIB
+
+
+def test_make_bench_local_is_the_c3_bench_over_docker_and_the_local_class(tmp_path):
+    from talos.bench import PendingJobStore
+    from talos.c3_bench import C3Bench
+    from talos.c3_jobdir import LocalSettings
+    from talos.local_transport import DockerTransport
+    b = cli.make_bench("local", tmp_path, PendingJobStore.memory(), local=LocalSettings(8, 12))
+    assert isinstance(b, C3Bench) and isinstance(b._t, DockerTransport)
+    # mutation: a local bench billing C3's hourly rate
+    assert b.usd_per_hour == 0.0 and b.subdir == "local"
+    cls = cli.bench_hardware_class("local", "knapsack", local=LocalSettings(8, 12), host="Box")
+    assert cls == "local-box-cpu8-mem12"
+    assert cli.bench_hardware_class("local", "hypergraph", local=LocalSettings(8, 12),
+                                    gpu_name="NVIDIA L40S", host="box") == "local-box-gpu-nvidia-l40s"
+
+
+def test_local_settings_come_from_the_config_or_the_machine(monkeypatch):
+    monkeypatch.setattr(cli.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(cli, "_total_memory_gib", lambda: 30)
+    s = cli.local_settings(Config(provider="x", model="m", mode="single-shot", api_base=None,
+                                  backend="local", local_cpus=6, local_memory_gib=10))
+    assert (s.cpus, s.memory_gib) == (6, 10)
+    # the agentic sandbox's `talos compile` has no config: the machine's defaults
+    assert (cli.local_settings(None).cpus, cli.local_settings(None).memory_gib) == (16, 26)
+
+
+def _local_config(root, cpus=8, memory=12):
+    save(root, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
+                      backend="local", local_cpus=cpus, local_memory_gib=memory), None)
+
+
+def test_run_local_skips_the_compute_budget_question_and_leaves_the_cap_unset(tmp_path,
+                                                                                monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _local_config(tmp_path)
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    _stub_mainnet(monkeypatch)
+    monkeypatch.setattr(cli, "prepare", lambda ch, **k: None)
+    monkeypatch.setattr(cli, "has_gpu_runtime", lambda: False)
+    seen = {}
+
+    class B(_RefusingBench):
+        def evaluate(self, request):
+            raise BenchCancelled("stop")
+
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: B("unreachable"))
+    real = cli.execute_job
+
+    def spy(spec, store, cfg, resume):
+        seen["compute"] = spec.budget.compute_usd
+        return real(spec, store, cfg, resume)
+    monkeypatch.setattr(cli, "execute_job", spy)
+    # prompts: direction, iteration budget, hours, [compute: skipped, an extra prompt would
+    # raise "unexpected prompt"], mode, track, hyperparameters (blank = the default for each)
+    rc = cli.main(["run", "--challenge", "knapsack"],
+                  ask=scripted(["go", "1", "1", "", "", ""]))
+    assert rc == 1 and seen["compute"] is None
+    # --yes must not apply DEFAULT_COMPUTE_USD either
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "1", "--yes"])
+    assert rc == 1 and seen["compute"] is None
+
+
+def test_run_local_prepares_before_the_baseline_and_exports_the_backend(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TALOS_BACKEND", raising=False)
+    _local_config(tmp_path)
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    _stub_mainnet(monkeypatch)
+    order = []
+    monkeypatch.setattr(cli, "prepare", lambda ch, **k: order.append(("prepare", ch)))
+
+    class B(_RefusingBench):
+        def evaluate(self, request):
+            order.append(("evaluate", os.environ.get("TALOS_BACKEND")))
+            raise BenchCancelled("stop")
+
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: B("unreachable"))
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "1", "--yes"])
+    # mutation: preparing after the baseline, or not at all
+    assert rc == 1 and order == [("prepare", "knapsack"), ("evaluate", "local")]
+
+
+def test_run_local_reports_a_docker_failure_and_fails_the_job(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _local_config(tmp_path)
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    _stub_mainnet(monkeypatch)
+    monkeypatch.setattr(cli, "prepare", lambda ch, **k: (_ for _ in ()).throw(
+        C3CommandError("docker info could not be run: [Errno 2] No such file")))
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: _RefusingBench("no bench"))
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "1", "--yes"])
+    assert rc == 1 and "Docker" in capsys.readouterr().err
+    st = json.loads(next((tmp_path / "runs").glob("*/state.json")).read_text())
+    # mutation: a run that stops here left at its initial status shows as live for ever
+    assert st["status"] == "failed" and "docker" in st["stop_reason"].lower()
+
+
+def test_run_local_refuses_a_gpu_challenge_without_the_nvidia_runtime(tmp_path, monkeypatch,
+                                                                       capsys):
+    monkeypatch.chdir(tmp_path)
+    _local_config(tmp_path)
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **k: object())
+    hypergraph = type("I", (), {"id": "c005", "name": "hypergraph", "is_gpu": True,
+                                "tracks": ["n=1"], "max_fuel": 7})()
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: hypergraph)
+    _stub_mainnet(monkeypatch)
+    monkeypatch.setattr(cli, "has_gpu_runtime", lambda: False)
+    monkeypatch.setattr(cli, "prepare",
+                        lambda ch, **k: (_ for _ in ()).throw(AssertionError("prepared")))
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: _RefusingBench("no bench"))
+    rc = cli.main(["run", "--challenge", "hypergraph", "--direction", "go",
+                   "--budget-iterations", "1", "--yes"])
+    err = capsys.readouterr().err
+    assert rc == 1 and "NVIDIA" in err and "modal" in err and "c3" in err
+    st = json.loads(next((tmp_path / "runs").glob("*/state.json")).read_text())
+    assert st["status"] == "failed"
+
+
+def test_compile_local_prepares_then_evaluates(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "algorithm").mkdir()
+    (tmp_path / "algorithm" / "mod.rs").write_text("fn x(){}")
+    order = []
+    monkeypatch.setattr(cli, "prepare", lambda ch, **k: order.append("prepare"))
+
+    class B(_RefusingBench):
+        def evaluate(self, request):
+            order.append("evaluate")
+            from talos.bench import EvalResult
+            from talos.types import CompileResult
+            return EvalResult(CompileResult(ok=True, artifact_id="a", output="ok"), [], None,
+                              "not_won")
+
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: B("x"))
+    rc = cli.main(["compile", "--challenge", "knapsack", "--backend", "local"])
+    assert rc == 0 and order == ["prepare", "evaluate"]
