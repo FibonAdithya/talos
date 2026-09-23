@@ -22,6 +22,8 @@ class Config:
     mode: str
     api_base: str | None
     backend: str = "modal"
+    local_cpus: int | None = None       # local backend: the job container's --cpus
+    local_memory_gib: int | None = None  # local backend: the job container's --memory, GiB
     config_path: Path | None = None
     secrets_path: Path | None = None
 
@@ -29,7 +31,8 @@ class Config:
         d = asdict(self)
         d.pop("config_path")
         d.pop("secrets_path")
-        return d
+        # Written only when set, so a Modal or C3 config says nothing about a local container.
+        return {k: v for k, v in d.items() if not (k.startswith("local_") and v is None)}
 
 
 def load(root: Path) -> Config:
@@ -39,7 +42,9 @@ def load(root: Path) -> Config:
         raise ConfigError("talos.config.json not found; run `talos setup` first")
     d = json.loads(cp.read_text(encoding="utf-8"))
     return Config(provider=d["provider"], model=d["model"], mode=d.get("mode", "single-shot"),
-                  api_base=d.get("api_base"), backend=d.get("backend", "modal"), config_path=cp,
+                  api_base=d.get("api_base"), backend=d.get("backend", "modal"),
+                  local_cpus=d.get("local_cpus"), local_memory_gib=d.get("local_memory_gib"),
+                  config_path=cp,
                   secrets_path=root / ".talos" / "secrets.json")
 
 

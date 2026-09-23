@@ -796,6 +796,17 @@ def test_config_without_backend_loads_as_modal(tmp_path):
     assert load(tmp_path).backend == "modal"
 
 
+def test_config_round_trips_the_local_limits_and_omits_them_when_unset(tmp_path):
+    save(tmp_path, Config(provider="anthropic", model="m", mode="single-shot", api_base=None,
+                          backend="local", local_cpus=8, local_memory_gib=12), None)
+    cfg = load(tmp_path)
+    assert cfg.local_cpus == 8 and cfg.local_memory_gib == 12
+    save(tmp_path, Config(provider="anthropic", model="m", mode="single-shot", api_base=None), None)
+    # mutation: writing null keys makes a Modal config say something about a local container
+    assert "local_cpus" not in json.loads((tmp_path / "talos.config.json").read_text())
+    assert load(tmp_path).local_cpus is None
+
+
 def test_image_available_checks_the_ghcr_manifest(monkeypatch):
     seen = []
 
