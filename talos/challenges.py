@@ -1,6 +1,7 @@
 """Static per-challenge facts. Everything a job needs that is not read from mainnet."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 MONOREPO_REF = "84a5787f5b14a630bdf40f52bccf37887d3d8464"
@@ -64,6 +65,29 @@ def c3_workers(spec: ChallengeSpec) -> int:
 def c3_hardware_class(spec: ChallengeSpec) -> str:
     """Baseline cache key component. Prefixed so a C3 baseline never matches a Modal one."""
     return f"c3-{c3_profile(spec)}"
+
+
+def host_slug(host: str) -> str:
+    """A hostname (or a GPU name) as a cache-key component: lower case, every run of characters
+    outside [a-z0-9] becomes one dash, no dash at either end. Empty input becomes "host"."""
+    return re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-") or "host"
+
+
+def local_workers(spec: ChallengeSpec, cpus: int) -> int:
+    return 1 if spec.is_gpu else cpus
+
+
+def local_hardware_class(spec: ChallengeSpec, cpus: int, memory_gib: int,
+                         gpu_name: str | None, host: str) -> str:
+    """Baseline cache key component for the local backend. Prefixed so a local baseline never
+    matches a Modal or C3 one. The limits are in it because they change the timings a baseline
+    was measured under; the host guards a home directory synced between machines."""
+    if spec.is_gpu:
+        if not gpu_name:
+            raise ValueError(f"{spec.name} is a GPU challenge; its local hardware class needs "
+                             f"the GPU name")
+        return f"local-{host_slug(host)}-gpu-{host_slug(gpu_name)}"
+    return f"local-{host_slug(host)}-cpu{cpus}-mem{memory_gib}"
 
 
 CHALLENGES: dict[str, ChallengeSpec] = {

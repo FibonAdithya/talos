@@ -5,7 +5,8 @@ import pytest
 
 from talos.baseline import BaselineError, cache_key, resolve_baseline
 from talos.bench import FakeBench
-from talos.challenges import CHALLENGES, BeatRule, MONOREPO_REF, hardware_class
+from talos.challenges import (CHALLENGES, BeatRule, MONOREPO_REF, hardware_class, host_slug,
+                              local_hardware_class, local_workers)
 from talos.types import NonceSet
 
 TR = [NonceSet("t", "ab" * 32, 0, 2)]
@@ -193,3 +194,31 @@ def test_hardware_class_separates_cpu_memory_and_gpu():
     bigger = dataclasses.replace(knapsack, memory_mib=knapsack.memory_mib * 2)
     assert hardware_class(bigger) != hardware_class(knapsack)
     assert hardware_class(CHALLENGES["hypergraph"]) == "gpu-L40S"
+
+
+def test_host_slug_is_stable_and_never_empty():
+    # mutation: keeping case or dots lets "Box.local" and "box-local" become two cache keys
+    assert host_slug("Box.local") == "box-local" == host_slug("box-local")
+    assert host_slug("  ") == "host" and host_slug("") == "host"
+    assert host_slug("a__b--c") == "a-b-c"
+
+
+def test_local_hardware_class_separates_limits_host_and_gpu():
+    knapsack, hypergraph = CHALLENGES["knapsack"], CHALLENGES["hypergraph"]
+    assert local_hardware_class(knapsack, 8, 12, None, "Box") == "local-box-cpu8-mem12"
+    # mutation: dropping cpus or memory lets a baseline measured under other limits serve a run
+    assert local_hardware_class(knapsack, 4, 12, None, "box") != "local-box-cpu8-mem12"
+    assert local_hardware_class(knapsack, 8, 8, None, "box") != "local-box-cpu8-mem12"
+    assert local_hardware_class(hypergraph, 8, 12, "NVIDIA L40S", "box") == "local-box-gpu-nvidia-l40s"
+    with pytest.raises(ValueError):
+        local_hardware_class(hypergraph, 8, 12, None, "box")
+    # mutation: a local class that does not start with "local-" could equal a Modal or C3 one
+    for cls in (local_hardware_class(knapsack, 4, 8, None, "x"),
+                local_hardware_class(hypergraph, 1, 8, "L40S", "x")):
+        assert cls.startswith("local-") and cls != hardware_class(knapsack)
+
+
+def test_local_workers_use_every_cpu_but_one_gpu():
+    # mutation: 8 workers on one GPU serialise on the device and time the job out
+    assert local_workers(CHALLENGES["knapsack"], 8) == 8
+    assert local_workers(CHALLENGES["hypergraph"], 8) == 1
