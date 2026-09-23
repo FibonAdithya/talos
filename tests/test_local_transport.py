@@ -7,8 +7,10 @@ import pytest
 
 from talos.c3_bench import C3CommandError
 from talos.challenges import DEV_IMAGE_TAG, MONOREPO_REF, dev_image
-from talos.local_transport import (DockerTransport, PIDS_LIMIT, container_name, host_uid,
-                                   parse_time, run_args, run_key, volume_key, volume_names)
+from talos.local_transport import (DockerTransport, PIDS_LIMIT, READY_MARKER, WARM_MARKER,
+                                   container_name, docker_runtimes, has_gpu_runtime, host_uid,
+                                   parse_time, prepare, run_args, run_key, volume_key,
+                                   volume_names)
 
 T0 = datetime(2026, 9, 23, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -234,3 +236,121 @@ def test_a_missing_docker_binary_or_a_hang_is_a_command_error():
         raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
     with pytest.raises(C3CommandError):
         DockerTransport(run=hung).docker("info")
+
+
+class FakePrepareDocker:
+    """`docker` for prepare: which image and volumes exist, which markers the /app volume has."""
+
+    def __init__(self, image=False, volumes=(), markers=(), runtimes=("runc",), gpu_name="L40S"):
+        self.image, self.volumes, self.markers = image, set(volumes), set(markers)
+        self.runtimes, self.gpu_name = runtimes, gpu_name
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(cmd)
+        rc, out = 0, ""
+        if cmd[1:3] == ["image", "inspect"]:
+            rc = 0 if self.image else 1
+        elif cmd[1] == "pull":
+            self.image = True
+        elif cmd[1:3] == ["volume", "inspect"]:
+            vol = cmd[-1]
+            if vol not in self.volumes:
+                rc = 1
+            elif "--format" in cmd:
+                out = "/usr/local/cargo\n" if "cargo_home" in cmd[-2] else "/usr/local/rustup\n"
+        elif cmd[1:3] == ["volume", "create"]:
+            self.volumes.add(cmd[-1])
+        elif cmd[1] == "info":
+            out = json.dumps({r: {"path": r} for r in self.runtimes})
+        elif cmd[1] == "run":
+            script = cmd[-1]
+            if cmd[-2] == "-c" and script.startswith("test -e"):
+                rc = 0 if script.split("/")[-1] in self.markers else 1
+            elif "nvidia-smi" in cmd:
+                out = f"{self.gpu_name}\n"
+            elif "echo ${CARGO_HOME" in script:
+                out = "/usr/local/cargo\n"
+            elif "echo ${RUSTUP_HOME" in script:
+                out = "/usr/local/rustup\n"
+            elif "codeload" in script:
+                self.markers.add(READY_MARKER)
+            elif "build_algorithm" in script:
+                self.markers.add(WARM_MARKER)
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr="" if rc == 0 else out)
+
+
+def runs(fake):
+    return [c for c in fake.calls if c[1] == "run"]
+
+
+def test_prepare_from_nothing_pulls_creates_volumes_clones_and_warms(tmp_path):
+    fake = FakePrepareDocker()
+    lines = []
+    assert prepare("knapsack", run=fake, uid="1000:1000", log=lines.append) is None
+    app, cargo = volume_names("knapsack")
+    assert ["pull", dev_image("knapsack")] in [c[1:] for c in fake.calls]
+    create = [c for c in fake.calls if c[1:3] == ["volume", "create"]]
+    # mutation: the cargo volume created without its labels leaves deploy unable to mount it
+    assert any(c[-1] == cargo and "--label" in c
+               and any(a.startswith("talos.cargo_home=/usr/local/cargo") for a in c)
+               and any(a.startswith("talos.rustup_home=/usr/local/rustup") for a in c)
+               for c in create)
+    assert any(c[-1] == app for c in create)
+    scripts = [c[-1] for c in runs(fake) if c[-2] == "-c"]
+    clone = [s for s in scripts if "codeload" in s][0]
+    warm = [s for s in scripts if "build_algorithm" in s][0]
+    assert MONOREPO_REF in clone and "--strip-components=1" in clone
+    # mutation: a warm build that builds nothing leaves the registry cold and the first job
+    # fails with --network none
+    assert "tig-algorithms/src/knapsack" in warm and "talos_cand" in warm
+    assert f"touch /app/{READY_MARKER}" in clone and f"touch /app/{WARM_MARKER}" in warm
+    # mutation: no chown, so the job container (host uid) cannot write /app
+    assert "chown -R 1000:1000 /app /usr/local/cargo" in clone
+    assert "chown -R 1000:1000 /app /usr/local/cargo" in warm
+    # mutation: prepare's containers with --network none cannot download anything
+    for c in runs(fake):
+        assert "--network" not in c
+    assert "--gpus" not in " ".join(" ".join(c) for c in fake.calls)
+    assert any("pulling" in ln for ln in lines) and any("warm" in ln.lower() for ln in lines)
+
+
+@pytest.mark.parametrize("have, absent_step", [
+    ("image", "pull"), ("volumes", "create"), ("ready", "codeload"), ("warm", "build_algorithm")])
+def test_prepare_skips_each_step_whose_marker_is_present(tmp_path, have, absent_step):
+    app, cargo = volume_names("knapsack")
+    fake = FakePrepareDocker(
+        image=have in ("image", "volumes", "ready", "warm"),
+        volumes=(app, cargo) if have in ("volumes", "ready", "warm") else (),
+        markers={"ready": (READY_MARKER,), "warm": (READY_MARKER, WARM_MARKER)}.get(have, ()))
+    prepare("knapsack", run=fake, uid=None, log=lambda *a: None)
+    # mutation: a step that runs unconditionally re-clones (or re-pulls 13 GB) on every run
+    assert not any(absent_step in " ".join(c) for c in fake.calls), absent_step
+
+
+def test_prepare_without_a_uid_does_not_chown(tmp_path):
+    fake = FakePrepareDocker()
+    prepare("knapsack", run=fake, uid=None, log=lambda *a: None)
+    assert not any("chown" in c[-1] for c in runs(fake))
+
+
+def test_prepare_for_a_gpu_challenge_warms_with_the_gpu_and_returns_its_name(tmp_path):
+    fake = FakePrepareDocker(runtimes=("runc", "nvidia"), gpu_name="NVIDIA L40S")
+    assert prepare("hypergraph", run=fake, uid=None, log=lambda *a: None) == "NVIDIA L40S"
+    warm = [c for c in runs(fake) if c[-2] == "-c" and "build_algorithm" in c[-1]][0]
+    assert "--gpus" in warm
+    smi = [c for c in runs(fake) if "nvidia-smi" in c][0]
+    assert "--gpus" in smi and "--query-gpu=name" in smi
+
+
+def test_docker_runtimes_and_the_gpu_check():
+    assert docker_runtimes(FakePrepareDocker(runtimes=("runc", "nvidia"))) == ["nvidia", "runc"]
+    assert has_gpu_runtime(FakePrepareDocker(runtimes=("runc", "nvidia"))) is True
+    assert has_gpu_runtime(FakePrepareDocker(runtimes=("runc",))) is False
+
+    def down(cmd, **kw):
+        return types.SimpleNamespace(returncode=1, stdout="",
+                                     stderr="Cannot connect to the Docker daemon")
+    # mutation: a daemon that is down reported as "no GPU" instead of "no Docker"
+    with pytest.raises(C3CommandError):
+        docker_runtimes(down)

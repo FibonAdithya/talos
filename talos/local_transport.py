@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from talos.c3_bench import C3CommandError
-from talos.challenges import DEV_IMAGE_TAG, MONOREPO_REF
+from talos.challenges import CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, dev_image
 from talos.executables import argv0
 
 APP = "/app"
@@ -203,3 +203,96 @@ class DockerTransport:
             raise C3CommandError(f"volume {volume} has no {key} label; run `talos run` again "
                                  f"so prepare can recreate it")
         return out
+
+
+READY_MARKER = ".talos-ready"
+WARM_MARKER = ".talos-warm"
+MONOREPO_TARBALL = "https://codeload.github.com/tig-foundation/tig-monorepo/tar.gz/"
+
+
+def docker_runtimes(run: Callable = subprocess.run) -> list[str]:
+    """The runtimes the daemon reports, sorted. A daemon that is down raises C3CommandError,
+    which setup turns into "install or start Docker"; it is never "no GPU"."""
+    out = DockerTransport(run=run).docker("info", "--format", "{{json .Runtimes}}", timeout=60)
+    try:
+        return sorted(json.loads(out))
+    except (ValueError, TypeError) as e:
+        raise C3CommandError(f"docker info returned no runtimes: {e}") from None
+
+
+def has_gpu_runtime(run: Callable = subprocess.run) -> bool:
+    return "nvidia" in docker_runtimes(run)
+
+
+def _chown(uid: str | None, cargo_home: str) -> str:
+    return f"chown -R {uid} {APP} {cargo_home}\n" if uid else ""
+
+
+def clone_script(uid: str | None, cargo_home: str) -> str:
+    return ("set -euo pipefail\n"
+            f"curl -fsSL \"{MONOREPO_TARBALL}{MONOREPO_REF}\" | tar xz -C {APP} "
+            "--strip-components=1\n"
+            f"touch {APP}/{READY_MARKER}\n" + _chown(uid, cargo_home))
+
+
+def warm_script(challenge: str, uid: str | None, cargo_home: str) -> str:
+    """Builds the first algorithm the pinned monorepo ships for the challenge, so the registry
+    volume is populated with networking on, once, by code that is not LLM-authored."""
+    return ("set -euo pipefail\n"
+            f"cd {APP}\n"
+            f"name=$(ls -d tig-algorithms/src/{challenge}/*/ | grep -v talos_cand | head -1 "
+            "| xargs basename)\n"
+            "build_algorithm \"$name\"\n"
+            f"touch {APP}/{WARM_MARKER}\n" + _chown(uid, cargo_home))
+
+
+def prepare(challenge: str, run: Callable = subprocess.run, uid: str | None = None,
+            log: Callable[[str], None] = print) -> str | None:
+    """Idempotent: pull the image, create the volumes, clone the pin, warm the registry. Each
+    step is skipped when its marker is present, and one line is printed per step performed.
+    Returns the GPU name for a GPU challenge, None otherwise. Every container here runs with
+    networking on and as root; the chown at the end of each script hands the volumes to the
+    host user for the job containers."""
+    spec = CHALLENGES[challenge]
+    image = dev_image(challenge)
+    t = DockerTransport(run=run, uid=uid)
+    gpu = ["--gpus", "all"] if spec.is_gpu else []
+    if not t.image_present(image):
+        log(f"pulling {image} (about 13 GB, once per image tag)")
+        t.docker("pull", image, timeout=7200)
+    app_vol, cargo_vol = volume_names(challenge)
+    if not t.volume_exists(cargo_vol):
+        cargo_home = t.docker("run", "--rm", image, "sh", "-c",
+                              "echo ${CARGO_HOME:-$HOME/.cargo}").strip()
+        rustup_home = t.docker("run", "--rm", image, "sh", "-c",
+                               "echo ${RUSTUP_HOME:-$HOME/.rustup}").strip()
+        t.docker("volume", "create", "--label", f"{LABEL_CARGO}={cargo_home}",
+                 "--label", f"{LABEL_RUSTUP}={rustup_home}", cargo_vol)
+        log(f"created volume {cargo_vol}")
+    cargo_home = t.volume_label(cargo_vol, LABEL_CARGO)
+    if not t.volume_exists(app_vol):
+        t.docker("volume", "create", app_vol)
+        log(f"created volume {app_vol}")
+    mounts = ["-v", f"{app_vol}:{APP}", "-v", f"{cargo_vol}:{cargo_home}"]
+
+    def marker(name: str) -> bool:
+        try:
+            t.docker("run", "--rm", *mounts, image, "sh", "-c", f"test -e {APP}/{name}",
+                     timeout=120)
+            return True
+        except C3CommandError:
+            return False
+
+    if not marker(READY_MARKER):
+        log(f"cloning tig-monorepo at {MONOREPO_REF[:12]} into {app_vol}")
+        t.docker("run", "--rm", *mounts, image, "bash", "-c", clone_script(uid, cargo_home),
+                 timeout=1800)
+    if not marker(WARM_MARKER):
+        log("warm build: one clean build so later builds are incremental and offline")
+        t.docker("run", "--rm", *gpu, *mounts, image, "bash", "-c",
+                 warm_script(challenge, uid, cargo_home), timeout=7200)
+    if spec.is_gpu:
+        out = t.docker("run", "--rm", *gpu, image, "nvidia-smi", "--query-gpu=name",
+                       "--format=csv,noheader", timeout=120)
+        return out.splitlines()[0].strip()
+    return None
