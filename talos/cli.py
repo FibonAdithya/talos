@@ -30,7 +30,8 @@ from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_im
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.diagnostics import first_error
-from talos.local_transport import DockerTransport, docker_runtimes, has_gpu_runtime, host_uid, prepare
+from talos.local_transport import (DockerTransport, docker_runtimes, has_gpu_runtime, host_uid,
+                                   prepare)
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.masked_input import ask_secret
 from talos.nonces import draw_nonce_sets, new_rand_hash

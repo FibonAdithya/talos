@@ -173,14 +173,16 @@ class C3Bench:
             try:
                 return self._collect(job_id, job_dir, request)
             except _JobFailed as second:
-                raise BenchUnavailable(f"{self._label} job failed twice: {first}; then {second}") from None
+                raise BenchUnavailable(f"{self._label} job failed twice: {first}; "
+                                       f"then {second}") from None
 
     def _submit(self, job_dir: Path, request: EvalRequest, purpose: str, rh: str) -> str:
         write_job_dir(job_dir, request, purpose, local=self.local)
         try:
             job_id = self._t.deploy(job_dir)
         except (C3CommandError, ValueError) as e:
-            raise BenchUnavailable(f"{self._label} deploy failed: {_redact(str(e))[:300]}") from None
+            raise BenchUnavailable(f"{self._label} deploy failed: "
+                                   f"{_redact(str(e))[:300]}") from None
         job_id = _safe_job_id(job_id)
         self._pending.set({**(self._pending.get() or {}), "backend": self.subdir, "job_id": job_id,
                            "job_dir": str(job_dir), "request_hash": rh})
@@ -214,14 +216,16 @@ class C3Bench:
                 # a build/score run that burned its whole time budget is a property of the
                 # files, not an infrastructure blip: resubmitting doubles the most expensive
                 # failure mode instead of surfacing it
-                raise BenchUnavailable(f"{self._label} job {job_id} timed out before writing results")
+                raise BenchUnavailable(f"{self._label} job {job_id} timed out before writing "
+                                       f"results")
             raise _JobFailed(f"{job_id} {status} with no results")
         try:
             return self._result_from(status, json.loads(results.read_text(encoding="utf-8")),
                                      request)
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             raise BenchUnavailable(
-                f"{self._label} job {job_id} wrote unreadable results: {_redact(str(e))[:300]}") from None
+                f"{self._label} job {job_id} wrote unreadable results: "
+                f"{_redact(str(e))[:300]}") from None
 
     @staticmethod
     def _result_from(status: str, data: dict, request: EvalRequest) -> EvalResult:

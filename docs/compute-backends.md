@@ -1,7 +1,7 @@
 # Compute backends
 
-How Talos uses Modal and C3, what a C3 job costs in time, and what maintainers do to keep the
-C3 backend working. For choosing and configuring a backend, see
+How Talos uses Modal, C3 and local Docker, what a C3 job and a local job cost in time, and
+what maintainers do to keep the C3 and local backends working. For choosing and configuring a backend, see
 [README.md](../README.md#3-pick-a-compute-backend).
 
 ## Transports
@@ -14,6 +14,11 @@ a C3 API key is configured, and the `c3` CLI when it is not. The key path needs 
 install, which is what makes the C3 backend usable on Windows, and it uploads job.sh already
 marked executable. Both paths submit the same job directory, written to
 `runs/<job_id>/c3/<n>/`.
+
+On the local backend Talos writes the same job directory in a local flavour and runs it in a
+Docker container on this machine through `talos/local_transport.py::DockerTransport`, which
+satisfies the C3 transport protocol (deploy, status, cancel, fetch). The container's name is
+the job id. See [Local backend](#local-backend).
 
 ## C3 job directories
 
@@ -42,4 +47,105 @@ C3 pulls the official TIG dev image straight from GHCR,
 Modal builds from, so a candidate is compiled in one image whichever backend runs it. There
 is no mirror to maintain: a `DEV_IMAGE_TAG` bump takes effect on the next job. `talos run` on
 C3 checks that the tag exists on GHCR (an anonymous pull-scoped token, then a manifest GET)
-before the baseline is measured, and fails with a `DEV_IMAGE_TAG` hint if it is missing.
+before the baseline is measured, and fails with a `DEV_IMAGE_TAG` hint if it is missing. The
+local backend pulls the same image with `docker pull` the first time a challenge is run.
+
+## Local backend
+
+The local backend is the C3 bench with a Docker transport. One evaluate call is one detached
+`docker run` of the challenge's dev image, polled with `docker inspect` until it exits, with
+`results.json` read off a bind mount. Nothing is billed; the compute figure on the status line
+reads `$0.00`.
+
+### Volumes and the prepare step
+
+Two named Docker volumes per challenge, keyed by the first 12 hex characters of
+`sha256(MONOREPO_REF + "\0" + DEV_IMAGE_TAG)`, so a pin bump gets fresh volumes and never
+reuses a target directory built against another monorepo:
+
+| Volume | Mounted at | Holds |
+|---|---|---|
+| `talos-app-<challenge>-<key>` | `/app` | The monorepo checkout at `MONOREPO_REF` and its cargo target directory. |
+| `talos-cargo-<challenge>-<key>` | the image's cargo home (`/root/.cargo` in the 0.0.7 images) | The crate registry, so builds work with networking off. |
+
+What the volumes buy is the clone, the dependency compile and `--network none`; they do not
+make a build incremental. The 0.0.7 image's `build_so` runs an LLVM fuel-instrumentation pass
+(`opt`, `llc`, `clang`) over every dependency's IR, standard library included, on every
+build, and that pass is most of the build time (see [Local timings](#local-timings)).
+
+`talos/local_transport.py::prepare` runs before the baseline on every `talos run` (and before
+`talos compile`). Each step is skipped when its marker is present, and one line is printed per
+step performed:
+
+1. `docker pull` of the dev image if `docker image inspect` does not find it (about 13 GB).
+2. Create the cargo volume, labelled with the image's cargo and rustup home paths.
+3. Create the app volume.
+4. Clone the monorepo tarball at the pin into `/app` (marker `/app/.talos-ready`).
+5. Warm-up build: `build_algorithm` of the first algorithm the pinned monorepo ships for the
+   challenge, with networking on, so the registry and the dependency compile are populated by
+   code that is not LLM-authored (marker `/app/.talos-warm`).
+6. For a GPU challenge, read the GPU name with `nvidia-smi` for the hardware class.
+
+To reclaim space after a pin bump, list and remove the old volumes by hand:
+
+```bash
+docker volume ls --filter name=talos-
+docker volume rm <old volume names>
+```
+
+### The job container
+
+Every flag is in `talos/local_transport.py::run_args`; loosening them is a human decision
+(`AGENTS.md`, "What requires a human").
+
+| Flag | Why |
+|---|---|
+| `-v <job dir>:/work:ro` | The payload and the talos modules; the runner only reads them. |
+| `-v <artifacts dir>:/artifacts` | Where `results.json` and `build.log` land. Created by Talos before the run so it belongs to the user. |
+| `-v talos-app-…:/app`, `-v talos-cargo-…:<cargo home>` | The volumes above. |
+| `-e CARGO_HOME=… -e RUSTUP_HOME=…` | Cargo and rustup are told where their files are, so the mounted registry is the one used whatever the image's profile does. |
+| (no `--user`) | The job runs as root: the image keeps cargo and rustup under `/root`, mode 700, so a non-root user cannot build. When the job ends, a one-second helper container `chown`s the artifacts mount to the host user (Linux and macOS), so nothing under `runs/` needs `sudo`. |
+| `--cpus N --memory Mg` | From `talos setup`; part of the hardware class. |
+| `--network none` | The checkout and the registry are on the volumes; the job never needs the network. |
+| `--cap-drop ALL --security-opt no-new-privileges --pids-limit 4096` | Nothing in the build or the runtime needs a capability; a fork bomb fails the container, not the machine. |
+| `--gpus all` | GPU challenges only. |
+
+Job directories land at `runs/<job_id>/local/<purpose>/`, and the container's artifacts under
+`<job dir>/<container name>/artifacts/`. The container name is
+`talos-<8 hex of the run dir>-<purpose>-<request hash>`; the request hash is derived from a
+hash of the rand hash, never the rand hash itself. Docker has no wall-clock limit of its own,
+so the transport stores the job's limit as a container label and kills the container when it
+is exceeded, reporting `TIMED_OUT` exactly as C3 would. Exited containers of earlier iterations
+of the same run are removed at the next deploy.
+
+The hardware class is `local-<host>-cpu<N>-mem<M>` (or `local-<host>-gpu-<name>`), so a local
+baseline never matches a Modal or C3 one, and a changed CPU or memory setting is a re-measure.
+
+### Local timings
+
+MEASURED 2026-09-23 on a 16-core, 30 GB machine (`tests/test_live.py::test_local_knapsack_job`,
+knapsack, two training and two held-out nonces):
+
+| Step | Time |
+|---|---|
+| Spike: clean `build_algorithm` of a shipped algorithm, no cache | 12m0s |
+| Live run 1: warm-up build in `prepare` (clone done, registry warm) | 12m (14:31 to 14:43 UTC) |
+| Live run 1: the job's `build_algorithm` of the candidate, cargo cache warm | 14m44s (container start to exit) |
+| Live run 2: `prepare` with every marker present | 1 s (`prepare_s: 1`) |
+| Live run 2: one job, build plus 4 nonces (1.3 to 1.7 s per nonce) | 14m4s (`job_s: 844`; `1 passed` in 14m7s) |
+
+The job's build is no faster than the warm-up build: the instrumentation pass, not the Rust
+compile, is the cost. Caching the instrumented objects per IR file would remove it and is
+out of scope here.
+
+### Local GPU support (unverified)
+
+The GPU branch is the `--gpus all` flag, one scoring worker, the `nvidia-smi` name query in
+`prepare`, and the GPU hardware class. All four have unit tests. The live test has not been run
+on a GPU host as of 2026-09-23. To verify it, on a machine with the NVIDIA container toolkit:
+
+```bash
+TALOS_LIVE_BACKEND=local TALOS_LIVE_CHALLENGE=vector_search .venv/bin/pytest -m live tests/test_live.py -k local -s
+```
+
+Record the printed `gpu`, `prepare_s` and `job_s` here when it passes.
