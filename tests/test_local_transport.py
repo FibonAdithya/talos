@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import types
 from datetime import datetime, timedelta, timezone
 
@@ -149,6 +150,11 @@ def test_deploy_runs_the_container_named_from_the_job_dir_and_returns_the_name(t
     assert run_cmd[run_cmd.index("--name") + 1] == name
     # mutation: the artifacts dir left for Docker to create is root-owned on Linux
     assert (jd / name / "artifacts").is_dir()
+    if os.name != "nt":
+        # mutation: 775 is not writable by root inside the container, because --cap-drop ALL
+        # removes CAP_DAC_OVERRIDE and root then obeys the mode like any other "other" user
+        # (live run 1, 2026-09-23: PermissionError on /artifacts/build.log)
+        assert stat.S_IMODE((jd / name / "artifacts").stat().st_mode) == 0o777
     assert f"{jd / name / 'artifacts'}:/artifacts" in run_cmd
     assert "-e" in run_cmd and "CARGO_HOME=/usr/local/cargo" in run_cmd
     # mutation: a stale container with this name makes `docker run` fail with a name clash

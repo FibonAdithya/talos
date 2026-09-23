@@ -134,6 +134,10 @@ class DockerTransport:
         rustup_home = self.volume_label(cargo_vol, LABEL_RUSTUP)
         artifacts = job_dir / name / ARTIFACTS.strip("/")
         artifacts.mkdir(parents=True, exist_ok=True)  # else Docker creates it root-owned
+        # World-writable on purpose: the job runs as root with every capability dropped, so
+        # root obeys the mode like any other user and 775 refuses it. The files are handed
+        # to the user when the job ends (_hand_over).
+        artifacts.chmod(0o777)
         self._prune(key)
         self.docker("rm", "-f", name, ok=(0, 1))  # a leftover with this exact name
         self.docker(*run_args(local, job_dir, artifacts, name, key, cargo_home, rustup_home)[1:])
