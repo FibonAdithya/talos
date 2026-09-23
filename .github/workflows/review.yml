@@ -32,6 +32,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_AUTH_TOKEN }}
+          show_full_output: "true"  # TEMPORARY debug, reverted before merge
           # Without this the action mints its own token through the Claude
           # GitHub App. The job's own token has the pull-requests: write it
           # needs; comments arrive from github-actions[bot].
