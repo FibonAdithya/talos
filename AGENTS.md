@@ -150,8 +150,8 @@ Do not decide these yourself. Raise them and stop.
   `.talos/secrets.json`, or sends data anywhere other than the user's own LLM
   provider and Modal account.
 - Running `tests/test_live.py`. It spends the user's Modal budget or C3 credit.
-- Changing `talos/challenges.py::IMAGE_NAMESPACE` or the C3 prices in
-  `talos/c3_bench.py::GBP_PER_HOUR`. Those are the budget for the C3 backend.
+- Changing the C3 prices in `talos/c3_bench.py::GBP_PER_HOUR`. They are the
+  budget for the C3 backend.
 - Running the C3 live test (`tests/test_live.py::test_c3_knapsack_job`). It
   spends the user's C3 credit.
 
@@ -170,7 +170,7 @@ nobody.
 | Set up and run day-to-day commands | `README.md` |
 | Run the gate | `Makefile` |
 | The research loop, its guards, the agentic sandbox, the baseline cache | `docs/architecture.md` |
-| Modal and C3 transports, C3 job directories, timings, dev image mirroring | `docs/compute-backends.md` |
+| Modal and C3 transports, C3 job directories, timings, the dev images | `docs/compute-backends.md` |
 | Why a decision was made (non-authoritative) | `docs/ai/specs/` |
 | CLI entry point, wizards, flags | `talos/cli.py::main` |
 | Per-challenge pins, beat rules, hardware | `talos/challenges.py::CHALLENGES` |

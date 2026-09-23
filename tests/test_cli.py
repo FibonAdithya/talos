@@ -796,20 +796,37 @@ def test_config_without_backend_loads_as_modal(tmp_path):
     assert load(tmp_path).backend == "modal"
 
 
-def test_image_available_hits_the_hub_tag_endpoint(monkeypatch):
-    monkeypatch.delenv("TALOS_IMAGE_NAMESPACE", raising=False)
-    seen = {}
+def test_image_available_checks_the_ghcr_manifest(monkeypatch):
+    seen = []
 
-    def fetch(url):
-        seen["url"] = url
-        # the tag-list endpoint (no tag) answers 200 for any repo that exists at all
-        return 200 if url.endswith(f"tig-knapsack-dev/tags/{DEV_IMAGE_TAG}") else 404
+    def fetch(url, headers):
+        seen.append((url, headers))
+        if url.startswith("https://ghcr.io/token?"):
+            return 200, '{"token": "tok123"}'
+        # a manifest GET without the pull token is refused, so a check that skips the token
+        # step reports every image as missing
+        if headers.get("Authorization") != "Bearer tok123":
+            return 401, ""
+        return (200, "{}") if url.endswith(f"knapsack/dev/manifests/{DEV_IMAGE_TAG}") else (404, "")
     assert cli.image_available("knapsack", fetch=fetch) is True
-    assert "hub.docker.com/v2/repositories/fibonadithya/tig-knapsack-dev/tags/" in seen["url"]
+    token_url, manifest_url = seen[0][0], seen[1][0]
+    assert token_url == ("https://ghcr.io/token?scope=repository:tig-foundation/tig-monorepo/"
+                         "knapsack/dev:pull")
     # mutation: dropping the tag from the URL degrades the check to "the repo exists", so a
-    # DEV_IMAGE_TAG bump with no re-mirror pays for a job that dies at the pull
-    assert seen["url"].endswith(f"/tags/{DEV_IMAGE_TAG}")
+    # DEV_IMAGE_TAG bump with no matching image pays for a job that dies at the pull
+    assert manifest_url == ("https://ghcr.io/v2/tig-foundation/tig-monorepo/knapsack/dev/"
+                            f"manifests/{DEV_IMAGE_TAG}")
     assert cli.image_available("hypergraph", fetch=fetch) is False
+
+
+def test_image_available_is_false_when_ghcr_is_unreachable():
+    assert cli.image_available("knapsack", fetch=lambda url, headers: (0, "")) is False
+
+    def token_then_dead(url, headers):
+        # mutation: treating 0 as "present" on the manifest step alone submits a job that
+        # dies at the pull whenever GHCR is down at check time
+        return (200, '{"token": "t"}') if url.startswith("https://ghcr.io/token?") else (0, "")
+    assert cli.image_available("knapsack", fetch=token_then_dead) is False
 
 
 def test_run_c3_refuses_a_missing_image_before_the_baseline(tmp_path, monkeypatch, capsys):
@@ -827,11 +844,11 @@ def test_run_c3_refuses_a_missing_image_before_the_baseline(tmp_path, monkeypatc
                    "1", "--yes"])
     err = capsys.readouterr().err
     # mutation: checking the image after the baseline pays for a job that fails at the pull
-    assert rc == 1 and "mirror_images" in err and "tig-knapsack-dev" in err
+    assert rc == 1 and "DEV_IMAGE_TAG" in err and "tig-monorepo/knapsack/dev" in err
     st = json.loads(next((tmp_path / "runs").glob("*/state.json")).read_text())
     # mutation: returning without recording the outcome leaves `talos status` listing the run
     # as live for ever, with no reason
-    assert st["status"] == "failed" and st["stop_reason"] == "dev image not mirrored"
+    assert st["status"] == "failed" and st["stop_reason"] == "dev image not on GHCR"
 
 
 def test_compile_backend_resolution_order(tmp_path, monkeypatch):

@@ -42,8 +42,8 @@ CLI_PROVIDERS = ("claude-cli", "codex-cli")
 UNMETERED = CLI_PROVIDERS + ("fake",)
 DEFAULT_COMPUTE_USD = 20.0
 BACKENDS = ("modal", "c3")
-MIRROR_HINT = ("the C3 backend needs the dev image on Docker Hub; a maintainer runs "
-               "`make mirror-images` (scripts/mirror_images.sh) once per image tag")
+IMAGE_HINT = ("the C3 backend pulls the official TIG dev image from GHCR; check that "
+              "`DEV_IMAGE_TAG` in talos/challenges.py names a published tag")
 
 
 def default_ask(prompt: str, default: str | None = None, secret: bool = False) -> str:
@@ -110,20 +110,34 @@ def check_c3(run=None, api_key: str | None = None, transport=None) -> float:
 
 
 def image_available(challenge: str, fetch=None) -> bool:
-    """GET the public Hub tag endpoint; 200 means C3 can pull the image."""
-    image = c3_image(challenge)
-    name, tag = image.split("/", 1)[1].rsplit(":", 1)
-    url = f"https://hub.docker.com/v2/repositories/{name}/tags/{tag}"
+    """True when the manifest for the challenge's dev image tag is on GHCR, which is what C3
+    pulls. Anonymous access to GHCR needs a pull-scoped token first, so this is two requests.
+    `fetch(url, headers)` returns `(status, body)`; status 0 means unreachable."""
+    name, tag = c3_image(challenge).removeprefix("ghcr.io/").rsplit(":", 1)
     if fetch is None:
-        def fetch(u):
+        def fetch(u, headers):
             try:
-                with urllib.request.urlopen(u, timeout=20) as resp:
-                    return resp.status
+                req = urllib.request.Request(u, headers=headers)
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    return resp.status, resp.read().decode("utf-8", "replace")
             except urllib.error.HTTPError as e:
-                return e.code
+                return e.code, ""
             except urllib.error.URLError:
-                return 0  # unreachable: reported as "not available", the message says so
-    return fetch(url) == 200
+                return 0, ""  # unreachable: reported as "not available", the message says so
+    status, body = fetch(f"https://ghcr.io/token?scope=repository:{name}:pull", {})
+    if status != 200:
+        return False
+    try:
+        token = json.loads(body)["token"]
+    except (ValueError, KeyError, TypeError):
+        return False
+    accept = ", ".join(("application/vnd.oci.image.index.v1+json",
+                        "application/vnd.oci.image.manifest.v1+json",
+                        "application/vnd.docker.distribution.manifest.list.v2+json",
+                        "application/vnd.docker.distribution.manifest.v2+json"))
+    status, _ = fetch(f"https://ghcr.io/v2/{name}/manifests/{tag}",
+                      {"Authorization": f"Bearer {token}", "Accept": accept})
+    return status == 200
 
 
 def make_bench(backend: str, run_dir: Path, pending, c3_api_key: str | None = None):
@@ -441,15 +455,15 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
             # `talos compile` in the agentic sandbox has no secrets.json to read the key from.
             os.environ["C3_API_KEY"] = c3_api_key
         cache_dir, mainnet = BASELINE_CACHE, None
-        # Before the baseline, not after: C3 pulls the image at job start, so a missing mirror
+        # Before the baseline, not after: C3 pulls the image at job start, so a missing tag
         # costs a whole job (and its queue wait) to report a pull failure.
         if cfg.backend == "c3" and not image_available(spec.challenge):
             # A run that stops here is over: left at its initial status `talos status` would
             # list it as live for ever, with no reason recorded.
-            state.status, state.stop_reason = "failed", "dev image not mirrored"
+            state.status, state.stop_reason = "failed", "dev image not on GHCR"
             store.save(state)
-            print(f"image {c3_image(spec.challenge)} is not on Docker Hub (or Hub is "
-                  f"unreachable): {MIRROR_HINT}", file=sys.stderr)
+            print(f"image {c3_image(spec.challenge)} is not on GHCR (or GHCR is "
+                  f"unreachable): {IMAGE_HINT}", file=sys.stderr)
             return 1
     from talos.loop import Loop
     hardware = bench_hardware_class(cfg.backend, spec.challenge)
