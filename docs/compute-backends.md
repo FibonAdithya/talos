@@ -136,6 +136,7 @@ knapsack, two training and two held-out nonces):
 | Live run 1: the job's `build_algorithm` of the candidate, cargo cache warm | 14m44s (container start to exit) |
 | Live run 2: `prepare` with every marker present | 1 s (`prepare_s: 1`) |
 | Live run 2: one job, build plus 4 nonces (1.3 to 1.7 s per nonce) | 14m4s (`job_s: 844`; `1 passed` in 14m7s) |
+| Live run 3, the shipped copy-out transport: prepare with markers present / one job | 1 s / 14m59s (`job_s: 899`; `1 passed` in 15m3s) |
 
 The job's build is no faster than the warm-up build: the instrumentation pass, not the Rust
 compile, is the cost. Caching the instrumented objects per IR file would remove it and is
