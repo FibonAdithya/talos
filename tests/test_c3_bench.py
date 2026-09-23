@@ -541,8 +541,12 @@ def test_a_stale_results_file_on_disk_is_not_mistaken_for_a_successful_fetch(tmp
 
 def test_local_settings_select_the_local_subdir_flavour_and_a_zero_rate(tmp_path):
     t = FakeTransport(["PENDING", "RUNNING", "RUNNING", "SUCCEEDED"], results_doc())
+    clock = Clock()
+
+    def sleep(s):
+        clock.t += s  # the job runs for 40 s of billable time; at $0/h that is still $0
     b = C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
-                clock=Clock(), sleep=lambda s: None, local=LocalSettings(8, 12),
+                clock=clock, sleep=sleep, poll_s=20.0, local=LocalSettings(8, 12),
                 usd_per_hour=0.0)
     r = b.evaluate(req())
     assert r.compile.ok
