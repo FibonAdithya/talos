@@ -37,20 +37,9 @@ $0.027 and the account balance fell by £0.02. Modal has no equivalent per-job o
 
 ## C3 dev images
 
-C3 pulls only public Docker Hub images, never GHCR, so the maintainers mirror the TIG dev
-images to Docker Hub ([how](#mirroring-the-c3-dev-images-maintainers)). Users never touch
-GHCR or the mirror script themselves. Tags currently mirrored: knapsack 0.0.7 (verified
-2026-09-15). `talos run` on C3 checks the Hub tag before the baseline is measured and fails
-with a mirror hint if it is missing.
-
-## Mirroring the C3 dev images (maintainers)
-
-Maintainers mirror the TIG dev images to `docker.io/fibonadithya/tig-<challenge>-dev:<tag>`
-with `make mirror-images` (`scripts/mirror_images.sh`). It needs running once per
-`DEV_IMAGE_TAG`, so a tag bump means re-running it before release. `TALOS_IMAGE_NAMESPACE`
-points Talos at a test mirror instead of the real one.
-
-The mirror script needs `talos` importable, which the system `python3` does not have. From a
-fresh shell run `make mirror-images PYTHON=.venv/bin/python`, or activate the venv first and
-run plain `make mirror-images`. Otherwise the `Makefile`'s `PYTHON ?= python3` picks the
-system interpreter and fails with "No module named talos".
+C3 pulls the official TIG dev image straight from GHCR,
+`ghcr.io/tig-foundation/tig-monorepo/<challenge>/dev:<DEV_IMAGE_TAG>`, the same reference
+Modal builds from, so a candidate is compiled in one image whichever backend runs it. There
+is no mirror to maintain: a `DEV_IMAGE_TAG` bump takes effect on the next job. `talos run` on
+C3 checks that the tag exists on GHCR (an anonymous pull-scoped token, then a manifest GET)
+before the baseline is measured, and fails with a `DEV_IMAGE_TAG` hint if it is missing.

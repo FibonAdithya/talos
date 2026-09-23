@@ -5,7 +5,7 @@ import stat
 from talos import c3_jobdir
 from talos.bench import EvalRequest
 from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_hardware_class, c3_image,
-                              c3_profile, c3_workers, image_namespace)
+                              c3_profile, c3_workers, dev_image)
 from talos.types import NonceResult, NonceSet
 
 HASH = "ab" * 32
@@ -19,11 +19,11 @@ def req(challenge="knapsack", n=4, baseline=True):
         challenge, {"mod.rs": "fn x(){}"}, tr, ho, 7, base, CHALLENGES[challenge].beat)
 
 
-def test_image_name_and_namespace_override(monkeypatch):
-    assert c3_image("knapsack") == f"docker.io/fibonadithya/tig-knapsack-dev:{DEV_IMAGE_TAG}"
-    monkeypatch.setenv("TALOS_IMAGE_NAMESPACE", "other")
-    # mutation: reading the namespace at import time makes the maintainer override dead
-    assert image_namespace() == "other" and c3_image("knapsack").startswith("docker.io/other/")
+def test_c3_pulls_the_official_ghcr_dev_image():
+    # C3 pulls straight from GHCR; the reference is literal so a namespace or tag drift on
+    # either function is caught, and equal to Modal's so the two backends build in one image
+    assert c3_image("knapsack") == f"ghcr.io/tig-foundation/tig-monorepo/knapsack/dev:{DEV_IMAGE_TAG}"
+    assert c3_image("hypergraph") == dev_image("hypergraph")
 
 
 def test_profile_workers_and_hardware_class():
@@ -62,7 +62,7 @@ def test_job_settings_and_the_c3_file_agree():
     assert s["script"] == "job.sh"
     assert s["hardware"] == "cpu-d3-4vcpu-16gb"
     assert s["docker_requires_accelerator"] == "none"
-    assert s["docker_image"] == f"docker.io/fibonadithya/tig-knapsack-dev:{DEV_IMAGE_TAG}"
+    assert s["docker_image"] == f"ghcr.io/tig-foundation/tig-monorepo/knapsack/dev:{DEV_IMAGE_TAG}"
     g = c3_jobdir.job_settings("hypergraph", "1", 60)
     assert g["docker_requires_accelerator"] == "cuda" and g["hardware"] == "l40"
 
@@ -76,7 +76,7 @@ def test_c3_config_text_is_exact():
         "hardware: cpu-d3-4vcpu-16gb\n"
         'time: "00:23:00"\n'
         "docker:\n"
-        f"  image: docker.io/fibonadithya/tig-knapsack-dev:{DEV_IMAGE_TAG}\n"
+        f"  image: ghcr.io/tig-foundation/tig-monorepo/knapsack/dev:{DEV_IMAGE_TAG}\n"
         "  requires_accelerator: none\n")
     # mutation: a GPU image on a CPU-flagged job is rejected only at run time, after the pull
     assert "requires_accelerator: cuda" in c3_jobdir.c3_config_text("hypergraph", "1", 60)
