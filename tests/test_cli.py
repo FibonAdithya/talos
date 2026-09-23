@@ -1685,7 +1685,8 @@ def _local_docker(runtimes=("runc",), fail=False):
         if fail:
             return types.SimpleNamespace(returncode=1, stdout="",
                                          stderr="Cannot connect to the Docker daemon")
-        assert cmd[:2] == ["docker", "info"], cmd
+        # argv[0] is a full path on Windows (executables.argv0); match the command word
+        assert cmd[1] == "info", cmd
         return types.SimpleNamespace(returncode=0, stdout=json.dumps({r: {} for r in runtimes}),
                                      stderr="")
     return run
@@ -1848,6 +1849,37 @@ def test_run_local_refuses_a_gpu_challenge_without_the_nvidia_runtime(tmp_path, 
     assert rc == 1 and "NVIDIA" in err and "modal" in err and "c3" in err
     st = json.loads(next((tmp_path / "runs").glob("*/state.json")).read_text())
     assert st["status"] == "failed"
+
+
+def test_run_local_gpu_challenge_with_docker_down_fails_the_job_not_the_process(tmp_path,
+                                                                                monkeypatch,
+                                                                                capsys):
+    monkeypatch.chdir(tmp_path)
+    _local_config(tmp_path)
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **k: object())
+    hypergraph = type("I", (), {"id": "c005", "name": "hypergraph", "is_gpu": True,
+                                "tracks": ["n=1"], "max_fuel": 7})()
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: hypergraph)
+    _stub_mainnet(monkeypatch)
+    monkeypatch.setattr(cli, "has_gpu_runtime", lambda: (_ for _ in ()).throw(
+        C3CommandError("docker info could not be run: Cannot connect to the Docker daemon")))
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: _RefusingBench("no bench"))
+    # mutation: the GPU check outside the try tracebacks and leaves state.json "initial"
+    rc = cli.main(["run", "--challenge", "hypergraph", "--direction", "go",
+                   "--budget-iterations", "1", "--yes"])
+    assert rc == 1 and "Docker" in capsys.readouterr().err
+    st = json.loads(next((tmp_path / "runs").glob("*/state.json")).read_text())
+    assert st["status"] == "failed" and "docker" in st["stop_reason"].lower()
+
+
+def test_setup_local_refuses_zero_cpus_or_memory(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "subprocess", types.SimpleNamespace(run=_local_docker()))
+    # mutation: accepting 0 surfaces 20 minutes later as "local Docker deploy failed"
+    rc = cli.main(["setup"], ask=scripted(["local", "claude-cli", "", "single-shot", "0", "8"]))
+    assert rc == 2 and "at least 1" in capsys.readouterr().err
+    assert not (tmp_path / "talos.config.json").exists()
 
 
 def test_compile_local_prepares_then_evaluates(tmp_path, monkeypatch, capsys):

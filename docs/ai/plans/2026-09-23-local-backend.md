@@ -1825,9 +1825,17 @@ Script: the session scratchpad's `spike.sh` (throwaway; log kept as `spike.log` 
 | Clean `build_algorithm fast_and_furious` | 12m0.168s real | `time` under "clean build" |
 | Incremental `build_algorithm` | not measured by the spike (the run failed before compiling); measured by the live test instead | — |
 
-Decision (spec §6 fallback 2, improved): the job container runs as root, without `--user` and
-without the `HOME=/tmp` override; the transport hands the artifacts mount back to the host
-user from a one-second helper container (`docker run --rm -v <artifacts>:/artifacts <image>
-chown -R <uid> /artifacts`) when the job reaches a terminal state, so nothing under `runs/`
-needs `sudo`. The `chown` of the volumes in prepare is dropped: root needs none. Whether an
-offline build works once the registry is warm is settled by the live test's second run.
+Decision (spec §6 fallback 2): the job container runs as root, without `--user` and without
+the `HOME=/tmp` override. The `chown` of the volumes in prepare is dropped: root needs none.
+Whether an offline build works once the registry is warm was settled by the live test's
+second run (it does: `1 passed`, `job_s: 844`).
+
+Revised after the whole-branch review (2026-09-23): the first version bind-mounted a
+world-writable host directory at `/artifacts` and chowned it back from a helper container.
+The reviewer showed that root in the container could leave a setuid-root file on the host
+through that mount, and that the hand-over was skipped on timeout and cancel. Now nothing
+writable on the host is mounted: `fetch` copies `results.json` and `build.log` out of the
+stopped container with `docker cp`, the deploy prune keeps a stopped container until the next
+iteration, and the helper container and the 777 directory are gone. Live run 1 also showed
+that capability-less root obeys the mode of a user-owned mount (PermissionError on
+`build.log`), which the copy-out design sidesteps.

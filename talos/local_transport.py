@@ -285,7 +285,7 @@ def prepare(challenge: str, run: Callable = subprocess.run,
         log(f"cloning tig-monorepo at {MONOREPO_REF[:12]} into {app_vol}")
         t.docker("run", "--rm", *mounts, image, "bash", "-c", clone_script(), timeout=1800)
     if not marker(WARM_MARKER):
-        log("warm build: one clean build so later builds are incremental and offline")
+        log("warm-up build: fills the cargo cache so every later build runs offline")
         t.docker("run", "--rm", *gpu, *mounts, image, "bash", "-c", warm_script(challenge),
                  timeout=7200)
     if spec.is_gpu:

@@ -286,6 +286,10 @@ def cmd_setup(args, ask) -> int:
         except ConfigError as e:  # three non-numbers, as the run wizard treats it
             print(str(e), file=sys.stderr)
             return 2
+        if local.cpus < 1 or local.memory_gib < 1:
+            print("CPUs and memory for the local container must each be at least 1",
+                  file=sys.stderr)
+            return 2
     provider = make_provider(kind, model, api_key=api_key, api_base=api_base)
     err = validate_provider(provider)
     if err:
@@ -539,18 +543,18 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
                   f"unreachable): {IMAGE_HINT}", file=sys.stderr)
             return 1
         if cfg.backend == "local":
-            if CHALLENGES[spec.challenge].is_gpu and not has_gpu_runtime():
-                state.status, state.stop_reason = "failed", "no NVIDIA container runtime"
-                store.save(state)
-                print(f"{spec.challenge} needs a GPU and Docker reports no NVIDIA runtime; "
-                      f"install the NVIDIA container toolkit, or run this challenge on the "
-                      f"modal or c3 backend", file=sys.stderr)
-                return 1
             try:
+                if CHALLENGES[spec.challenge].is_gpu and not has_gpu_runtime():
+                    state.status, state.stop_reason = "failed", "no NVIDIA container runtime"
+                    store.save(state)
+                    print(f"{spec.challenge} needs a GPU and Docker reports no NVIDIA runtime; "
+                          f"install the NVIDIA container toolkit, or run this challenge on the "
+                          f"modal or c3 backend", file=sys.stderr)
+                    return 1
                 # Before the baseline: the first run per challenge pulls the image and does one
                 # clean build, and the user should see that happening rather than a silent wait.
                 gpu_name = prepare(spec.challenge)
-            except C3CommandError as e:
+            except C3CommandError as e:  # the daemon is down, for the GPU check or prepare
                 state.status, state.stop_reason = "failed", f"docker: {str(e)[:120]}"
                 store.save(state)
                 print(f"Docker failed while preparing {spec.challenge}: {e}", file=sys.stderr)

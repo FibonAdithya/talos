@@ -101,22 +101,25 @@ Every flag is in `talos/local_transport.py::run_args`; loosening them is a human
 | Flag | Why |
 |---|---|
 | `-v <job dir>:/work:ro` | The payload and the talos modules; the runner only reads them. |
-| `-v <artifacts dir>:/artifacts` | Where `results.json` and `build.log` land. Created by Talos before the run so it belongs to the user. |
+| (no mount for `/artifacts`) | `results.json` and `build.log` stay inside the container; Talos copies them out with `docker cp` once the job has stopped. Nothing writable on the host is mounted, so root in the container cannot leave a file (setuid or otherwise) on the host. |
 | `-v talos-app-…:/app`, `-v talos-cargo-…:<cargo home>` | The volumes above. |
 | `-e CARGO_HOME=… -e RUSTUP_HOME=…` | Cargo and rustup are told where their files are, so the mounted registry is the one used whatever the image's profile does. |
-| (no `--user`) | The job runs as root: the image keeps cargo and rustup under `/root`, mode 700, so a non-root user cannot build. When the job ends, a one-second helper container `chown`s the artifacts mount to the host user (Linux and macOS), so nothing under `runs/` needs `sudo`. |
+| (no `--user`) | The job runs as root inside the container: the image keeps cargo and rustup under `/root`, mode 700, so a non-root user cannot build. With every capability dropped, no network, and no writable host mount, what root can reach is the container's own filesystem and the two volumes. Files under `runs/` are written by Talos itself, so they belong to the user. |
 | `--cpus N --memory Mg` | From `talos setup`; part of the hardware class. |
 | `--network none` | The checkout and the registry are on the volumes; the job never needs the network. |
 | `--cap-drop ALL --security-opt no-new-privileges --pids-limit 4096` | Nothing in the build or the runtime needs a capability; a fork bomb fails the container, not the machine. |
 | `--gpus all` | GPU challenges only. |
 
 Job directories land at `runs/<job_id>/local/<purpose>/`, and the container's artifacts under
-`<job dir>/<container name>/artifacts/`. The container name is
+`<job dir>/<container name>/artifacts/` (copied out of the container). The container name is
 `talos-<8 hex of the run dir>-<purpose>-<request hash>`; the request hash is derived from a
 hash of the rand hash, never the rand hash itself. Docker has no wall-clock limit of its own,
 so the transport stores the job's limit as a container label and kills the container when it
-is exceeded, reporting `TIMED_OUT` exactly as C3 would. Exited containers of earlier iterations
-of the same run are removed at the next deploy.
+is exceeded, reporting `TIMED_OUT` exactly as C3 would. A stopped container is kept until the
+next deploy of the same run, because its artifacts are read from it; exited containers of
+earlier iterations are removed then. The local build allowance in the time limit is one hour
+(`talos/c3_jobdir.py::LOCAL_BUILD_ALLOWANCE_S`), against 20 minutes on C3, because the
+candidate build takes about 15 minutes on 16 cores and longer on fewer.
 
 The hardware class is `local-<host>-cpu<N>-mem<M>` (or `local-<host>-gpu-<name>`), so a local
 baseline never matches a Modal or C3 one, and a changed CPU or memory setting is a re-measure.

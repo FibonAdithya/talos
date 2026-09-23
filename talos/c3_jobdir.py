@@ -15,6 +15,10 @@ from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_image,
 from talos.inside import NONCE_TIMEOUT_S
 
 BUILD_ALLOWANCE_S = 1200
+# The local job's build allowance. MEASURED 2026-09-23: a candidate build took 14m44s on 16
+# cores (the dev image re-instruments every dependency on each build), and fewer cores take
+# longer; 20 minutes would time out every job on a smaller machine.
+LOCAL_BUILD_ALLOWANCE_S = 3600
 TIME_CAP_S = 6 * 3600
 JOB_MODULES = ("__init__", "inside", "scoring", "types", "challenges", "diagnostics", "c3_job")
 _PKG = Path(__file__).resolve().parent
@@ -28,8 +32,9 @@ class LocalSettings:
     memory_gib: int
 
 
-def time_limit_s(nonce_count: int, workers: int) -> int:
-    raw = BUILD_ALLOWANCE_S + math.ceil(nonce_count * NONCE_TIMEOUT_S / workers)
+def time_limit_s(nonce_count: int, workers: int,
+                 build_allowance_s: int = BUILD_ALLOWANCE_S) -> int:
+    raw = build_allowance_s + math.ceil(nonce_count * NONCE_TIMEOUT_S / workers)
     return min(TIME_CAP_S, math.ceil(raw / 60) * 60)
 
 
@@ -130,7 +135,7 @@ def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str,
         sh_text = job_sh_text(MONOREPO_REF)
     else:
         workers = local_workers(spec, local.cpus)
-        seconds = time_limit_s(max(nonces, 1), workers)
+        seconds = time_limit_s(max(nonces, 1), workers, LOCAL_BUILD_ALLOWANCE_S)
         (job_dir / "local.json").write_text(
             json.dumps(local_settings_doc(request, local, seconds), indent=1),
             encoding="utf-8", newline="\n")

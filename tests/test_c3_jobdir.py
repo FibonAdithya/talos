@@ -193,8 +193,11 @@ def test_local_flavour_writes_local_json_and_a_job_sh_without_a_download(tmp_pat
     # mutation: workers left at C3's 4 on a 8-cpu container idles half the machine
     assert doc["workers"] == 8
     assert json.loads((d / "payload.json").read_text())["workers"] == 8
-    # 8 nonces, 8 workers: 1200 + ceil(8*600/8) = 1800 s
-    assert doc["time_limit_s"] == 1800
+    # 8 nonces, 8 workers: the local build allowance 3600 + ceil(8*600/8) = 4200 s. The C3
+    # allowance of 1200 s is too tight locally: MEASURED 2026-09-23, a candidate build took
+    # 14m44s on 16 cores, and fewer cores take longer.
+    assert doc["time_limit_s"] == 4200
+    assert c3_jobdir.LOCAL_BUILD_ALLOWANCE_S == 3600
     assert doc["request_hash"] == c3_jobdir.request_hash(req(n=4))
     # mutation: the rand hash in local.json would land in the container name and `docker ps`
     assert HASH not in (d / "local.json").read_text() and HASH not in sh
