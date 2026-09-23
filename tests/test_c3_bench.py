@@ -5,6 +5,7 @@ import pytest
 
 from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, PendingJobStore
 from talos.c3_bench import C3Bench, fill_timeouts, parse_json_stdout
+from talos.c3_jobdir import LocalSettings
 from talos.challenges import CHALLENGES
 from talos.types import NonceResult, NonceSet
 
@@ -536,3 +537,42 @@ def test_a_stale_results_file_on_disk_is_not_mistaken_for_a_successful_fetch(tmp
     # this stale file left on disk and report a result instead of failing twice
     assert "failed twice" in str(ei.value)
     assert [c[0] for c in t.calls].count("deploy") == 2
+
+
+def test_local_settings_select_the_local_subdir_flavour_and_a_zero_rate(tmp_path):
+    t = FakeTransport(["PENDING", "RUNNING", "RUNNING", "SUCCEEDED"], results_doc())
+    b = C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
+                clock=Clock(), sleep=lambda s: None, local=LocalSettings(8, 12),
+                usd_per_hour=0.0)
+    r = b.evaluate(req())
+    assert r.compile.ok
+    job_dir = Path([c[1] for c in t.calls if c[0] == "deploy"][0])
+    # mutation: writing the C3 flavour under runs/<id>/c3 on the local backend
+    assert job_dir.parent.name == "local" and (job_dir / "local.json").exists()
+    assert not (job_dir / ".c3").exists()
+    assert json.loads((job_dir / "local.json").read_text())["cpus"] == 8
+    # mutation: `usd_per_hour or GBP_RATE` treats 0.0 as "not given" and bills local time
+    assert b.cost_mark() == 0.0
+
+
+def test_a_given_rate_is_charged_and_none_keeps_the_c3_rate(tmp_path):
+    t = FakeTransport(["RUNNING", "RUNNING", "SUCCEEDED"], results_doc())
+    clock = Clock()
+
+    def sleep(s):
+        clock.t += s
+    b = C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
+                clock=clock, sleep=sleep, poll_s=20.0, usd_per_hour=3.6)
+    b.evaluate(req())
+    # RUNNING first seen at t=0, terminal at t=40: 40 s at $3.6/h = $0.04
+    assert abs(b.cost_mark() - 0.04) < 1e-9
+
+
+def test_messages_name_the_transport_label_when_it_has_one(tmp_path):
+    t = FakeTransport(["PENDING"])
+    t.label = "local Docker"
+    t.statuses = ["FAILED"]
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).evaluate(req())
+    # mutation: a local failure that tells the user to check C3
+    assert "local Docker job failed twice" in str(ei.value) and "C3" not in str(ei.value)
