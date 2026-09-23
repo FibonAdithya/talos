@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,16 +25,6 @@ LABEL_LIMIT = "talos.time_limit_s"
 LABEL_RUN = "talos.run"
 LABEL_CARGO = "talos.cargo_home"
 LABEL_RUSTUP = "talos.rustup_home"
-
-
-def host_uid() -> str | None:
-    """`uid:gid` the finished job's artifacts are handed to (DockerTransport.status). The job
-    itself runs as root: the dev image keeps cargo and rustup under /root, mode 700, so a
-    non-root user cannot build (spike, 2026-09-23). None on Windows: there is no getuid, and
-    Docker Desktop maps bind-mount ownership itself."""
-    if os.name == "nt":
-        return None
-    return f"{os.getuid()}:{os.getgid()}"
 
 
 def volume_key() -> str:
@@ -69,15 +58,20 @@ def parse_time(s: str) -> datetime:
     return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
 
 
-def run_args(local: dict, job_dir: Path, artifacts: Path, name: str, key: str, cargo_home: str,
+def run_args(local: dict, job_dir: Path, name: str, key: str, cargo_home: str,
              rustup_home: str) -> list[str]:
     """The job container's argv. Each `-v` value is one element, so a path with a space stays
     whole. The cargo and rustup homes are passed explicitly so the mounted registry is the one
-    cargo uses whatever the image's profile does."""
+    cargo uses whatever the image's profile does.
+
+    The job runs as root: the dev image keeps cargo and rustup under /root, mode 700, so a
+    non-root user cannot build (spike, 2026-09-23). Nothing writable on the host is mounted:
+    /work is read-only and /artifacts stays inside the container, copied out by `fetch`,
+    so root in the container cannot leave a setuid file on the host."""
     app_vol, cargo_vol = volume_names(local["challenge"])
     args = ["docker", "run", "-d", "--name", name,  # [0] is dropped by DockerTransport.docker
             "--label", f"{LABEL_LIMIT}={local['time_limit_s']}", "--label", f"{LABEL_RUN}={key}",
-            "-v", f"{job_dir}:{WORK}:ro", "-v", f"{artifacts}:{ARTIFACTS}",
+            "-v", f"{job_dir}:{WORK}:ro",
             "-v", f"{app_vol}:{APP}", "-v", f"{cargo_vol}:{cargo_home}",
             "-e", f"C3_JOB_WORKDIR={WORK}", "-e", f"C3_ARTIFACTS_DIR={ARTIFACTS}",
             "-e", f"CARGO_HOME={cargo_home}", "-e", f"RUSTUP_HOME={rustup_home}",
@@ -94,10 +88,9 @@ class DockerTransport:
     label = "local Docker"
 
     def __init__(self, run: Callable = subprocess.run,
-                 now: Callable[[], datetime] | None = None, uid: str | None = None):
+                 now: Callable[[], datetime] | None = None):
         self._run = run
         self._now = now or (lambda: datetime.now(timezone.utc))
-        self._uid = uid
 
     def docker(self, *args: str, timeout: int = 600, ok: tuple[int, ...] = (0,)) -> str:
         """One `docker` call. A missing binary, a hang, or an exit code outside `ok` is a
@@ -132,20 +125,15 @@ class DockerTransport:
         _, cargo_vol = volume_names(local["challenge"])
         cargo_home = self.volume_label(cargo_vol, LABEL_CARGO)
         rustup_home = self.volume_label(cargo_vol, LABEL_RUSTUP)
-        artifacts = job_dir / name / ARTIFACTS.strip("/")
-        artifacts.mkdir(parents=True, exist_ok=True)  # else Docker creates it root-owned
-        # World-writable on purpose: the job runs as root with every capability dropped, so
-        # root obeys the mode like any other user and 775 refuses it. The files are handed
-        # to the user when the job ends (_hand_over).
-        artifacts.chmod(0o777)
         self._prune(key)
         self.docker("rm", "-f", name, ok=(0, 1))  # a leftover with this exact name
-        self.docker(*run_args(local, job_dir, artifacts, name, key, cargo_home, rustup_home)[1:])
+        self.docker(*run_args(local, job_dir, name, key, cargo_home, rustup_home)[1:])
         return name
 
     def _prune(self, key: str) -> None:
         """Exited containers of earlier iterations of this run. Only exited ones: a resumed
-        process may still be about to reattach to the newest, and only this run's."""
+        process may still be about to reattach to the newest, and only this run's. A stopped
+        container is kept until then because `fetch` copies the results out of it."""
         ids = self.docker("ps", "-aq", "--filter", f"label={LABEL_RUN}={key}",
                           "--filter", "status=exited").split()
         if ids:
@@ -171,28 +159,10 @@ class DockerTransport:
                 return "TIMED_OUT"
             return "RUNNING"
         if status in ("exited", "dead"):
-            self._hand_over(doc)
             if (parse_time(st["FinishedAt"]) - started).total_seconds() >= limit:
                 return "TIMED_OUT"  # the one we, or a previous process, killed
             return "SUCCEEDED" if st.get("ExitCode") == 0 else "FAILED"
         raise C3CommandError(f"unexpected container status {status!r}")
-
-    def _hand_over(self, doc: dict) -> None:
-        """The job ran as root, so its artifacts on the bind mount are root-owned; a one-second
-        helper container gives them to the user. Best effort and idempotent: a failure here
-        leaves files the user must `sudo rm`, not a failed job."""
-        if not self._uid:
-            return
-        src = next((m["Source"] for m in doc.get("Mounts", [])
-                    if m.get("Destination") == ARTIFACTS), None)
-        image = doc.get("Config", {}).get("Image")
-        if not src or not image:
-            return
-        try:
-            self.docker("run", "--rm", "-v", f"{src}:{ARTIFACTS}", image, "chown", "-R",
-                        self._uid, ARTIFACTS, timeout=120)
-        except C3CommandError:
-            pass
 
     def cancel(self, job_id: str) -> None:
         try:
@@ -201,7 +171,18 @@ class DockerTransport:
             pass  # best effort: it may already be gone
 
     def fetch(self, job_id: str, name: str, dest: Path) -> bool:
-        return Path(dest).exists()  # the artifacts directory is a bind mount
+        """`docker cp` of one artifact out of the stopped container. A file the job never
+        wrote is False; anything else (daemon down, container gone) is a C3CommandError, so
+        C3Bench pauses the run instead of resubmitting a job that would fail the same way."""
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.docker("cp", f"{job_id}:{ARTIFACTS}/{name}", str(dest), timeout=120)
+        except C3CommandError as e:
+            if "could not find the file" in str(e).lower():
+                return False
+            raise
+        return dest.exists()
 
     # ── helpers for prepare ────────────────────────────────────────────
     def image_present(self, image: str) -> bool:

@@ -30,8 +30,7 @@ from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_im
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.diagnostics import first_error
-from talos.local_transport import (DockerTransport, docker_runtimes, has_gpu_runtime, host_uid,
-                                   prepare)
+from talos.local_transport import DockerTransport, docker_runtimes, has_gpu_runtime, prepare
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.masked_input import ask_secret
 from talos.nonces import draw_nonce_sets, new_rand_hash
@@ -194,7 +193,7 @@ def make_bench(backend: str, run_dir: Path, pending, c3_api_key: str | None = No
         return C3Bench(run_dir, pending=pending, api_key=c3_api_key)
     if backend == "local":
         from talos.c3_bench import C3Bench
-        return C3Bench(run_dir, pending=pending, transport=DockerTransport(uid=host_uid()),
+        return C3Bench(run_dir, pending=pending, transport=DockerTransport(),
                        local=local or local_settings(None), usd_per_hour=0.0)
     raise ConfigError(f"unknown backend {backend!r}; run `talos setup`")
 

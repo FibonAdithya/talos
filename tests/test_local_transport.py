@@ -1,6 +1,4 @@
 import json
-import os
-import stat
 import types
 from datetime import datetime, timedelta, timezone
 
@@ -9,9 +7,8 @@ import pytest
 from talos.c3_bench import C3CommandError
 from talos.challenges import DEV_IMAGE_TAG, MONOREPO_REF, dev_image
 from talos.local_transport import (DockerTransport, PIDS_LIMIT, READY_MARKER, WARM_MARKER,
-                                   container_name, docker_runtimes, has_gpu_runtime, host_uid,
-                                   parse_time, prepare, run_args, run_key, volume_key,
-                                   volume_names)
+                                   container_name, docker_runtimes, has_gpu_runtime, parse_time,
+                                   prepare, run_args, run_key, volume_key, volume_names)
 
 T0 = datetime(2026, 9, 23, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -33,11 +30,14 @@ def job_dir(tmp_path, gpu=False, seconds=1800):
 class FakeDocker:
     """Scripted `docker` CLI. `inspect` is the State document returned; None = no container."""
 
-    def __init__(self, inspect=None, run_rc=0, volume_labels=None, ps_ids=""):
+    def __init__(self, inspect=None, run_rc=0, volume_labels=None, ps_ids="", files=None,
+                 daemon_down=False):
         self.inspect = inspect
         self.run_rc = run_rc
         self.volume_labels = volume_labels or {}
         self.ps_ids = ps_ids
+        self.files = files or {}  # name -> text, what the container has under /artifacts
+        self.daemon_down = daemon_down
         self.calls = []
 
     def __call__(self, cmd, **kw):
@@ -68,6 +68,18 @@ class FakeDocker:
             rc = 0 if "present" in cmd[-1] else 1
         elif word in ("rm", "kill"):
             rc = 0 if self.inspect is not None else 1
+        elif word == "cp":
+            if self.daemon_down:
+                rc, out = 1, "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+            else:
+                src, dest = cmd[2], cmd[3]
+                name = src.split("/")[-1]
+                if name in self.files:
+                    from pathlib import Path
+                    Path(dest).write_text(self.files[name], encoding="utf-8")
+                else:
+                    rc, out = 1, (f"Error response from daemon: Could not find the file "
+                                  f"/artifacts/{name} in container {src.split(':')[0]}")
         return types.SimpleNamespace(returncode=rc, stdout=out, stderr="" if rc == 0 else out)
 
 
@@ -79,8 +91,8 @@ def state(status, exit_code=0, started=T0, finished=None):
             finished.isoformat().replace("+00:00", "Z")}
 
 
-def transport(fake, now=None, uid="1000:1000"):
-    return DockerTransport(run=fake, now=now or (lambda: T0 + timedelta(seconds=60)), uid=uid)
+def transport(fake, now=None):
+    return DockerTransport(run=fake, now=now or (lambda: T0 + timedelta(seconds=60)))
 
 
 def test_parse_time_handles_nanoseconds_and_the_zero_sentinel():
@@ -101,9 +113,8 @@ def test_volume_and_container_names_are_keyed_on_the_pins_and_the_run(tmp_path):
 
 
 def test_run_args_carry_every_hardening_flag_and_the_mounts(tmp_path):
-    jd, art = tmp_path / "job dir", tmp_path / "job dir" / "n" / "artifacts"
-    args = run_args(local_doc(), jd, art, "n", "runkey12", "/usr/local/cargo",
-                    "/usr/local/rustup")
+    jd = tmp_path / "job dir"
+    args = run_args(local_doc(), jd, "n", "runkey12", "/usr/local/cargo", "/usr/local/rustup")
     assert args[:4] == ["docker", "run", "-d", "--name"] and args[4] == "n"
     joined = " ".join(args)
     for flag in ("--network none", "--cap-drop ALL", "--security-opt no-new-privileges",
@@ -115,27 +126,22 @@ def test_run_args_carry_every_hardening_flag_and_the_mounts(tmp_path):
         assert flag in joined, flag
     app, cargo = volume_names("knapsack")
     assert f"{app}:/app" in args and f"{cargo}:/usr/local/cargo" in args
-    assert f"{jd}:/work:ro" in args and f"{art}:/artifacts" in args
+    assert f"{jd}:/work:ro" in args
+    # mutation: bind-mounting /artifacts from the host (see test_deploy_runs_the_container...)
+    assert not any(a.endswith(":/artifacts") for a in args)
     assert args[-3:] == [dev_image("knapsack"), "bash", "/work/job.sh"]
     assert "--gpus" not in args
-    gpu = run_args(local_doc(gpu=True), jd, art, "n", "k", "/c", "/r")
+    gpu = run_args(local_doc(gpu=True), jd, "n", "k", "/c", "/r")
     assert "--gpus" in gpu and gpu[gpu.index("--gpus") + 1] == "all"
-    # The image keeps cargo and rustup under /root (mode 700), so the job runs as root and the
-    # transport hands the artifacts back to the user afterwards (test_status_chowns...).
+    # The image keeps cargo and rustup under /root (mode 700), so the job runs as root; the
+    # artifacts are copied out of the stopped container, never written to the host by it.
     assert "--user" not in args and "HOME=/tmp" not in joined
 
 
 def test_run_args_keeps_a_path_with_a_space_as_one_argument(tmp_path):
     jd = tmp_path / "my runs" / "j"
-    args = run_args(local_doc(), jd, jd / "n" / "artifacts", "n", "k", "/c", "/r")
+    args = run_args(local_doc(), jd, "n", "k", "/c", "/r")
     assert args[args.index("-v") + 1] == f"{jd}:/work:ro"
-
-
-def test_host_uid_is_uid_gid_on_posix_and_none_on_windows():
-    if os.name == "nt":
-        assert host_uid() is None
-    else:
-        assert host_uid() == f"{os.getuid()}:{os.getgid()}"
 
 
 def test_deploy_runs_the_container_named_from_the_job_dir_and_returns_the_name(tmp_path):
@@ -148,14 +154,10 @@ def test_deploy_runs_the_container_named_from_the_job_dir_and_returns_the_name(t
     assert name == container_name(run_dir, "3", "ab12" * 4)
     run_cmd = [c for c in fake.calls if c[1] == "run"][0]
     assert run_cmd[run_cmd.index("--name") + 1] == name
-    # mutation: the artifacts dir left for Docker to create is root-owned on Linux
-    assert (jd / name / "artifacts").is_dir()
-    if os.name != "nt":
-        # mutation: 775 is not writable by root inside the container, because --cap-drop ALL
-        # removes CAP_DAC_OVERRIDE and root then obeys the mode like any other "other" user
-        # (live run 1, 2026-09-23: PermissionError on /artifacts/build.log)
-        assert stat.S_IMODE((jd / name / "artifacts").stat().st_mode) == 0o777
-    assert f"{jd / name / 'artifacts'}:/artifacts" in run_cmd
+    # mutation: a host bind mount for /artifacts lets root inside the container plant a
+    # setuid-root file on the host (review, 2026-09-23); the files are copied out instead
+    assert not any(v.endswith(":/artifacts") for v in run_cmd)
+    assert not (jd / name).exists()
     assert "-e" in run_cmd and "CARGO_HOME=/usr/local/cargo" in run_cmd
     # mutation: a stale container with this name makes `docker run` fail with a name clash
     assert ["rm", "-f", name] in [c[1:] for c in fake.calls]
@@ -195,26 +197,6 @@ def test_status_maps_docker_state_onto_the_c3_vocabulary(st, expect):
     assert not any(c[1] == "kill" for c in fake.calls)
 
 
-@pytest.mark.parametrize("st", [
-    state("exited", 0, finished=T0 + timedelta(seconds=30)),
-    state("exited", 1, finished=T0 + timedelta(seconds=30)),
-    state("exited", 137, finished=T0 + timedelta(seconds=1800)),
-])
-def test_status_hands_the_artifacts_to_the_host_user_once_the_job_is_terminal(st):
-    fake = FakeDocker(inspect=st)
-    transport(fake, uid="1000:1000").status("n")
-    chown = [c for c in fake.calls if c[1] == "run"]
-    # mutation: root-owned results under runs/ that the user cannot delete
-    assert len(chown) == 1 and chown[0][1:] == ["run", "--rm", "-v", "/host/art:/artifacts",
-                                                  "img:1", "chown", "-R", "1000:1000",
-                                                  "/artifacts"]
-    # nothing to hand over while it runs, and nothing on Windows (no uid)
-    assert not any(c[1] == "run" for c in FakeDocker(inspect=state("running")).calls)
-    fake2 = FakeDocker(inspect=st)
-    transport(fake2, uid=None).status("n")
-    assert not any(c[1] == "run" for c in fake2.calls)
-
-
 def test_status_kills_a_running_container_past_its_limit_and_reports_timed_out():
     fake = FakeDocker(inspect=state("running"))
     t = transport(fake, now=lambda: T0 + timedelta(seconds=1800))
@@ -237,14 +219,21 @@ def test_cancel_removes_the_container_and_tolerates_a_missing_one():
     transport(FakeDocker(inspect=None)).cancel("n")  # no raise
 
 
-def test_fetch_reports_the_file_on_the_bind_mount_and_runs_nothing(tmp_path):
-    fake = FakeDocker()
+def test_fetch_copies_the_named_file_out_of_the_container_and_reports_absence(tmp_path):
+    fake = FakeDocker(files={"results.json": "{}"})
     dest = tmp_path / "n" / "artifacts" / "results.json"
-    assert transport(fake).fetch("n", "results.json", dest) is False
-    dest.parent.mkdir(parents=True)
-    dest.write_text("{}")
     assert transport(fake).fetch("n", "results.json", dest) is True
-    assert fake.calls == []
+    assert dest.read_text() == "{}"
+    assert ["cp", "n:/artifacts/results.json", str(dest)] in [c[1:] for c in fake.calls]
+    # mutation: returning True for a file the job never wrote makes _collect read a stale path
+    assert transport(fake).fetch("n", "build.log", tmp_path / "n" / "artifacts" / "build.log") is False
+
+
+def test_fetch_tells_a_missing_file_from_a_dead_daemon(tmp_path):
+    # mutation: every cp failure reported as "no results" resubmits the job (twice, then
+    # BenchUnavailable "failed twice") when Docker itself is what is broken
+    with pytest.raises(C3CommandError):
+        transport(FakeDocker(daemon_down=True)).fetch("n", "results.json", tmp_path / "r.json")
 
 
 def test_whoami_and_balance_are_not_part_of_the_local_path():

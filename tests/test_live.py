@@ -82,7 +82,7 @@ def test_local_knapsack_job(tmp_path):
     from talos.c3_bench import C3Bench
     from talos.c3_jobdir import LocalSettings
     from talos.challenges import CHALLENGES
-    from talos.local_transport import DockerTransport, host_uid, prepare
+    from talos.local_transport import DockerTransport, prepare
     ch = os.environ.get("TALOS_LIVE_CHALLENGE", "knapsack")
     info = mainnet.fetch_challenge_info(ch)
     name, _algorithm_id, _adoption = mainnet.top_algorithm(ch)
@@ -92,8 +92,8 @@ def test_local_knapsack_job(tmp_path):
     gpu = prepare(ch)
     t_prep = time.monotonic() - t0
     local = LocalSettings(cpus=os.cpu_count() or 1, memory_gib=8)
-    b = C3Bench(tmp_path, transport=DockerTransport(uid=host_uid()), local=local,
-                usd_per_hour=0.0, poll_s=5.0)
+    b = C3Bench(tmp_path, transport=DockerTransport(), local=local, usd_per_hour=0.0,
+                poll_s=5.0)
     t1 = time.monotonic()
     r = b.evaluate(EvalRequest(ch, files, tr, ho, info.max_fuel, None, CHALLENGES[ch].beat))
     t_job = time.monotonic() - t1
@@ -103,6 +103,7 @@ def test_local_knapsack_job(tmp_path):
     assert r.holdout_reason == "forced" and b.cost_mark() == 0.0
     art = next((tmp_path / "local" / "adhoc").glob("talos-*/artifacts/results.json"))
     if os.name != "nt":
+        # copied out by this process, so owned by this user, never by root
         assert art.stat().st_uid == os.getuid(), "artifacts must belong to the user"
     print({"gpu": gpu, "prepare_s": round(t_prep), "job_s": round(t_job),
            "training": [x.to_dict() for x in r.training]})
