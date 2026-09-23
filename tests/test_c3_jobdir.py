@@ -4,6 +4,7 @@ import stat
 
 from talos import c3_jobdir
 from talos.bench import EvalRequest
+from talos.c3_jobdir import LocalSettings
 from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_hardware_class, c3_image,
                               c3_profile, c3_workers, dev_image)
 from talos.types import NonceResult, NonceSet
@@ -173,3 +174,43 @@ def test_request_hash_changes_with_the_hyperparameters():
     other_hp.hyperparameters = {"t": {"x": 2}}
     hashes = {c3_jobdir.request_hash(r) for r in (req(), with_hp, other_hp)}
     assert len(hashes) == 3
+
+
+def test_local_flavour_writes_local_json_and_a_job_sh_without_a_download(tmp_path):
+    d = c3_jobdir.write_job_dir(tmp_path / "job", req(n=4), "3", local=LocalSettings(8, 12))
+    names = sorted(p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file())
+    # mutation: shipping .c3 on the local path, or forgetting local.json
+    assert ".c3" not in names and "local.json" in names and "payload.json" in names
+    sh = (d / "job.sh").read_text()
+    # mutation: the C3 job.sh downloads the monorepo; locally it is on the /app volume
+    assert "curl" not in sh and "codeload" not in sh and "python3 -m talos.c3_job" in sh
+    assert b"\r" not in (d / "job.sh").read_bytes()
+    if os.name != "nt":
+        assert stat.S_IMODE((d / "job.sh").stat().st_mode) & stat.S_IXUSR
+    doc = json.loads((d / "local.json").read_text())
+    assert doc["challenge"] == "knapsack" and doc["image"] == dev_image("knapsack")
+    assert doc["cpus"] == 8 and doc["memory_gib"] == 12 and doc["gpu"] is False
+    # mutation: workers left at C3's 4 on a 8-cpu container idles half the machine
+    assert doc["workers"] == 8
+    assert json.loads((d / "payload.json").read_text())["workers"] == 8
+    # 8 nonces, 8 workers: 1200 + ceil(8*600/8) = 1800 s
+    assert doc["time_limit_s"] == 1800
+    assert doc["request_hash"] == c3_jobdir.request_hash(req(n=4))
+    # mutation: the rand hash in local.json would land in the container name and `docker ps`
+    assert HASH not in (d / "local.json").read_text() and HASH not in sh
+
+
+def test_local_flavour_gpu_challenge_runs_one_worker(tmp_path):
+    d = c3_jobdir.write_job_dir(tmp_path / "job", req(challenge="hypergraph"), "1",
+                                local=LocalSettings(8, 12))
+    doc = json.loads((d / "local.json").read_text())
+    assert doc["gpu"] is True and doc["workers"] == 1
+
+
+def test_request_hash_is_the_same_for_both_flavours():
+    # mutation: hashing the workers count makes a local request never match a C3 one, and worse,
+    # never match itself after a setup that changed the CPU count
+    r = req()
+    assert c3_jobdir.request_hash(r) == c3_jobdir.request_hash(r)
+    assert c3_jobdir.payload(r, workers=8)["workers"] == 8
+    assert c3_jobdir.payload(r)["workers"] == 4
