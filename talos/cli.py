@@ -4,6 +4,7 @@ summary line: outcome, best delta, LLM and compute spend and the wall-clock time
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -122,8 +123,11 @@ def image_available(challenge: str, fetch=None) -> bool:
                     return resp.status, resp.read().decode("utf-8", "replace")
             except urllib.error.HTTPError as e:
                 return e.code, ""
-            except urllib.error.URLError:
-                return 0, ""  # unreachable: reported as "not available", the message says so
+            except (OSError, http.client.HTTPException):
+                # URLError (an OSError) wraps connect failures only; a body read timeout, a
+                # reset connection or a truncated response arrive bare. All of them are
+                # unreachable: reported as "not available", the message says so
+                return 0, ""
     status, body = fetch(f"https://ghcr.io/token?scope=repository:{name}:pull", {})
     if status != 200:
         return False

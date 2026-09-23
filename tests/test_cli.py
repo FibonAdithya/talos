@@ -829,6 +829,31 @@ def test_image_available_is_false_when_ghcr_is_unreachable():
     assert cli.image_available("knapsack", fetch=token_then_dead) is False
 
 
+def test_image_available_is_false_when_the_socket_fails_outside_urlerror(monkeypatch):
+    # urllib wraps only connect failures in URLError: a body read timeout is a bare
+    # TimeoutError and a dropped connection a ConnectionResetError. Either escaping the check
+    # tracebacks out of `talos run` before the run's outcome is recorded, so `talos status`
+    # lists it as live for ever
+    class Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            raise TimeoutError("timed out")
+    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda req, timeout=None: Resp())
+    assert cli.image_available("knapsack") is False
+
+    def reset(req, timeout=None):
+        raise ConnectionResetError(104, "Connection reset by peer")
+    monkeypatch.setattr(cli.urllib.request, "urlopen", reset)
+    assert cli.image_available("knapsack") is False
+
+
 def test_run_c3_refuses_a_missing_image_before_the_baseline(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
