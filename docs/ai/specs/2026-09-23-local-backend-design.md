@@ -5,6 +5,15 @@ Date: 2026-09-23. Branch: `local-backend`, cut from `ghcr-images` (two commits a
 dev image that `talos/challenges.py::dev_image` names, and `main` still points C3 at the
 Docker Hub mirror.
 
+> **Retraction, 2026-09-23 (after implementation).** This spec's claim that builds are
+> incremental after the first one (§2 "Speed", §4.3) is wrong for the 0.0.7 dev images.
+> MEASURED: a job build with the cargo cache warm took 14m44s, against 12m0s for the clean
+> warm build. The image's `build_so` runs an LLVM fuel-instrumentation pass (`opt`, `llc`,
+> `clang`) over every dependency's IR, standard library included, on every build; cargo
+> caches only the Rust compilation in front of it. The volumes still save the clone and the
+> dependency compile, and make `--network none` possible. See
+> `docs/compute-backends.md#local-timings` for the measured numbers.
+
 This spec adds a third compute backend, `local`, chosen at `talos setup` beside `modal`
 and `c3`. It compiles and scores candidates in a Docker container on the user's own
 machine, so a user is not forced to hold a Modal or C3 account to run Talos.

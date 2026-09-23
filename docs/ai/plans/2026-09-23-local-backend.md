@@ -4,7 +4,7 @@
 
 **Goal:** A third compute backend, `local`, that compiles and scores candidates in a Docker container on the user's own machine, chosen at `talos setup` beside `modal` and `c3`.
 
-**Architecture:** The local backend is the existing `C3Bench` driven through a new `DockerTransport` that satisfies the C3 transport protocol (deploy, status, cancel, fetch). Each evaluate call writes the C3 job directory in a `local` flavour, runs the challenge's GHCR dev image detached with that directory bind-mounted, polls the container like a C3 job, and reads `results.json` off the mount. Two named Docker volumes per challenge, keyed by the monorepo and image pins, hold the checkout and the cargo registry so builds after the first are incremental and the job container runs with networking off.
+**Architecture:** The local backend is the existing `C3Bench` driven through a new `DockerTransport` that satisfies the C3 transport protocol (deploy, status, cancel, fetch). Each evaluate call writes the C3 job directory in a `local` flavour, runs the challenge's GHCR dev image detached with that directory bind-mounted, polls the container like a C3 job, and reads `results.json` off the mount. Two named Docker volumes per challenge, keyed by the monorepo and image pins, hold the checkout and the cargo registry so the job container runs with networking off. (Retracted after measurement: they do not make builds incremental; see the spike results and the spec's retraction note.)
 
 **Tech Stack:** Python 3.10+, the `docker` CLI over `subprocess`, pytest with injected runners (no test touches Docker), ruff.
 
