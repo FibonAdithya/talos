@@ -1,0 +1,71 @@
+# Reviews a pull request with a model and can never push.
+#
+# The job's token has pull-requests: write and nothing more. A confidently
+# wrong review must cost a comment, never a commit; L2.3 in the agentify
+# contract fails this file on any `contents: write`. Never switch the
+# trigger to pull_request_target: a fork PR would then run with a write
+# token and this repository's secrets.
+name: review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+# A second push supersedes the review of the first; don't pay for both.
+concurrency:
+  group: review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_AUTH_TOKEN }}
+          # Without this the action mints its own token through the Claude
+          # GitHub App. The job's own token has the pull-requests: write it
+          # needs; comments arrive from github-actions[bot].
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. The PR branch is checked out in the working
+            directory. Read AGENTS.md first: it is the project's router. Its
+            "Invariants" section lists what nothing in the test suite catches, its
+            "Source of truth, in order" section says which document wins when two
+            disagree, and its "What requires a human" section lists decisions you
+            must not make.
+
+            Prioritise, in order:
+            - A change that breaks an invariant named in AGENTS.md.
+            - Correctness bugs: wrong logic, silent type or shape errors, broken
+              seeding or reproducibility, off-by-one errors.
+            - A document that this diff has just made false. Decide which side is
+              wrong using the "Source of truth, in order" section. Flag the stale
+              claim; do not rewrite it.
+            - New behaviour with no test.
+
+            Do not flag style that `make check` already enforces. Do not propose
+            anything the "What requires a human" section reserves; name the section
+            and stop.
+
+            Be concise and specific. If the diff is clean, say so in one short
+            comment rather than manufacturing findings.
+
+            Use `gh pr comment` for top-level feedback.
+            Use `mcp__github_inline_comment__create_inline_comment` (with
+            `confirmed: true`) for issues tied to specific lines.
+            Only post GitHub comments; do not return review text as a message.

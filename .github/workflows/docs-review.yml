@@ -1,0 +1,75 @@
+# Reviews a pull request for documentation drift and can never push.
+#
+# Same shape and the same permission rule as review.yml: this job comments
+# and never commits, and it must never trigger on pull_request_target.
+name: docs-review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+# A second push supersedes the review of the first; don't pay for both.
+concurrency:
+  group: docs-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_AUTH_TOKEN }}
+          # Without this the action mints its own token through the Claude
+          # GitHub App. The job's own token has the pull-requests: write it
+          # needs; comments arrive from github-actions[bot].
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request for documentation drift only. Another workflow
+            reviews the code; do not duplicate it. The PR branch is checked out.
+
+            Read AGENTS.md first. It is the project's router: its "Source of truth,
+            in order" section names which document wins when two disagree, and its
+            "Invariants" section lists what nothing in the test suite catches.
+
+            Report, in this order:
+            - A claim in an authoritative document that this diff has just made
+              false. Use the "Source of truth, in order" section to decide which
+              side is wrong.
+            - Behaviour this diff changes with no matching doc update: a new or
+              renamed flag, a changed default, a renamed config key, a new entry
+              point.
+            - Drift touching an invariant named in AGENTS.md.
+            - Any newly added `file.md:123` style citation. This repo cites
+              documents by anchor and code by symbol, because line numbers rot
+              silently when text is inserted above them; the contract check (L1.5)
+              enforces this. Explain the rule rather than only naming the failure.
+
+            Do not:
+            - Rewrite documentation. Flag stale claims; the wording is a human's call.
+            - Comment on anything under docs/ai/. Those are dated, non-authoritative
+              snapshots and are not updated as the code changes.
+            - Flag style that `make check` already enforces.
+            - Propose anything the "What requires a human" section reserves.
+
+            Be concise and specific. If the documentation is consistent with the
+            diff, say so in one short comment rather than manufacturing findings.
+
+            Use `gh pr comment` for top-level feedback.
+            Use `mcp__github_inline_comment__create_inline_comment` (with
+            `confirmed: true`) for issues tied to specific lines.
+            Only post GitHub comments; do not return review text as a message.
