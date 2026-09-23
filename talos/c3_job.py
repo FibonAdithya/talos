@@ -80,6 +80,9 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
     log(f"[0s] challenge={challenge} files={sorted(payload['files'])} "
         f"workers={payload['workers']}")
     try:
+        # A persistent checkout (the local backend's /app volume) still holds the previous
+        # candidate; its files must not be compiled into this one. On C3 the dir never exists.
+        inside.unstage_algorithm(monorepo, challenge, inside.ALGO_NAME)
         inside.stage_algorithm(monorepo, challenge, payload["files"], inside.ALGO_NAME)
         log(f"[{int(clock() - t0)}s] build start")
         ok, build_out = inside.build(monorepo, challenge, inside.ALGO_NAME, run=run)

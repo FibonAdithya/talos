@@ -325,3 +325,18 @@ def test_the_serial_path_passes_the_hyperparameters_to_tig_runtime(tmp_path):
     runtime = [c for c in run.calls if c[0] == "tig-runtime"]
     # mutation: the serial branch not passing t[9] runs local and CPU jobs without the map
     assert runtime and all(c[c.index("--hyperparameters") + 1] == '{"x":1}' for c in runtime)
+
+
+def test_a_leftover_candidate_from_a_previous_job_is_removed_before_staging(tmp_path):
+    mono, work, art = setup(tmp_path)
+    left = mono / "tig-algorithms" / "src" / "knapsack" / "talos_cand"
+    left.mkdir()
+    (left / "extra.rs").write_text("fn stale() {}\n")
+    mod_rs = mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs"
+    mod_rs.write_text(mod_rs.read_text() + "pub mod talos_cand;\n")
+    c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(), monorepo=mono,
+                log=lambda *a: None)
+    # mutation: on a persistent /app volume the previous candidate's extra file would be
+    # compiled into this candidate
+    assert not (left / "extra.rs").exists() and (left / "mod.rs").exists()
+    assert mod_rs.read_text().count("pub mod talos_cand;") == 1
