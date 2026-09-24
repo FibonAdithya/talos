@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import shutil
 import stat
 from dataclasses import asdict, dataclass
@@ -22,6 +23,11 @@ LOCAL_BUILD_ALLOWANCE_S = 3600
 LOCAL_APP = "/app"  # where the local job container mounts the challenge's monorepo volume
 LOCAL_LOCK = f"{LOCAL_APP}/.talos-lock"  # held by every container that writes the volume
 TIME_CAP_S = 6 * 3600
+# The GPU capacity probe (`talos/c3_bench.py::C3Bench.select_gpu`): a job whose script is
+# `true`, on a stock image so the pull is seconds rather than the dev image's 13 GB, with a
+# walltime short enough that one the client never cancelled bills for minutes, not hours.
+PROBE_IMAGE = "ubuntu:24.04"
+PROBE_WALLTIME_S = 120
 JOB_MODULES = ("__init__", "inside", "scoring", "types", "challenges", "diagnostics", "c3_job")
 _PKG = Path(__file__).resolve().parent
 
@@ -44,22 +50,80 @@ def hhmmss(seconds: int) -> str:
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
-def job_settings(challenge: str, purpose: str, seconds: int) -> dict:
-    """The job's settings, named as C3's MCP `deploy` tool names them. `.c3` renders these same
-    values, so the two submission paths cannot disagree about hardware, image or time limit."""
+def job_settings(challenge: str, purpose: str, seconds: int, gpu: str | None = None) -> dict:
+    """The job's settings, named as C3's MCP `deploy` tool names them. `.c3` is rendered from
+    these values and the MCP path parses that same `.c3` back (`parse_c3`), so the two
+    submission paths cannot disagree about hardware, image or time limit. `gpu` is the C3
+    class the job was frozen to; required for a GPU challenge, ignored for a CPU one."""
     spec = CHALLENGES[challenge]
     return {"project": "talos", "job_name": f"talos-{challenge}-{purpose}", "script": "job.sh",
-            "hardware": c3_profile(spec), "walltime_seconds": seconds,
+            "hardware": c3_profile(spec, gpu), "walltime_seconds": seconds,
             "docker_image": c3_image(challenge),
             "docker_requires_accelerator": "cuda" if spec.is_gpu else "none"}
 
 
-def c3_config_text(challenge: str, purpose: str, seconds: int) -> str:
-    s = job_settings(challenge, purpose, seconds)
+def probe_settings(gpu_class: str) -> dict:
+    """A capacity probe on one GPU class: the same keys as `job_settings`, so either transport
+    deploys it, but no challenge behind it."""
+    return {"project": "talos", "job_name": f"talos-probe-{gpu_class}", "script": "job.sh",
+            "hardware": gpu_class, "walltime_seconds": PROBE_WALLTIME_S,
+            "docker_image": PROBE_IMAGE, "docker_requires_accelerator": "cuda"}
+
+
+def render_c3(s: dict) -> str:
     return (f"project: {s['project']}\njob_name: {s['job_name']}\nscript: {s['script']}\n"
             f"hardware: {s['hardware']}\ntime: \"{hhmmss(s['walltime_seconds'])}\"\n"
             f"docker:\n  image: {s['docker_image']}\n"
             f"  requires_accelerator: {s['docker_requires_accelerator']}\n")
+
+
+_C3_LINES = {"project": r"^project:\s*(\S+)\s*$", "job_name": r"^job_name:\s*(\S+)\s*$",
+             "script": r"^script:\s*(\S+)\s*$", "hardware": r"^hardware:\s*(\S+)\s*$",
+             "docker_image": r"^\s+image:\s*(\S+)\s*$",
+             "docker_requires_accelerator": r"^\s+requires_accelerator:\s*(\S+)\s*$"}
+
+
+def parse_c3(text: str) -> dict:
+    """The inverse of `render_c3`: the settings dict back out of a `.c3` this module wrote. The
+    MCP transport deploys from it, so a job dir carries its settings once, in the file the CLI
+    reads natively. Raises ValueError on anything it did not write. AUDIT: the purpose first
+    came from the directory name, which the deploy test's own job dir ("job", purpose "3")
+    disproves; now nothing is recomputed."""
+    out = {}
+    for key, pattern in _C3_LINES.items():
+        m = re.search(pattern, text, re.M)
+        if not m:
+            raise ValueError(f".c3 has no usable {key} line")
+        out[key] = m.group(1)
+    t = re.search(r'^time:\s*"(\d+):(\d\d):(\d\d)"\s*$', text, re.M)
+    if not t:
+        raise ValueError(".c3 has no usable time: line")
+    h, mi, sec = (int(x) for x in t.groups())
+    out["walltime_seconds"] = h * 3600 + mi * 60 + sec
+    return out
+
+
+def c3_config_text(challenge: str, purpose: str, seconds: int, gpu: str | None = None) -> str:
+    return render_c3(job_settings(challenge, purpose, seconds, gpu))
+
+
+def _write_job_sh(job_dir: Path, text: str) -> None:
+    sh = job_dir / "job.sh"
+    sh.write_text(text, encoding="utf-8", newline="\n")
+    sh.chmod(sh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def write_probe_dir(job_dir: Path, gpu_class: str) -> Path:
+    """The deploy directory for one capacity probe: a `.c3` and a `job.sh` that exits at once.
+    No payload and no modules, so nothing of a job (least of all a rand_hash) is uploaded."""
+    job_dir = Path(job_dir)
+    if job_dir.exists():
+        shutil.rmtree(job_dir)
+    job_dir.mkdir(parents=True)
+    (job_dir / ".c3").write_text(render_c3(probe_settings(gpu_class)), encoding="utf-8",
+                                 newline="\n")
+    _write_job_sh(job_dir, "#!/bin/bash\ntrue\n")
+    return job_dir
 
 
 def job_sh_text(monorepo_ref: str) -> str:
@@ -123,10 +187,11 @@ def request_hash(request: EvalRequest) -> str:
 
 
 def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str,
-                  local: LocalSettings | None = None) -> Path:
+                  local: LocalSettings | None = None, gpu: str | None = None) -> Path:
     """Writes the deploy directory, wiping `job_dir` first if it already exists. With `local`
     it is the local flavour: local.json instead of .c3, a job.sh that does not download the
-    monorepo, and the local worker count in the payload."""
+    monorepo, and the local worker count in the payload. `gpu` is the C3 class a GPU job was
+    frozen to (see `talos/challenges.py::c3_profile`); the local flavour ignores it."""
     job_dir = Path(job_dir)
     if job_dir.exists():
         shutil.rmtree(job_dir)
@@ -136,7 +201,7 @@ def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str,
     if local is None:
         workers = c3_workers(spec)
         seconds = time_limit_s(max(nonces, 1), workers)
-        (job_dir / ".c3").write_text(c3_config_text(request.challenge, purpose, seconds),
+        (job_dir / ".c3").write_text(c3_config_text(request.challenge, purpose, seconds, gpu),
                                      encoding="utf-8", newline="\n")
         sh_text = job_sh_text(MONOREPO_REF)
     else:
@@ -146,9 +211,7 @@ def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str,
             json.dumps(local_settings_doc(request, local, seconds), indent=1),
             encoding="utf-8", newline="\n")
         sh_text = local_job_sh_text()
-    sh = job_dir / "job.sh"
-    sh.write_text(sh_text, encoding="utf-8", newline="\n")
-    sh.chmod(sh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    _write_job_sh(job_dir, sh_text)
     (job_dir / "payload.json").write_text(json.dumps(payload(request, workers), indent=1),
                                           encoding="utf-8", newline="\n")
     for mod in JOB_MODULES:

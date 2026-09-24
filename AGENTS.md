@@ -60,7 +60,15 @@ progress.
    hardware or fuel is a different key, never a hit. The local backend's class
    is `talos/challenges.py::local_hardware_class`, which carries the host name
    and the container's CPU and memory limits, so changing either at
-   `talos setup` invalidates every local baseline.
+   `talos setup` invalidates every local baseline. On Modal and C3 a GPU
+   challenge's GPU is chosen once, by a capacity probe at job start
+   (`talos/cli.py::freeze_gpu`), frozen in `state.json`
+   (`talos/state.py::JobState`) and handed back on every resume; the fallback
+   order is `talos/challenges.py::MODAL_GPUS` and
+   `talos/challenges.py::C3_GPU_CLASSES`. A fallback per call, such as Modal's
+   own `gpu=[...]` list, would score candidates on a GPU the baseline never ran
+   on, which is why `modal_app/talos_bench.py::register` pins each function to
+   one GPU.
    Both sides also run with identical hyperparameters: the per-track map is
    frozen into `job.json` (`talos/state.py::JobSpec`) together with the
    algorithm it belongs to, every request takes it from there

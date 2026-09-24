@@ -272,3 +272,11 @@ def test_agent_env_passes_the_c3_api_key_through(monkeypatch):
     # mutation: dropping it from the allowlist fails every agentic `talos compile` on C3 for a
     # user with no `c3 login` session; the allowlist stays exact, so other C3_ vars stay out
     assert env["C3_API_KEY"] == "c3_key_1" and "C3_AUTH_TOKEN" not in env
+
+
+def test_agent_env_passes_the_frozen_gpu_through(monkeypatch):
+    from talos.agentic import _agent_env
+    monkeypatch.setenv("TALOS_GPU", "A100-80GB")
+    # mutation: dropping TALOS_GPU from the allowlist makes every sandbox `talos compile`
+    # probe for a GPU of its own instead of using the job's
+    assert _agent_env()["TALOS_GPU"] == "A100-80GB"

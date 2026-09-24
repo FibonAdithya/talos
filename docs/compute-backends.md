@@ -20,6 +20,42 @@ Docker container on this machine through `talos/local_transport.py::DockerTransp
 satisfies the C3 transport protocol (deploy, status, cancel, fetch). The container's name is
 the job id. See [Local backend](#local-backend).
 
+## GPU fallback
+
+A GPU challenge runs on the first GPU in a preference list that has capacity when the job
+starts, and stays on it for the whole job. The lists are `talos/challenges.py::MODAL_GPUS`
+(`L40S`, `A100-80GB`, `H100`) and `talos/challenges.py::C3_GPU_CLASSES` (`l40`, `a100`,
+`h100`): only GPUs with at least the L40S's 48 GB of VRAM, cheapest first, because a smaller
+card could OOM a candidate the baseline fit. C3's `l40` class spans both the L40 and the L40S.
+
+The choice is made once and frozen, never per call, because the baseline and every candidate
+must score on the same hardware class (AGENTS.md invariant 1) and the class is in the baseline
+cache key. Modal's own `gpu=["L40S", "A100-80GB"]` fallback list is deliberately not used: it
+picks a GPU per container. Instead `talos setup` deploys one `compile_<challenge>_<gpu>` and
+`score_nonce_<challenge>_<gpu>` pair per GPU, plus one `probe_<gpu>` function on a stock image,
+and `talos/cli.py::freeze_gpu` fixes the GPU before the baseline:
+
+| Backend | Probe | "No capacity" means | Cost of one probe |
+|---|---|---|---|
+| Modal | `probe_<gpu>` is spawned; the call must return within `ModalBench.probe_window_s` (120 s). A call still queued then is cancelled, or it would run and bill whenever that GPU freed up. | Every probe timed out. | A few seconds of the GPU on a slim image. ESTIMATE (unverified live). |
+| C3 | A two-minute job whose script is `true`, on `ubuntu:24.04`, written by `talos/c3_jobdir.py::write_probe_dir` to `runs/<job_id>/c3/probe-<class>/`. It must leave the queue within the capacity window (`C3Bench.pending_timeout_s`, 30 min); once RUNNING it is cancelled. A job still queued at the window's end is cancelled and the next class tried. | Every class stayed queued for the whole window, so up to 90 minutes before the run pauses. | Under a minute of the class, plus its queue time. ESTIMATE (unverified live). |
+
+The chosen GPU is `gpu` in `state.json`, a `gpu_selected` event in the timeline, and `TALOS_GPU`
+in the agentic sandbox's environment so `talos compile` there builds on the same GPU. A resume
+hands the saved choice back and probes nothing. A job that was created before this choice
+existed (a measured baseline and no `gpu` field) is frozen to the first option, which is the
+only GPU there was. If the frozen GPU runs out of capacity later, the run pauses as it does for
+any other capacity shortage and resumes on the same GPU; it never switches. When no GPU answers,
+the run is paused with the list of GPUs tried, and `talos run --resume` tries again.
+
+CPU challenges and the local backend have one hardware class and no probe. The Modal app must be
+redeployed (`talos setup`) after upgrading to a version with this table: the old deploy has no
+per-GPU functions, and a run against it stops with "Run `talos setup` to deploy".
+
+Neither probe has been run against a live account as of 2026-09-24. The C3 probe's
+`requires_accelerator: cuda` on a non-CUDA image is the one setting the live test should
+confirm first.
+
 ## C3 job directories
 
 On the C3 backend, each iteration gets `runs/<job_id>/c3/<n>/` in the

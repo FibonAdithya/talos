@@ -580,3 +580,98 @@ def test_messages_name_the_transport_label_when_it_has_one(tmp_path):
         tbench(tmp_path, t).evaluate(req())
     # mutation: a local failure that tells the user to check C3
     assert "local Docker job failed twice" in str(ei.value) and "C3" not in str(ei.value)
+
+
+# ── GPU fallback ──────────────────────────────────────────────────────
+class ProbeTransport(FakeTransport):
+    """Statuses per deployed job, in deploy order; a job's list is replayed like FakeTransport's."""
+
+    def __init__(self, per_job: list[list[str]], results=None):
+        super().__init__(["PENDING"], results)
+        self.per_job = [list(s) for s in per_job]
+        self.job_ids = [f"job_{i + 1}" for i in range(len(per_job) + 1)]
+        self.dirs = []
+
+    def deploy(self, job_dir):
+        job_dir = Path(job_dir)
+        self.dirs.append(job_dir)
+        self.statuses = self.per_job.pop(0) if self.per_job else ["PENDING", "RUNNING", "SUCCEEDED"]
+        return super().deploy(job_dir)
+
+
+def _hw(job_dir):
+    from talos.c3_jobdir import parse_c3
+    return parse_c3((Path(job_dir) / ".c3").read_text(encoding="utf-8"))["hardware"]
+
+
+def test_select_gpu_probes_each_class_in_turn_until_one_leaves_the_queue(tmp_path):
+    t = ProbeTransport([["PENDING"], ["SCHEDULING", "RUNNING"]])
+    b = tbench(tmp_path, t)
+    assert b.select_gpu("hypergraph") == "a100"
+    assert [_hw(d) for d in t.dirs] == ["l40", "a100"]
+    # mutation: not cancelling the stuck probe leaves it billing when an L40 frees up; not
+    # cancelling the running one bills its whole walltime
+    assert ("cancel", "job_1") in t.calls and ("cancel", "job_2") in t.calls
+    assert all(d.name.startswith("probe-") for d in t.dirs)
+    # mutation: the chosen class must reach the real job's .c3, or invariant 1 breaks
+    t.results = results_doc()
+    b.evaluate(EvalRequest("hypergraph", {"mod.rs": "x"}, [NonceSet("t", HASH, 0, 2)],
+                           [NonceSet("t", HASH, 1_000_000, 2)], 7, None,
+                           CHALLENGES["hypergraph"].beat))
+    assert _hw(t.dirs[-1]) == "a100"
+    from talos.c3_bench import GBP_PER_HOUR, USD_PER_GBP
+    assert b.cost_mark() == pytest.approx(20 / 3600 * GBP_PER_HOUR["a100"] * USD_PER_GBP)
+
+
+def test_select_gpu_reports_all_classes_unavailable(tmp_path):
+    t = ProbeTransport([["PENDING"], ["PENDING"], ["SCHEDULING"]])
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).select_gpu("hypergraph")
+    assert [_hw(d) for d in t.dirs] == ["l40", "a100", "h100"]
+    assert [c for c in t.calls if c[0] == "cancel"] == [("cancel", "job_1"), ("cancel", "job_2"),
+                                                        ("cancel", "job_3")]
+    assert "l40" in str(ei.value) and "h100" in str(ei.value) and "1800" in str(ei.value)
+
+
+def test_select_gpu_treats_a_probe_that_already_finished_as_capacity(tmp_path):
+    # a 20 s poll can miss RUNNING on a job whose script is `true`
+    t = ProbeTransport([["PENDING", "SUCCEEDED"]])
+    assert tbench(tmp_path, t).select_gpu("hypergraph") == "l40"
+    assert ("cancel", "job_1") not in t.calls
+
+
+def test_select_gpu_honours_a_frozen_choice_and_skips_cpu_and_local(tmp_path):
+    t = ProbeTransport([])
+    b = tbench(tmp_path, t)
+    assert b.select_gpu("hypergraph", chosen="h100") == "h100" and t.dirs == []
+    with pytest.raises(ValueError):
+        b.select_gpu("hypergraph", chosen="L40S")
+    assert tbench(tmp_path, ProbeTransport([])).select_gpu("knapsack") is None
+    local = C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
+                    local=LocalSettings(4, 8), usd_per_hour=0.0)
+    # mutation: probing on the local backend submits a C3-shaped job to Docker
+    assert local.select_gpu("hypergraph") is None and t.dirs == []
+
+
+def test_select_gpu_stop_request_cancels_the_probe(tmp_path):
+    t = ProbeTransport([["PENDING"]])
+    b = tbench(tmp_path, t)
+    b.request_stop()
+    with pytest.raises(BenchCancelled):
+        b.select_gpu("hypergraph")
+    assert ("cancel", "job_1") in t.calls
+
+
+def test_a_probe_never_touches_the_pending_record(tmp_path):
+    # a resumed pre-change job can hold a real pending job while it is being frozen; a probe
+    # that times out (or is stopped) must not erase the record that reattaches to it
+    keep = {"purpose": "baseline", "job_id": "job_real", "request_hash": "x", "job_dir": "d"}
+    pending = PendingJobStore.memory()
+    pending.set(dict(keep))
+    t = ProbeTransport([["PENDING"], ["RUNNING"]])
+    clock = Clock()
+    b = C3Bench(tmp_path, pending=pending, run=_no_cli, transport=t, clock=clock,
+                sleep=lambda s: setattr(clock, "t", clock.t + s), poll_s=20.0,
+                pending_timeout_s=1800)
+    assert b.select_gpu("hypergraph") == "a100"
+    assert pending.get() == keep

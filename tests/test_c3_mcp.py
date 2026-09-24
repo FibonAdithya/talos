@@ -272,7 +272,7 @@ def test_deploy_sends_gpu_hardware_and_accelerator_for_a_gpu_challenge(tmp_path)
     from tests.test_c3_jobdir import req as jobdir_req
 
     c = FakeClient({"deploy": {"job_id": "job_6"}})
-    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3")
+    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", gpu="l40")
     assert McpTransport("k", client=c).deploy(d) == "job_6"
     _name, args = c.calls[0]
     # mutation: "docker_requires_accelerator": "none" forced in the deploy args
@@ -541,3 +541,28 @@ def test_urllib_post_does_not_follow_a_redirect_to_a_second_host():
         second.server_close()
         second_thread.join(timeout=5)
     assert second_hits == []
+
+
+def test_deploy_sends_the_settings_the_c3_file_names_including_the_frozen_gpu(tmp_path):
+    from tests.test_c3_jobdir import req as jobdir_req
+    c = FakeClient({"deploy": {"job_id": "job_8"}})
+    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", gpu="h100")
+    assert McpTransport("k", client=c).deploy(d) == "job_8"
+    _name, args = c.calls[0]
+    # mutation: recomputing the settings from the challenge (rather than reading .c3) sends
+    # the CLI path and the MCP path to different hardware for the same job dir
+    assert args["hardware"] == "h100" and args["docker_requires_accelerator"] == "cuda"
+
+
+def test_deploy_uploads_a_probe_dir_with_its_own_settings(tmp_path):
+    from talos.c3_jobdir import probe_settings, write_probe_dir
+    c = FakeClient({"deploy": {"job_id": "job_p"}})
+    d = write_probe_dir(tmp_path / "probe", "a100")
+    assert McpTransport("k", client=c).deploy(d) == "job_p"
+    _name, args = c.calls[0]
+    files = {f["path"]: f for f in args["files"]}
+    # mutation: requiring payload.json makes the probe undeployable over MCP, so a keyed
+    # Windows user gets no fallback at all
+    assert list(files) == ["job.sh"] and files["job.sh"]["executable"] is True
+    for k, v in probe_settings("a100").items():
+        assert args[k] == v

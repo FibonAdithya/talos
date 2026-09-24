@@ -154,8 +154,9 @@ _AGENT_ENV_ALLOWLIST = frozenset({
     "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
     "CLAUDE_CONFIG_DIR", "CODEX_HOME",
-    # the sandbox runs `talos compile`, which has no talos.config.json to read the backend from
-    "TALOS_BACKEND",
+    # the sandbox runs `talos compile`, which has no talos.config.json to read the backend from,
+    # and no state.json to read the GPU the job was frozen to
+    "TALOS_BACKEND", "TALOS_GPU",
     # ...nor .talos/secrets.json to read a C3 API key from. The key is as reachable as the Modal
     # token in ~/.modal.toml or a `c3 login` session under HOME: claude-cli's permissions let the
     # agent run `talos compile` and read only the worktree; opt-in codex can read either.

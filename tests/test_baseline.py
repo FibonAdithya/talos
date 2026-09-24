@@ -193,7 +193,7 @@ def test_hardware_class_separates_cpu_memory_and_gpu():
     assert hardware_class(knapsack) == f"cpu{knapsack.cpu}-mem{knapsack.memory_mib}"
     bigger = dataclasses.replace(knapsack, memory_mib=knapsack.memory_mib * 2)
     assert hardware_class(bigger) != hardware_class(knapsack)
-    assert hardware_class(CHALLENGES["hypergraph"]) == "gpu-L40S"
+    assert hardware_class(CHALLENGES["hypergraph"], "L40S") == "gpu-L40S"
 
 
 def test_host_slug_is_stable_and_never_empty():
