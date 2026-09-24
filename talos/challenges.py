@@ -80,14 +80,24 @@ def gpu_slug(gpu: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", gpu.lower()).strip("_")
 
 
+def modal_workers(spec: ChallengeSpec) -> int:
+    """Nonces scored at once inside one Modal container, and so the size of one `score_batch`
+    call: every core of a CPU container, one on a GPU (the nonces would serialise on the
+    device and the batch would outlive the function timeout)."""
+    return 1 if spec.is_gpu else spec.cpu
+
+
 def hardware_class(spec: ChallengeSpec, gpu: str | None = None) -> str:
     """Part of the baseline cache key. A measurement is only reusable on the same hardware, and
     memory belongs in the key as much as cores do: changing memory_mib alone changes the timings
-    (and the price per second) a cached baseline was measured under. For a GPU challenge the
-    key carries the GPU the job was frozen to; `gpu` is ignored for a CPU challenge."""
+    (and the price per second) a cached baseline was measured under. The packing is in it too:
+    four nonces sharing a container's cores and memory time differently from one nonce alone,
+    so a baseline measured one nonce per container (before `-x4`) is never a hit. For a GPU
+    challenge the key carries the GPU the job was frozen to; `gpu` is ignored for a CPU
+    challenge."""
     if spec.is_gpu:
         return f"gpu-{_chosen_gpu(spec, gpu, MODAL_GPUS)}"
-    return f"cpu{spec.cpu}-mem{spec.memory_mib}"
+    return f"cpu{spec.cpu}-mem{spec.memory_mib}-x{modal_workers(spec)}"
 
 
 def c3_profile(spec: ChallengeSpec, gpu: str | None = None) -> str:

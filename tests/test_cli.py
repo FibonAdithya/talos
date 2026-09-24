@@ -927,7 +927,7 @@ def test_make_bench_picks_the_backend_and_hardware_class(tmp_path):
         cli.make_bench("aws", tmp_path, PendingJobStore.memory())
     # mutation: using the Modal hardware class for C3 lets a Modal baseline serve a C3 run
     assert cli.bench_hardware_class("c3", "knapsack") == "c3-cpu-d3-4vcpu-16gb"
-    assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192"
+    assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192-x4"
 
 
 def test_sigint_stops_the_bench_too(tmp_path, monkeypatch):
@@ -2072,7 +2072,7 @@ def test_bench_hardware_class_uses_the_frozen_gpu():
     # mutation: ignoring `gpu` keys every GPU baseline as an L40S one
     assert cli.bench_hardware_class("modal", "hypergraph", gpu="H100") == "gpu-H100"
     assert cli.bench_hardware_class("c3", "hypergraph", gpu="a100") == "c3-a100"
-    assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192"
+    assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192-x4"
 
 
 def test_compile_uses_the_exported_gpu_or_probes_for_one(tmp_path, monkeypatch):

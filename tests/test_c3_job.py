@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from talos import c3_job
+from talos import c3_job, inside
 from talos.bench import EvalRequest
 from talos.c3_jobdir import write_job_dir
 from talos.challenges import CHALLENGES
@@ -198,7 +198,7 @@ class FakePool:
         return [fn(t) for t in reversed(list(tasks))]
 
 
-def test_the_pool_path_passes_run_one_positional_tuples_and_sorts_the_rows(tmp_path,
+def test_the_pool_path_passes_run_task_positional_tuples_and_sorts_the_rows(tmp_path,
                                                                           monkeypatch):
     from talos import inside
     mono, work, art = setup(tmp_path, n=2, baseline_q=200)
@@ -208,14 +208,14 @@ def test_the_pool_path_passes_run_one_positional_tuples_and_sorts_the_rows(tmp_p
         seen.append(task)
         return {"track": task[1], "nonce": task[3], "ok": True, "quality": 120,
                 "runtime_ms": 5, "error": None}
-    monkeypatch.setattr(c3_job, "_run_one", stub)
+    monkeypatch.setattr(inside, "run_task", stub)
     FakePool.sizes = []
     c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(), monorepo=mono,
                 log=lambda *a: None, pool_factory=FakePool)
     assert FakePool.sizes == [4]  # payload["workers"] for a CPU challenge
     so, _ptx = inside.artifact_paths(mono, "knapsack", inside.ALGO_NAME)
     # mutation: swapping two positions in the task tuple (say nonce and fuel) sends the wrong
-    # nonce or the wrong fuel to run_nonce, and _run_one unpacks it without noticing
+    # nonce or the wrong fuel to run_nonce, and run_task unpacks it without noticing
     assert {t[3]: t for t in seen}[0] == ("c003", "t", HASH, 0, str(so), 7,
                                           inside.NONCE_TIMEOUT_S, None, str(mono), None)
     assert [t[3] for t in seen] == [1, 0]  # the pool really did finish out of order
@@ -288,7 +288,7 @@ def test_per_track_timeouts_reach_each_nonce_task(tmp_path, monkeypatch):
         seen.append(task)
         return {"track": task[1], "nonce": task[3], "ok": True, "quality": 120,
                 "runtime_ms": 5, "error": None}
-    monkeypatch.setattr(c3_job, "_run_one", stub)
+    monkeypatch.setattr(inside, "run_task", stub)
     c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(), monorepo=mono,
                 log=lambda *a: None, pool_factory=FakePool)
     # mutation: reading nonce_timeout_s alone ignores the per-track cap the loop computed
@@ -308,7 +308,7 @@ def test_each_track_gets_its_own_hyperparameters_in_the_pool_tasks(tmp_path, mon
         seen.append(task)
         return {"track": task[1], "nonce": task[3], "ok": True, "quality": 120,
                 "runtime_ms": 5, "error": None}
-    monkeypatch.setattr(c3_job, "_run_one", stub)
+    monkeypatch.setattr(inside, "run_task", stub)
     c3_job.main(workdir=work, artifacts_dir=art, run=fake_run(), monorepo=mono,
                 log=lambda *a: None, pool_factory=FakePool)
     # mutation: putting the whole map in the task hands tig-runtime {"t": ..., "u": ...}

@@ -57,7 +57,10 @@ progress.
    (`talos/state.py::JobStore.write_spec`). The hardware class is part of the
    baseline cache key (`talos/challenges.py::hardware_class`,
    `talos/baseline.py::cache_key`); a cached baseline measured under different
-   hardware or fuel is a different key, never a hit. The local backend's class
+   hardware or fuel is a different key, never a hit. On Modal the class also
+   carries how many nonces share one container
+   (`talos/challenges.py::modal_workers`): a batch of four on four cores times
+   differently from one nonce alone. The local backend's class
    is `talos/challenges.py::local_hardware_class`, which carries the host name
    and the container's CPU and memory limits, so changing either at
    `talos setup` invalidates every local baseline. On Modal and C3 a GPU

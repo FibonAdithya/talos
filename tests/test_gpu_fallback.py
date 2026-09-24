@@ -32,7 +32,7 @@ def test_hardware_class_carries_the_chosen_gpu():
     assert c3_hardware_class(gpu, "h100") == "c3-h100"
     assert c3_profile(gpu, "a100") == "a100"
     # the CPU class never takes a GPU, and passing one is ignored rather than fatal
-    assert hardware_class(CHALLENGES["knapsack"]) == "cpu4-mem8192"
+    assert hardware_class(CHALLENGES["knapsack"]) == "cpu4-mem8192-x4"
     assert c3_profile(CHALLENGES["knapsack"]) == "cpu-d3-4vcpu-16gb"
 
 

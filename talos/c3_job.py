@@ -5,7 +5,6 @@ timings and nonce numbers only, never the rand hash or a command line."""
 from __future__ import annotations
 
 import json
-import multiprocessing
 import os
 import subprocess
 import sys
@@ -25,13 +24,6 @@ def _atomic(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
-def _run_one(task: tuple) -> dict:
-    challenge_id, track, rand_hash, nonce, so, fuel, timeout_s, ptx, workdir, hp = task
-    return inside.run_nonce(challenge_id, track, rand_hash, nonce, Path(so), fuel, timeout_s,
-                            Path(ptx) if ptx else None, workdir=Path(workdir),
-                            hyperparameters=hp)
-
-
 def _score(payload: dict, sets: list[dict], so: Path, ptx: Path | None, monorepo: Path,
            run, log, clock, t0: float, on_row, pool_factory=None) -> None:
     timeouts = payload.get("timeouts") or {}
@@ -43,23 +35,10 @@ def _score(payload: dict, sets: list[dict], so: Path, ptx: Path | None, monorepo
               str(ptx) if ptx else None, str(monorepo), hyperparameters.get(ns["track"]))
              for ns in sets for n in range(ns["start"], ns["start"] + ns["count"])]
     workers = int(payload.get("workers", 1))
-    # `_run_one` builds its own subprocess calls and ignores the injected runner, so the real
-    # pool is only safe on the real subprocess; an injected pool_factory is a test driving
-    # this branch on purpose.
-    if workers > 1 and (pool_factory is not None or run is subprocess.run):
-        with (pool_factory or multiprocessing.Pool)(workers) as pool:
-            rows = pool.imap_unordered(_run_one, tasks)
-            for r in rows:
-                on_row(r)
-                log(f"[{int(clock() - t0)}s] nonce {r['nonce']} ok={r['ok']} q={r['quality']} "
-                    f"ms={r['runtime_ms']} err={r['error']}")
-    else:
-        for t in tasks:
-            r = inside.run_nonce(t[0], t[1], t[2], t[3], so, t[5], t[6], ptx, run=run,
-                                 workdir=monorepo, hyperparameters=t[9])
-            on_row(r)
-            log(f"[{int(clock() - t0)}s] nonce {r['nonce']} ok={r['ok']} q={r['quality']} "
-                f"ms={r['runtime_ms']} err={r['error']}")
+    for r in inside.run_nonces(tasks, workers, run=run, pool_factory=pool_factory):
+        on_row(r)
+        log(f"[{int(clock() - t0)}s] nonce {r['nonce']} ok={r['ok']} q={r['quality']} "
+            f"ms={r['runtime_ms']} err={r['error']}")
 
 
 def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=subprocess.run,

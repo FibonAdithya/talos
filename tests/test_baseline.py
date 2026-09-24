@@ -190,10 +190,23 @@ def test_hardware_class_separates_cpu_memory_and_gpu():
     # different memory (and a different price per second)
     import dataclasses
     knapsack = CHALLENGES["knapsack"]
-    assert hardware_class(knapsack) == f"cpu{knapsack.cpu}-mem{knapsack.memory_mib}"
+    assert hardware_class(knapsack) == f"cpu{knapsack.cpu}-mem{knapsack.memory_mib}-x{knapsack.cpu}"
     bigger = dataclasses.replace(knapsack, memory_mib=knapsack.memory_mib * 2)
     assert hardware_class(bigger) != hardware_class(knapsack)
     assert hardware_class(CHALLENGES["hypergraph"], "L40S") == "gpu-L40S"
+
+
+def test_modal_workers_fill_the_cpu_container_and_the_class_carries_the_packing():
+    from talos.challenges import modal_workers
+    knapsack, hypergraph = CHALLENGES["knapsack"], CHALLENGES["hypergraph"]
+    # mutation: one worker per 4-core container idles three billed cores per nonce
+    assert modal_workers(knapsack) == knapsack.cpu == 4
+    # mutation: 4 workers on one GPU serialise on the device and time the batch out
+    assert modal_workers(hypergraph) == 1
+    # mutation: a class string without the packing lets a baseline measured one nonce per
+    # container (before batching) serve candidates scored four to a container
+    assert hardware_class(knapsack).endswith("-x4")
+    assert hardware_class(hypergraph, "L40S") == "gpu-L40S"  # GPU packing is unchanged
 
 
 def test_host_slug_is_stable_and_never_empty():

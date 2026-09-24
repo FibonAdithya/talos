@@ -20,6 +20,33 @@ Docker container on this machine through `talos/local_transport.py::DockerTransp
 satisfies the C3 transport protocol (deploy, status, cancel, fetch). The container's name is
 the job id. See [Local backend](#local-backend).
 
+## Scoring workers
+
+Every backend scores a CPU challenge's nonces on all of its container's cores at once, through
+one worker pool, `talos/inside.py::run_nonces`. A GPU challenge always scores one nonce at a
+time: nonces would serialise on the device, and a batch of them would outlive its timeout.
+
+| Backend | Workers | Where the count is fixed |
+|---|---|---|
+| Modal | The container's CPU count, `talos/challenges.py::modal_workers` (4). The client sends one `score_batch_<challenge>` call per `modal_workers` nonces, so a container scores its batch on every core and the batch's wall time is its slowest nonce's, which keeps the function timeout at one nonce plus slack. The container returns its own wall seconds, and the client charges those at the 4-core rate. | `talos/challenges.py::ChallengeSpec.cpu` |
+| C3 | `talos/challenges.py::c3_workers` (4, the CPU profile's vCPUs) | `talos/challenges.py::C3_CPU_WORKERS` |
+| Local | The container's `--cpus` limit, `talos/challenges.py::local_workers` | `talos setup` |
+
+The Modal packing is part of the hardware class, `cpu4-mem8192-x4`
+(`talos/challenges.py::hardware_class`): four nonces sharing a container's cores and memory
+time differently from one nonce alone, so a Modal CPU baseline cached before batching is
+never a hit and is re-measured on the first run after upgrading. Upgrading also needs
+`talos setup`, because the per-nonce `score_nonce_<challenge>` function is replaced. GPU
+classes are unchanged. Each nonce in a Modal batch has a quarter of the container's 8 GiB,
+against 4 GiB on C3's profile; a memory bump is a change to `ChallengeSpec.memory_mib`, and
+therefore to the class.
+
+MEASURED 2026-09-24 on the development machine with a stand-in `tig-runtime` that sleeps for
+one second, so these are the pool's overheads and nothing about real nonces: the C3 job runner
+scored 16 nonces in 16.2 s with one worker, 4.1 s with four and 1.1 s with sixteen, and a
+Modal batch of 4 took 4.04 s with one worker and 1.04 s with four. Neither has been timed on a
+live backend since batching.
+
 ## GPU fallback
 
 A GPU challenge runs on the first GPU in a preference list that has capacity when the job
@@ -32,7 +59,7 @@ The choice is made once and frozen, never per call, because the baseline and eve
 must score on the same hardware class (AGENTS.md invariant 1) and the class is in the baseline
 cache key. Modal's own `gpu=["L40S", "A100-80GB"]` fallback list is deliberately not used: it
 picks a GPU per container. Instead `talos setup` deploys one `compile_<challenge>_<gpu>` and
-`score_nonce_<challenge>_<gpu>` pair per GPU, plus one `probe_<gpu>` function on a stock image,
+`score_batch_<challenge>_<gpu>` pair per GPU, plus one `probe_<gpu>` function on a stock image,
 and `talos/cli.py::freeze_gpu` fixes the GPU before the baseline:
 
 | Backend | Probe | "No capacity" means | Cost of one probe |

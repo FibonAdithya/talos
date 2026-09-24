@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import re
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 ALGO_NAME = "talos_cand"
@@ -162,6 +164,33 @@ def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Pat
 
 
 NONCE_TIMEOUT_S = 600
+
+# One scoring task, as a positional tuple so it pickles into a worker process unchanged:
+# (challenge_id, track, rand_hash, nonce, so, fuel, timeout_s, ptx, workdir, hyperparameters),
+# with `so`, `ptx` and `workdir` as strings.
+NonceTask = tuple
+
+
+def run_task(task: NonceTask, run=subprocess.run) -> dict:
+    challenge_id, track, rand_hash, nonce, so, fuel, timeout_s, ptx, workdir, hp = task
+    return run_nonce(challenge_id, track, rand_hash, nonce, Path(so), fuel, timeout_s,
+                     Path(ptx) if ptx else None, run=run, workdir=Path(workdir),
+                     hyperparameters=hp)
+
+
+def run_nonces(tasks: list[NonceTask], workers: int, run=subprocess.run,
+               pool_factory=None) -> Iterator[dict]:
+    """Scores `tasks` on `workers` processes at once and yields each row as it finishes, in no
+    particular order. This is the one place a container's cores are spread over: the C3 and
+    local jobs and every Modal batch go through it. `run_task` builds its own subprocess calls
+    and cannot carry an injected runner into a worker process, so the pool is only used with
+    the real subprocess, or with a `pool_factory` a test supplied to drive that branch."""
+    if workers > 1 and (pool_factory is not None or run is subprocess.run):
+        with (pool_factory or multiprocessing.Pool)(workers) as pool:
+            yield from pool.imap_unordered(run_task, tasks)
+    else:
+        for t in tasks:
+            yield run_task(t, run=run)
 
 
 def content_hash(files: dict[str, str], monorepo_ref: str, dev_image_tag: str) -> str:

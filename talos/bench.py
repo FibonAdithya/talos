@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from talos.challenges import CHALLENGES, BeatRule, gpu_options, gpu_slug
+from talos.challenges import CHALLENGES, BeatRule, gpu_options, gpu_slug, modal_workers
 from talos.diagnostics import dead_new_functions
 from talos.inside import NONCE_TIMEOUT_S
 from talos.scoring import holdout_decision
@@ -188,7 +188,7 @@ class ModalBench:
         return True
 
     def _name(self, kind: str, challenge: str) -> str:
-        """The deployed function for `kind` ("compile" or "score_nonce") of `challenge`: the
+        """The deployed function for `kind` ("compile" or "score_batch") of `challenge`: the
         bare name for a CPU challenge, the frozen GPU's variant for a GPU one."""
         if not CHALLENGES[challenge].is_gpu:
             return f"{kind}_{challenge}"
@@ -251,19 +251,25 @@ class ModalBench:
     def _score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
               fuel: int, timeouts: dict[str, int] | None,
               hyperparameters: dict[str, dict | None] | None) -> list[NonceResult]:
-        args = [(artifact_id, ns.track, ns.rand_hash, n, fuel, timeout_for(timeouts, ns.track),
-                 hyperparameters_for(hyperparameters, ns.track))
-                for ns in nonce_sets for n in ns.nonces()]
-        if not args:
+        """One `score_batch` call per `modal_workers` nonces, across tracks: a container scores
+        its batch on every core at once, and a batch never holds more nonces than the
+        container has workers, so its wall time is one nonce's, not a queue's."""
+        tasks = [{"track": ns.track, "rand_hash": ns.rand_hash, "nonce": n, "fuel": fuel,
+                  "timeout_s": timeout_for(timeouts, ns.track),
+                  "hyperparameters": hyperparameters_for(hyperparameters, ns.track)}
+                 for ns in nonce_sets for n in ns.nonces()]
+        if not tasks:
             # A holdout count of 0 still yields one NonceSet per track, each with no nonces.
             # modal 1.5.5 never returns from starmap([]), so the client would hang here.
             return []
-        name = self._name("score_nonce", challenge)
-        rows = self._with_retry(lambda: list(self._fn(name).starmap(args)))
-        results = [NonceResult.from_dict(r) for r in rows]
-        self._cost += sum(_seconds_cost(challenge, r.runtime_ms / 1000, self.gpu)
-                          for r in results)
-        return results
+        size = modal_workers(CHALLENGES[challenge])
+        args = [(artifact_id, tasks[i:i + size]) for i in range(0, len(tasks), size)]
+        name = self._name("score_batch", challenge)
+        batches = self._with_retry(lambda: list(self._fn(name).starmap(args)))
+        # The container's wall seconds are what Modal bills: verifier time and the batch's
+        # slowest nonce included, which one nonce's runtime_ms never was.
+        self._cost += sum(_seconds_cost(challenge, b["seconds"], self.gpu) for b in batches)
+        return [NonceResult.from_dict(r) for b in batches for r in b["rows"]]
 
     def evaluate(self, request: EvalRequest) -> EvalResult:
         c = self._compile(request.challenge, request.files)

@@ -49,21 +49,109 @@ def test_compile_reports_a_build_that_produced_no_so(monkeypatch, tmp_path):
     assert "build produced no .so at" in out["output"] and "warning: unused" in out["output"]
 
 
-def test_score_impl_hands_the_hyperparameters_to_run_nonce(monkeypatch, tmp_path):
-    _sandbox(monkeypatch, tmp_path)
+class FakePool:
+    """Stands in for `multiprocessing.Pool`: records the worker count and yields the rows back
+    to front, so the batch has to sort them itself."""
+    sizes: list[int] = []
+
+    def __init__(self, workers):
+        FakePool.sizes.append(workers)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def imap_unordered(self, fn, tasks):
+        return [fn(t) for t in reversed(list(tasks))]
+
+
+def _artifact(tmp_path):
     art = tmp_path / "artifacts" / "knapsack" / "art1"
     art.mkdir(parents=True)
     (art / "algo.so").write_bytes(b"\x7fELF")
-    seen = {}
+    return art
 
-    def fake_run_nonce(*args, **kwargs):
-        seen.update(kwargs)
-        return {"track": args[1], "nonce": args[3], "ok": True, "quality": 1, "runtime_ms": 1,
+
+def _batch_task(nonce, timeout_s=60, hp=None):
+    return {"track": "t", "rand_hash": "ab" * 32, "nonce": nonce, "fuel": 5,
+            "timeout_s": timeout_s, "hyperparameters": hp}
+
+
+def test_score_batch_runs_the_tasks_through_a_pool_and_returns_them_in_nonce_order(
+        monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    _artifact(tmp_path)
+    seen = []
+
+    def stub(task):
+        seen.append(task)
+        return {"track": task[1], "nonce": task[3], "ok": True, "quality": 1, "runtime_ms": 1,
                 "error": None}
-    monkeypatch.setattr(talos_bench.inside, "run_nonce", fake_run_nonce)
-    talos_bench._score_impl("knapsack", "c003", "art1", "t", "ab" * 32, 0, 5, 60, {"x": 1})
-    # mutation: accepting the argument but not forwarding it runs Modal nonces without the map
-    assert seen["hyperparameters"] == {"x": 1}
+    monkeypatch.setattr(talos_bench.inside, "run_task", stub)
+    FakePool.sizes = []
+    ticks = iter([100.0, 107.5])
+    out = talos_bench._score_batch_impl("knapsack", "c003", "art1",
+                                        [_batch_task(n, hp={"x": n}) for n in range(4)],
+                                        workers=4, pool_factory=FakePool,
+                                        clock=lambda: next(ticks))
+    # mutation: a pool of 1, or no pool, scores the four nonces one after another on a
+    # container billed for four cores
+    assert FakePool.sizes == [4]
+    # mutation: returning the rows as the pool finished them hands the client a reversed batch
+    assert [r["nonce"] for r in out["rows"]] == [0, 1, 2, 3]
+    # the container's own wall time is what Modal bills for; the client charges from it
+    assert out["seconds"] == 7.5
+    so = tmp_path / "artifacts" / "knapsack" / "art1" / "algo.so"
+    # mutation: dropping a tuple field runs the nonce with the wrong fuel, timeout or map
+    assert {t[3]: t for t in seen}[2] == ("c003", "t", "ab" * 32, 2, str(so), 5, 60, None,
+                                          str(tmp_path / "mono"), {"x": 2})
+
+
+def test_score_batch_caps_each_timeout_at_the_flat_nonce_timeout(monkeypatch, tmp_path):
+    from talos.inside import NONCE_TIMEOUT_S
+    _sandbox(monkeypatch, tmp_path)
+    _artifact(tmp_path)
+    seen = []
+
+    def stub(task):
+        seen.append(task[6])
+        return {"track": task[1], "nonce": task[3], "ok": True, "quality": 1, "runtime_ms": 1,
+                "error": None}
+    monkeypatch.setattr(talos_bench.inside, "run_task", stub)
+    talos_bench._score_batch_impl("knapsack", "c003", "art1",
+                                  [_batch_task(0, timeout_s=NONCE_TIMEOUT_S * 3),
+                                   _batch_task(1, timeout_s=7)],
+                                  workers=4, pool_factory=FakePool)
+    # mutation: passing the client's timeout through unclamped lets a nonce outlive the Modal
+    # function's own timeout, which kills the container and loses the whole batch
+    assert sorted(seen) == [7, NONCE_TIMEOUT_S]
+
+
+def test_score_batch_reports_a_missing_artifact_as_infrastructure(monkeypatch, tmp_path):
+    import pytest
+    _sandbox(monkeypatch, tmp_path)
+    with pytest.raises(FileNotFoundError, match="missing on volume"):
+        talos_bench._score_batch_impl("knapsack", "c003", "nope", [_batch_task(0)], workers=4)
+
+
+def test_registered_batch_functions_carry_the_challenge_kinds_worker_count(monkeypatch):
+    from talos.challenges import CHALLENGES, gpu_slug
+    calls = []
+    monkeypatch.setattr(talos_bench, "_score_batch_impl",
+                        lambda name, cid, art, tasks, workers, **kw: calls.append(
+                            (name, cid, art, tasks, workers)) or {"rows": [], "seconds": 0.0})
+    app = _FakeApp()
+    talos_bench.register(app, image=lambda name: f"img-{name}", probe_image=lambda: "slim")
+    _kw, cpu_fn = app.registered["score_batch_knapsack"]
+    _kw, gpu_fn = app.registered[f"score_batch_hypergraph_{gpu_slug('L40S')}"]
+    cpu_fn("art", [_batch_task(0)])
+    gpu_fn("art", [_batch_task(1)])
+    # mutation: a flat worker count of 4 serialises four nonces on one GPU; a flat 1 idles the
+    # CPU container's other three cores
+    assert calls == [("knapsack", "c003", "art", [_batch_task(0)], CHALLENGES["knapsack"].cpu),
+                     ("hypergraph", CHALLENGES["hypergraph"].id, "art", [_batch_task(1)], 1)]
 
 
 def test_image_python_follows_the_deploying_interpreter(monkeypatch):
@@ -108,7 +196,7 @@ def test_register_deploys_one_function_set_per_gpu_and_a_probe_per_gpu():
     for n in cpu_names:
         kw, _fn = app.registered[f"compile_{n}"]
         assert "gpu" not in kw and kw["cpu"] == CHALLENGES[n].cpu
-        assert f"score_nonce_{n}" in names
+        assert f"score_batch_{n}" in names
     for n in gpu_names:
         assert f"compile_{n}" not in names  # the un-suffixed GPU name would be a silent L40S
         for gpu in MODAL_GPUS:
@@ -117,7 +205,7 @@ def test_register_deploys_one_function_set_per_gpu_and_a_probe_per_gpu():
             # container, which is exactly the per-call fallback invariant 1 forbids
             assert kw["gpu"] == gpu and isinstance(kw["gpu"], str)
             assert kw["image"] == f"img-{n}"
-            skw, _fn = app.registered[f"score_nonce_{n}_{gpu_slug(gpu)}"]
+            skw, _fn = app.registered[f"score_batch_{n}_{gpu_slug(gpu)}"]
             assert skw["gpu"] == gpu
     for gpu in MODAL_GPUS:
         kw, fn = app.registered[f"probe_{gpu_slug(gpu)}"]
