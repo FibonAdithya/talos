@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from talos.challenges import CHALLENGES, BeatRule, gpu_options, gpu_slug
+from talos.challenges import CHALLENGES, BeatRule, hardware_options, gpu_slug
 from talos.diagnostics import dead_new_functions
 from talos.inside import NONCE_TIMEOUT_S
 from talos.scoring import holdout_decision
@@ -123,7 +123,7 @@ class PendingJobStore:
 
 class Bench(Protocol):
     def evaluate(self, request: EvalRequest) -> EvalResult: ...
-    def select_gpu(self, challenge: str, chosen: str | None = None) -> str | None: ...
+    def select_hardware(self, challenge: str, chosen: str | None = None) -> str | None: ...
     def request_stop(self) -> None: ...
     def cost_mark(self) -> float: ...
     def cost_usd_since(self, mark: float) -> float: ...
@@ -148,16 +148,16 @@ class ModalBench:
         self._sleep = sleep
         self._cost = 0.0
         self._fns: dict[str, object] = {}
-        self.gpu: str | None = None  # set by select_gpu; None for CPU challenges
+        self.gpu: str | None = None  # set by select_hardware; None for CPU challenges
 
-    def select_gpu(self, challenge: str, chosen: str | None = None) -> str | None:
+    def select_hardware(self, challenge: str, chosen: str | None = None) -> str | None:
         """Freezes the GPU this bench calls for `challenge`. With `chosen` (a resumed job, or
-        the sandbox's `talos compile` given TALOS_GPU) nothing is probed. Otherwise each GPU in
+        the sandbox's `talos compile` given TALOS_HARDWARE) nothing is probed. Otherwise each GPU in
         preference order gets a probe call; the first whose probe returns within probe_window_s
         is the choice, a probe that has not started by then is cancelled (it would otherwise
         run, and bill, whenever that GPU freed up) and the next GPU is tried. None answering is
         BenchUnavailable, which pauses the run. CPU challenges have no options: None."""
-        options = gpu_options(CHALLENGES[challenge])
+        options = hardware_options(CHALLENGES[challenge])
         if not options:
             self.gpu = None
             return None
@@ -193,7 +193,7 @@ class ModalBench:
         if not CHALLENGES[challenge].is_gpu:
             return f"{kind}_{challenge}"
         if self.gpu is None:
-            raise ValueError(f"{challenge} is a GPU challenge; select_gpu was not called")
+            raise ValueError(f"{challenge} is a GPU challenge; select_hardware was not called")
         return f"{kind}_{challenge}_{gpu_slug(self.gpu)}"
 
     def _fn(self, name: str):
@@ -308,11 +308,11 @@ class FakeBench:
         self.calls: list[EvalRequest] = []
         self.holdout_runs = 0
 
-    def select_gpu(self, challenge: str, chosen: str | None = None) -> str | None:
+    def select_hardware(self, challenge: str, chosen: str | None = None) -> str | None:
         """In-process, so nothing is probed; but a GPU challenge still gets a GPU (the first
         option, or the frozen one), because the hardware class the fake run keys its baseline
         under needs one just as a real run's does."""
-        options = gpu_options(CHALLENGES[challenge])
+        options = hardware_options(CHALLENGES[challenge])
         return (chosen or options[0]) if options else None
 
     def evaluate(self, request: EvalRequest) -> EvalResult:

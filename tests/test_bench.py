@@ -489,13 +489,13 @@ def gpu_req():
                        fuel=1, baseline_training=None, rule=BeatRule())
 
 
-def test_select_gpu_takes_the_first_gpu_whose_probe_starts_and_cancels_the_rest(monkeypatch):
+def test_select_hardware_takes_the_first_gpu_whose_probe_starts_and_cancels_the_rest(monkeypatch):
     lookups, cancelled = [], []
     clock = FakeClock()
     _fake_modal_gpu(monkeypatch, {"probe_l40s": False, "probe_a100_80gb": True, "probe_h100": True},
                 lookups, cancelled, clock=clock)
     b = ModalBench(probe_window_s=30, clock=clock)  # the clock moves only inside a probe
-    assert b.select_gpu("hypergraph") == "A100-80GB"
+    assert b.select_hardware("hypergraph") == "A100-80GB"
     from talos.bench import GPU_USD_PER_SECOND
     # mutation: an unchanged probe cost hides a real GPU call from the compute cap; the
     # timed-out L40S probe never ran and must charge nothing
@@ -511,48 +511,48 @@ def test_select_gpu_takes_the_first_gpu_whose_probe_starts_and_cancels_the_rest(
     assert b.cost_mark() == pytest.approx(6 * GPU_USD_PER_SECOND["A100-80GB"], abs=1e-9)
 
 
-def test_select_gpu_reports_all_unavailable_after_trying_every_gpu(monkeypatch):
+def test_select_hardware_reports_all_unavailable_after_trying_every_gpu(monkeypatch):
     lookups, cancelled = [], []
     _fake_modal_gpu(monkeypatch, {"probe_l40s": False, "probe_a100_80gb": False,
                                   "probe_h100": False}, lookups, cancelled)
     b = ModalBench(probe_window_s=30)
     with pytest.raises(BenchUnavailable) as ei:
-        b.select_gpu("hypergraph")
+        b.select_hardware("hypergraph")
     # mutation: stopping at the first miss never reaches the fallbacks
     assert cancelled == ["probe_l40s", "probe_a100_80gb", "probe_h100"]
     assert b.cost_mark() == 0.0  # nothing ran
     assert "L40S" in str(ei.value) and "H100" in str(ei.value) and "30" in str(ei.value)
 
 
-def test_select_gpu_honours_a_frozen_choice_without_probing(monkeypatch):
+def test_select_hardware_honours_a_frozen_choice_without_probing(monkeypatch):
     lookups, cancelled = [], []
     _fake_modal_gpu(monkeypatch, {"probe_l40s": True}, lookups, cancelled)
     b = ModalBench()
     # mutation: probing again on a resume can move the candidates to another GPU than the
     # one the baseline was measured on
-    assert b.select_gpu("hypergraph", chosen="H100") == "H100"
+    assert b.select_hardware("hypergraph", chosen="H100") == "H100"
     assert lookups == []
     b.evaluate(gpu_req())
     assert lookups[0] == "compile_hypergraph_h100"
     with pytest.raises(ValueError):
-        b.select_gpu("hypergraph", chosen="T4")
+        b.select_hardware("hypergraph", chosen="T4")
 
 
-def test_select_gpu_is_a_no_op_for_cpu_challenges_and_the_fake_bench(monkeypatch):
+def test_select_hardware_is_a_no_op_for_cpu_challenges_and_the_fake_bench(monkeypatch):
     lookups, cancelled = [], []
     _fake_modal_gpu(monkeypatch, {}, lookups, cancelled)
     b = ModalBench()
-    assert b.select_gpu("knapsack") is None and lookups == []
+    assert b.select_hardware("knapsack") is None and lookups == []
     b.evaluate(req())
     assert lookups[0] == "compile_knapsack"  # CPU function names are unchanged
     fake = FakeBench(lambda c, f, ns: [1] * ns.count)
-    assert fake.select_gpu("knapsack") is None
+    assert fake.select_hardware("knapsack") is None
     # in-process, so no probe, but a GPU challenge still needs a GPU for its hardware class
-    assert fake.select_gpu("hypergraph") == "L40S"
-    assert fake.select_gpu("hypergraph", chosen="H100") == "H100"
+    assert fake.select_hardware("hypergraph") == "L40S"
+    assert fake.select_hardware("hypergraph", chosen="H100") == "H100"
 
 
-def test_a_gpu_call_before_select_gpu_is_refused_loudly(monkeypatch):
+def test_a_gpu_call_before_select_hardware_is_refused_loudly(monkeypatch):
     lookups, cancelled = [], []
     _fake_modal_gpu(monkeypatch, {}, lookups, cancelled)
     with pytest.raises(ValueError):  # mutation: defaulting to the first GPU hides the bug

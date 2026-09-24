@@ -232,7 +232,7 @@ class FakeClient:
 def job_dir_for(tmp_path):
     from tests.test_c3_jobdir import req
     # The directory is deliberately not named after the purpose: the settings come from `.c3`.
-    return write_job_dir(tmp_path / "job", req(), "3")
+    return write_job_dir(tmp_path / "job", req(), "3", hardware="cpu-d3-4vcpu-16gb")
 
 
 def test_deploy_sends_the_files_with_job_sh_executable_and_the_c3_settings(tmp_path):
@@ -242,7 +242,7 @@ def test_deploy_sends_the_files_with_job_sh_executable_and_the_c3_settings(tmp_p
 
     c = FakeClient({"deploy": {"job_id": "job_5"}})
     request = jobdir_req()
-    d = write_job_dir(tmp_path / "job", request, "3")
+    d = write_job_dir(tmp_path / "job", request, "3", hardware="cpu-d3-4vcpu-16gb")
     assert McpTransport("k", client=c).deploy(d) == "job_5"
     name, args = c.calls[0]
     assert name == "deploy"
@@ -264,7 +264,8 @@ def test_deploy_sends_the_files_with_job_sh_executable_and_the_c3_settings(tmp_p
     assert isinstance(args["walltime_seconds"], int)
     assert args["walltime_seconds"] > 0
     # mutation: a hard-coded profile breaks invariant 1
-    for k, v in job_settings("knapsack", "3", expected_walltime).items():
+    settings = job_settings("knapsack", "3", expected_walltime, hardware="cpu-d3-4vcpu-16gb")
+    for k, v in settings.items():
         assert args[k] == v
 
 
@@ -272,7 +273,7 @@ def test_deploy_sends_gpu_hardware_and_accelerator_for_a_gpu_challenge(tmp_path)
     from tests.test_c3_jobdir import req as jobdir_req
 
     c = FakeClient({"deploy": {"job_id": "job_6"}})
-    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", gpu="l40")
+    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", hardware="l40")
     assert McpTransport("k", client=c).deploy(d) == "job_6"
     _name, args = c.calls[0]
     # mutation: "docker_requires_accelerator": "none" forced in the deploy args
@@ -546,7 +547,7 @@ def test_urllib_post_does_not_follow_a_redirect_to_a_second_host():
 def test_deploy_sends_the_settings_the_c3_file_names_including_the_frozen_gpu(tmp_path):
     from tests.test_c3_jobdir import req as jobdir_req
     c = FakeClient({"deploy": {"job_id": "job_8"}})
-    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", gpu="h100")
+    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", hardware="h100")
     assert McpTransport("k", client=c).deploy(d) == "job_8"
     _name, args = c.calls[0]
     # mutation: recomputing the settings from the challenge (rather than reading .c3) sends

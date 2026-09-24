@@ -14,7 +14,7 @@ from talos.bench import (BenchCancelled, BenchUnavailable, EvalRequest, EvalResu
                          PendingJobStore, _redact)
 from talos.c3_jobdir import (PROBE_WALLTIME_S, LocalSettings, request_hash, write_job_dir,
                              write_probe_dir)
-from talos.challenges import CHALLENGES, c3_gpu_options, c3_profile
+from talos.challenges import CHALLENGES, c3_hardware_options, c3_profile
 from talos.inside import NONCE_TIMEOUT_S
 from talos.types import CompileResult, NonceResult, NonceSet
 
@@ -24,7 +24,8 @@ if TYPE_CHECKING:
 # ESTIMATE: `c3 list -al` on 2026-09-24 (cpu and l40 first read 2026-09-15). A class spans
 # several concrete profiles at different rates; the highest is used, so a job never costs more
 # than the estimate says.
-GBP_PER_HOUR = {"cpu-d3-4vcpu-16gb": 0.11, "l40": 1.49, "a100": 1.90, "h100": 3.67}
+GBP_PER_HOUR = {"cpu-d3-4vcpu-16gb": 0.11, "cpu-e2-4vcpu-16gb": 0.11,
+                "l40": 1.49, "a100": 1.90, "h100": 3.67}
 USD_PER_GBP = 1.35                                          # ESTIMATE
 ACTIVE = ("PENDING", "SCHEDULING", "RUNNING")
 QUEUED = ("PENDING", "SCHEDULING")
@@ -50,7 +51,7 @@ def _out_of_stock(e: Exception) -> bool:
 
 class _NoCapacity(BenchUnavailable):
     """A job still queued after the capacity window. A BenchUnavailable to every caller but the
-    GPU probe, which moves on to the next class."""
+    capacity probe, which moves on to the next option."""
 
 
 _JOB_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
@@ -97,9 +98,9 @@ class C3Bench:
                  pending_timeout_s: int = 1800, poll_failures_max: int = 15,
                  api_key: str | None = None, transport: "C3Transport | None" = None,
                  local: LocalSettings | None = None, usd_per_hour: float | None = None,
-                 gpu: str | None = None):
+                 hardware: str | None = None):
         self.run_dir = Path(run_dir)
-        self.gpu = gpu  # the C3 class a GPU job is frozen to; set by select_gpu
+        self.hardware = hardware  # the C3 class or profile the job is frozen to; select_hardware
         self._pending = pending or PendingJobStore.memory()
         self._clock, self._sleep = clock, sleep
         self.poll_s, self.pending_timeout_s = poll_s, pending_timeout_s
@@ -171,23 +172,24 @@ class C3Bench:
                            if k not in ("job_id", "request_hash", "job_dir")})
 
     # ── GPU choice ───────────────────────────────────────────────────
-    def select_gpu(self, challenge: str, chosen: str | None = None) -> str | None:
-        """Freezes the C3 class this bench submits `challenge` on. With `chosen` (a resumed job,
-        or the sandbox's `talos compile` given TALOS_GPU) nothing is probed. Otherwise each
-        class in preference order gets a probe job (`write_probe_dir`); the first to leave the
-        queue within the capacity window is the choice and is cancelled at once (it is billing),
-        one still queued at the window's end is cancelled and the next class tried. None
-        scheduling is BenchUnavailable, which pauses the run. CPU challenges and the local
-        backend have no options: None."""
-        options = () if self.local is not None else c3_gpu_options(CHALLENGES[challenge])
+    def select_hardware(self, challenge: str, chosen: str | None = None) -> str | None:
+        """Freezes the C3 GPU class or CPU profile this bench submits `challenge` on. With
+        `chosen` (a resumed job, or the sandbox's `talos compile` given TALOS_HARDWARE) nothing
+        is probed. Otherwise each option in preference order gets a probe job
+        (`write_probe_dir`); the first to leave the queue within the capacity window is the
+        choice and is cancelled at once (it is billing), one still queued at the window's end
+        is cancelled and the next option tried, and one whose deploy C3 refuses as out of
+        stock is skipped the same way. None scheduling is BenchUnavailable, which pauses the
+        run. The local backend has no options: None."""
+        options = () if self.local is not None else c3_hardware_options(CHALLENGES[challenge])
         if not options:
-            self.gpu = None
+            self.hardware = None
             return None
         if chosen is not None:
             if chosen not in options:
-                raise ValueError(f"unknown GPU class {chosen!r} for {challenge}; one of "
+                raise ValueError(f"unknown hardware {chosen!r} for {challenge}; one of "
                                  f"{', '.join(options)}")
-            self.gpu = chosen
+            self.hardware = chosen
             return chosen
         for cls in options:
             job_dir = write_probe_dir(self.run_dir / self.subdir / f"probe-{cls}", cls)
@@ -195,7 +197,7 @@ class C3Bench:
                 job_id = _safe_job_id(self._t.deploy(job_dir))
             except (C3CommandError, ValueError) as e:
                 if _out_of_stock(e):
-                    continue  # C3 refused to queue it at all: no capacity, next class
+                    continue  # C3 refused to queue it at all: no capacity, next option
                 raise BenchUnavailable(f"{self._label} probe deploy failed: "
                                        f"{_redact(str(e))[:300]}") from None
             try:
@@ -208,7 +210,7 @@ class C3Bench:
                 # ESTIMATE: the probe's whole walltime, the most it can bill; a cancel that
                 # lands late costs no more than this
                 self._cost += PROBE_WALLTIME_S / 3600 * self._rate(cls)
-                self.gpu = cls
+                self.hardware = cls
                 return cls
             # FAILED/CANCELLED before running: not proof of capacity; try the next class
         raise BenchUnavailable(f"no {self._label} capacity for any of {', '.join(options)} "
@@ -248,7 +250,7 @@ class C3Bench:
                                        f"then {second}") from None
 
     def _submit(self, job_dir: Path, request: EvalRequest, purpose: str, rh: str) -> str:
-        write_job_dir(job_dir, request, purpose, local=self.local, gpu=self.gpu)
+        write_job_dir(job_dir, request, purpose, local=self.local, hardware=self.hardware)
         try:
             job_id = self._t.deploy(job_dir)
         except (C3CommandError, ValueError) as e:
@@ -262,7 +264,7 @@ class C3Bench:
     def _collect(self, job_id: str, job_dir: Path, request: EvalRequest) -> EvalResult:
         spec = CHALLENGES[request.challenge]
         # the local backend has no C3 profile; it never reads the rate (usd_per_hour is 0)
-        profile = c3_profile(spec, self.gpu) if self.local is None else "local"
+        profile = c3_profile(spec, self.hardware) if self.local is None else "local"
         status, t_run, t_end = self._wait(job_id, profile)
         if t_run is not None:
             # ESTIMATE. Reattaching to a job already RUNNING bills only from the reattach,

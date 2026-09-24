@@ -11,8 +11,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from talos.bench import EvalRequest
-from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_image, c3_profile,
-                              c3_workers, dev_image, local_workers)
+from talos.challenges import (C3_GPU_CLASSES, CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_image,
+                              c3_profile, c3_workers, dev_image, local_workers)
 from talos.inside import NONCE_TIMEOUT_S
 
 BUILD_ALLOWANCE_S = 1200
@@ -23,7 +23,7 @@ LOCAL_BUILD_ALLOWANCE_S = 3600
 LOCAL_APP = "/app"  # where the local job container mounts the challenge's monorepo volume
 LOCAL_LOCK = f"{LOCAL_APP}/.talos-lock"  # held by every container that writes the volume
 TIME_CAP_S = 6 * 3600
-# The GPU capacity probe (`talos/c3_bench.py::C3Bench.select_gpu`): a job whose script is
+# The capacity probe (`talos/c3_bench.py::C3Bench.select_hardware`): a job whose script is
 # `true`, on a stock image so the pull is seconds rather than the dev image's 13 GB, with a
 # walltime short enough that one the client never cancelled bills for minutes, not hours.
 PROBE_IMAGE = "ubuntu:24.04"
@@ -50,24 +50,26 @@ def hhmmss(seconds: int) -> str:
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
-def job_settings(challenge: str, purpose: str, seconds: int, gpu: str | None = None) -> dict:
+def job_settings(challenge: str, purpose: str, seconds: int,
+                 hardware: str | None = None) -> dict:
     """The job's settings, named as C3's MCP `deploy` tool names them. `.c3` is rendered from
     these values and the MCP path parses that same `.c3` back (`parse_c3`), so the two
-    submission paths cannot disagree about hardware, image or time limit. `gpu` is the C3
-    class the job was frozen to; required for a GPU challenge, ignored for a CPU one."""
+    submission paths cannot disagree about hardware, image or time limit. `hardware` is the C3
+    class or profile the job was frozen to."""
     spec = CHALLENGES[challenge]
     return {"project": "talos", "job_name": f"talos-{challenge}-{purpose}", "script": "job.sh",
-            "hardware": c3_profile(spec, gpu), "walltime_seconds": seconds,
+            "hardware": c3_profile(spec, hardware), "walltime_seconds": seconds,
             "docker_image": c3_image(challenge),
             "docker_requires_accelerator": "cuda" if spec.is_gpu else "none"}
 
 
-def probe_settings(gpu_class: str) -> dict:
-    """A capacity probe on one GPU class: the same keys as `job_settings`, so either transport
-    deploys it, but no challenge behind it."""
-    return {"project": "talos", "job_name": f"talos-probe-{gpu_class}", "script": "job.sh",
-            "hardware": gpu_class, "walltime_seconds": PROBE_WALLTIME_S,
-            "docker_image": PROBE_IMAGE, "docker_requires_accelerator": "cuda"}
+def probe_settings(hardware: str) -> dict:
+    """A capacity probe on one GPU class or CPU profile: the same keys as `job_settings`, so
+    either transport deploys it, but no challenge behind it."""
+    return {"project": "talos", "job_name": f"talos-probe-{hardware}", "script": "job.sh",
+            "hardware": hardware, "walltime_seconds": PROBE_WALLTIME_S,
+            "docker_image": PROBE_IMAGE,
+            "docker_requires_accelerator": "cuda" if hardware in C3_GPU_CLASSES else "none"}
 
 
 def render_c3(s: dict) -> str:
@@ -103,8 +105,9 @@ def parse_c3(text: str) -> dict:
     return out
 
 
-def c3_config_text(challenge: str, purpose: str, seconds: int, gpu: str | None = None) -> str:
-    return render_c3(job_settings(challenge, purpose, seconds, gpu))
+def c3_config_text(challenge: str, purpose: str, seconds: int,
+                   hardware: str | None = None) -> str:
+    return render_c3(job_settings(challenge, purpose, seconds, hardware))
 
 
 def _write_job_sh(job_dir: Path, text: str) -> None:
@@ -113,14 +116,14 @@ def _write_job_sh(job_dir: Path, text: str) -> None:
     sh.chmod(sh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def write_probe_dir(job_dir: Path, gpu_class: str) -> Path:
+def write_probe_dir(job_dir: Path, hardware: str) -> Path:
     """The deploy directory for one capacity probe: a `.c3` and a `job.sh` that exits at once.
     No payload and no modules, so nothing of a job (least of all a rand_hash) is uploaded."""
     job_dir = Path(job_dir)
     if job_dir.exists():
         shutil.rmtree(job_dir)
     job_dir.mkdir(parents=True)
-    (job_dir / ".c3").write_text(render_c3(probe_settings(gpu_class)), encoding="utf-8",
+    (job_dir / ".c3").write_text(render_c3(probe_settings(hardware)), encoding="utf-8",
                                  newline="\n")
     _write_job_sh(job_dir, "#!/bin/bash\ntrue\n")
     return job_dir
@@ -187,10 +190,11 @@ def request_hash(request: EvalRequest) -> str:
 
 
 def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str,
-                  local: LocalSettings | None = None, gpu: str | None = None) -> Path:
+                  local: LocalSettings | None = None, hardware: str | None = None) -> Path:
     """Writes the deploy directory, wiping `job_dir` first if it already exists. With `local`
     it is the local flavour: local.json instead of .c3, a job.sh that does not download the
-    monorepo, and the local worker count in the payload. `gpu` is the C3 class a GPU job was
+    monorepo, and the local worker count in the payload. `hardware` is the C3 class or profile
+    the job was
     frozen to (see `talos/challenges.py::c3_profile`); the local flavour ignores it."""
     job_dir = Path(job_dir)
     if job_dir.exists():
@@ -201,7 +205,7 @@ def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str,
     if local is None:
         workers = c3_workers(spec)
         seconds = time_limit_s(max(nonces, 1), workers)
-        (job_dir / ".c3").write_text(c3_config_text(request.challenge, purpose, seconds, gpu),
+        (job_dir / ".c3").write_text(c3_config_text(request.challenge, purpose, seconds, hardware),
                                      encoding="utf-8", newline="\n")
         sh_text = job_sh_text(MONOREPO_REF)
     else:
