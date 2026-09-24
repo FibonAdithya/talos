@@ -19,6 +19,8 @@ BUILD_ALLOWANCE_S = 1200
 # cores (the dev image re-instruments every dependency on each build), and fewer cores take
 # longer; 20 minutes would time out every job on a smaller machine.
 LOCAL_BUILD_ALLOWANCE_S = 3600
+LOCAL_APP = "/app"  # where the local job container mounts the challenge's monorepo volume
+LOCAL_LOCK = f"{LOCAL_APP}/.talos-lock"  # held by every container that writes the volume
 TIME_CAP_S = 6 * 3600
 JOB_MODULES = ("__init__", "inside", "scoring", "types", "challenges", "diagnostics", "c3_job")
 _PKG = Path(__file__).resolve().parent
@@ -69,9 +71,13 @@ def job_sh_text(monorepo_ref: str) -> str:
 
 def local_job_sh_text() -> str:
     """The monorepo is already on the /app volume (talos/local_transport.py::prepare), so the
-    local job only changes into the bind-mounted job dir and runs the same runner as C3."""
+    local job only changes into the bind-mounted job dir and runs the same runner as C3, under
+    the volume's lock: /app is shared by every job of the challenge on this machine (two runs,
+    or a `talos compile` beside a run), and the runner stages the candidate into that checkout,
+    so two jobs at once must take turns or one is built from the other's files. A waiting job's
+    time limit still counts from its start."""
     return ("#!/bin/bash\nset -euo pipefail\ncd \"$C3_JOB_WORKDIR\"\n"
-            "exec python3 -m talos.c3_job\n")
+            f"exec flock {LOCAL_LOCK} python3 -m talos.c3_job\n")
 
 
 def local_settings_doc(request: EvalRequest, local: LocalSettings, seconds: int) -> dict:

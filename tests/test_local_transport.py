@@ -6,9 +6,10 @@ import pytest
 
 from talos.c3_bench import C3CommandError
 from talos.challenges import DEV_IMAGE_TAG, MONOREPO_REF, dev_image
-from talos.local_transport import (DockerTransport, PIDS_LIMIT, READY_MARKER, WARM_MARKER,
-                                   container_name, docker_runtimes, has_gpu_runtime, parse_time,
-                                   prepare, run_args, run_key, volume_key, volume_names)
+from talos.local_transport import (APP, DockerTransport, PIDS_LIMIT, READY_MARKER, WARM_MARKER,
+                                   clone_script, container_name, docker_info, docker_runtimes,
+                                   has_gpu_runtime, parse_time, prepare, run_args, run_key,
+                                   volume_key, volume_names, warm_script)
 
 T0 = datetime(2026, 9, 23, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -260,9 +261,11 @@ def test_a_missing_docker_binary_or_a_hang_is_a_command_error():
 class FakePrepareDocker:
     """`docker` for prepare: which image and volumes exist, which markers the /app volume has."""
 
-    def __init__(self, image=False, volumes=(), markers=(), runtimes=("runc",), gpu_name="L40S"):
+    def __init__(self, image=False, volumes=(), markers=(), runtimes=("runc",), gpu_name="L40S",
+                 ncpu=16, mem_bytes=30 * 2 ** 30 + 12345):
         self.image, self.volumes, self.markers = image, set(volumes), set(markers)
         self.runtimes, self.gpu_name = runtimes, gpu_name
+        self.ncpu, self.mem_bytes = ncpu, mem_bytes
         self.calls = []
 
     def __call__(self, cmd, **kw):
@@ -281,7 +284,9 @@ class FakePrepareDocker:
         elif cmd[1:3] == ["volume", "create"]:
             self.volumes.add(cmd[-1])
         elif cmd[1] == "info":
-            out = json.dumps({r: {"path": r} for r in self.runtimes})
+            # `docker info --format {{json .}}`: the whole document, of which three keys matter
+            out = json.dumps({"Runtimes": {r: {"path": r} for r in self.runtimes},
+                              "NCPU": self.ncpu, "MemTotal": self.mem_bytes, "Images": 3})
         elif cmd[1] == "run":
             script = cmd[-1]
             if cmd[-2] == "-c" and script.startswith("test -e"):
@@ -366,3 +371,26 @@ def test_docker_runtimes_and_the_gpu_check():
     # mutation: a daemon that is down reported as "no GPU" instead of "no Docker"
     with pytest.raises(C3CommandError):
         docker_runtimes(down)
+
+
+def test_docker_info_reports_the_daemons_cpus_and_memory_in_gib():
+    info = docker_info(FakePrepareDocker(runtimes=("runc", "nvidia"), ncpu=6,
+                                         mem_bytes=8 * 2 ** 30 + 12345))
+    # mutation: MemTotal left in bytes, or rounded up, over-reports what the container may take
+    assert (info.ncpu, info.mem_total_gib, info.runtimes) == (6, 8, ["nvidia", "runc"])
+    # a daemon that reports nothing for either is "unknown", never 0 CPUs or 0 GiB
+    unknown = docker_info(FakePrepareDocker(ncpu=0, mem_bytes=0))
+    assert unknown.ncpu is None and unknown.mem_total_gib is None
+
+    def no_doc(cmd, **kw):
+        return types.SimpleNamespace(returncode=0, stdout="not json", stderr="")
+    with pytest.raises(C3CommandError):
+        docker_info(no_doc)
+
+
+def test_prepare_scripts_take_the_app_volume_lock():
+    # mutation: no lock lets a second run of the same challenge re-clone or rebuild in /app
+    # while this one's build is reading it (the volume is shared by every job of the challenge)
+    for script in (clone_script(), warm_script("knapsack")):
+        assert "flock" in script and f"{APP}/.talos-lock" in script, script
+        assert script.index("flock") < script.index("touch")

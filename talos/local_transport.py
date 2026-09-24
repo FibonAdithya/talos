@@ -9,15 +9,17 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from talos.c3_bench import C3CommandError
+from talos.c3_jobdir import LOCAL_APP, LOCAL_LOCK
 from talos.challenges import CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, dev_image
 from talos.executables import argv0
 
-APP = "/app"
+APP = LOCAL_APP
 WORK = "/work"
 ARTIFACTS = "/artifacts"
 PIDS_LIMIT = 4096
@@ -213,23 +215,49 @@ WARM_MARKER = ".talos-warm"
 MONOREPO_TARBALL = "https://codeload.github.com/tig-foundation/tig-monorepo/tar.gz/"
 
 
-def docker_runtimes(run: Callable = subprocess.run) -> list[str]:
-    """The runtimes the daemon reports, sorted. A daemon that is down raises C3CommandError,
-    which setup turns into "install or start Docker"; it is never "no GPU"."""
-    out = DockerTransport(run=run).docker("info", "--format", "{{json .Runtimes}}", timeout=60)
+@dataclass(frozen=True)
+class DockerInfo:
+    """What the daemon reports. On Docker Desktop these are the VM's figures, not the host's,
+    and they are the ceilings: `docker run --cpus` above `ncpu` is refused by the daemon
+    (MEASURED 2026-09-24, Docker 29.1.3: "range of CPUs is from 0.01 to 16.00"), and `--memory`
+    above the total is accepted (MEASURED: `--memory 999g` on a 30 GiB daemon), so nothing
+    stops a build from asking for memory the daemon does not have."""
+    runtimes: list[str]
+    ncpu: int | None  # None when the daemon does not say
+    mem_total_gib: int | None  # MemTotal in whole GiB, rounded down; None when it does not say
+
+
+def docker_info(run: Callable = subprocess.run) -> DockerInfo:
+    """One `docker info`. A daemon that is down raises C3CommandError, which setup turns into
+    "install or start Docker"; it is never "no GPU"."""
+    out = DockerTransport(run=run).docker("info", "--format", "{{json .}}", timeout=60)
     try:
-        return sorted(json.loads(out))
-    except (ValueError, TypeError) as e:
-        raise C3CommandError(f"docker info returned no runtimes: {e}") from None
+        doc = json.loads(out)
+        runtimes = sorted(doc["Runtimes"] or {})
+        ncpu, mem = int(doc.get("NCPU") or 0), int(doc.get("MemTotal") or 0)
+    except (ValueError, TypeError, KeyError, AttributeError) as e:
+        raise C3CommandError(f"docker info returned no usable document: {e}") from None
+    return DockerInfo(runtimes, ncpu or None, mem // 2 ** 30 or None)
+
+
+def docker_runtimes(run: Callable = subprocess.run) -> list[str]:
+    return docker_info(run).runtimes
 
 
 def has_gpu_runtime(run: Callable = subprocess.run) -> bool:
     return "nvidia" in docker_runtimes(run)
 
 
+def lock_lines() -> str:
+    """Every container that writes the volume holds this while it does (the jobs too, in their
+    job.sh): two runs of one challenge on this machine share the volume, and a second clone or
+    warm build under a build in progress would fail it or feed it the wrong sources."""
+    return f"exec 9>{LOCAL_LOCK}\nflock 9\n"
+
+
 def clone_script() -> str:
-    return ("set -euo pipefail\n"
-            f"curl -fsSL \"{MONOREPO_TARBALL}{MONOREPO_REF}\" | tar xz -C {APP} "
+    return ("set -euo pipefail\n" + lock_lines()
+            + f"curl -fsSL \"{MONOREPO_TARBALL}{MONOREPO_REF}\" | tar xz -C {APP} "
             "--strip-components=1\n"
             f"touch {APP}/{READY_MARKER}\n")
 
@@ -237,8 +265,8 @@ def clone_script() -> str:
 def warm_script(challenge: str) -> str:
     """Builds the first algorithm the pinned monorepo ships for the challenge, so the registry
     volume is populated with networking on, once, by code that is not LLM-authored."""
-    return ("set -euo pipefail\n"
-            f"cd {APP}\n"
+    return ("set -euo pipefail\n" + lock_lines()
+            + f"cd {APP}\n"
             f"name=$(ls -d tig-algorithms/src/{challenge}/*/ | grep -v talos_cand | head -1 "
             "| xargs basename)\n"
             "build_algorithm \"$name\"\n"

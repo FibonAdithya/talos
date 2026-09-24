@@ -54,7 +54,7 @@ local backend pulls the same image with `docker pull` the first time a challenge
 
 The local backend is the C3 bench with a Docker transport. One evaluate call is one detached
 `docker run` of the challenge's dev image, polled with `docker inspect` until it exits, with
-`results.json` read off a bind mount. Nothing is billed; the compute figure on the status line
+`results.json` and `build.log` copied out of the stopped container by `docker cp`. Nothing is billed; the compute figure on the status line
 reads `$0.00`.
 
 ### Volumes and the prepare step
@@ -86,6 +86,13 @@ step performed:
    code that is not LLM-authored (marker `/app/.talos-warm`).
 6. For a GPU challenge, read the GPU name with `nvidia-smi` for the hardware class.
 
+Both volumes are shared by every job of the challenge on this machine, and the runner stages
+the candidate into the checkout on `/app` (`talos/c3_job.py::main`), so jobs take turns: the
+local job script (`talos/c3_jobdir.py::local_job_sh_text`) runs the runner under
+`flock /app/.talos-lock`, and the clone and warm-up scripts hold the same lock. Two runs of one challenge at once, or a `talos compile` beside a
+run, therefore serialise on the build instead of compiling each other's files; a waiting job's
+time limit still counts from its start.
+
 To reclaim space after a pin bump, list and remove the old volumes by hand:
 
 ```bash
@@ -105,7 +112,7 @@ Every flag is in `talos/local_transport.py::run_args`; loosening them is a human
 | `-v talos-app-…:/app`, `-v talos-cargo-…:<cargo home>` | The volumes above. |
 | `-e CARGO_HOME=… -e RUSTUP_HOME=…` | Cargo and rustup are told where their files are, so the mounted registry is the one used whatever the image's profile does. |
 | (no `--user`) | The job runs as root inside the container: the image keeps cargo and rustup under `/root`, mode 700, so a non-root user cannot build. With every capability dropped, no network, and no writable host mount, what root can reach is the container's own filesystem and the two volumes. Files under `runs/` are written by Talos itself, so they belong to the user. |
-| `--cpus N --memory Mg` | From `talos setup`; part of the hardware class. |
+| `--cpus N --memory Mg` | From `talos setup`, which defaults them to what `docker info` reports and refuses more: Docker rejects a container with more CPUs than the daemon has (MEASURED 2026-09-24, Docker 29.1.3: "range of CPUs is from 0.01 to 16.00"), and accepts one with more memory than the daemon has (MEASURED: `--memory 999g` on a 30 GiB daemon), which would leave the limit meaning nothing. On Docker Desktop both figures are the VM's (Settings > Resources), not the machine's. Part of the hardware class. |
 | `--network none` | The checkout and the registry are on the volumes; the job never needs the network. |
 | `--cap-drop ALL --security-opt no-new-privileges --pids-limit 4096` | Nothing in the build or the runtime needs a capability; a fork bomb fails the container, not the machine. |
 | `--gpus all` | GPU challenges only. |

@@ -203,6 +203,16 @@ def test_local_flavour_writes_local_json_and_a_job_sh_without_a_download(tmp_pat
     assert HASH not in (d / "local.json").read_text() and HASH not in sh
 
 
+def test_local_job_sh_runs_the_runner_under_the_app_volume_lock(tmp_path):
+    d = c3_jobdir.write_job_dir(tmp_path / "job", req(n=4), "3", local=LocalSettings(8, 12))
+    sh = (d / "job.sh").read_text()
+    # mutation: without the lock, two jobs of one challenge on this machine (two runs, or a
+    # `talos compile` beside a run) restage talos_cand in the shared /app checkout under each
+    # other's build, and a candidate is compiled from the other job's files
+    assert "exec flock /app/.talos-lock python3 -m talos.c3_job" in sh
+    assert "flock" not in c3_jobdir.job_sh_text(MONOREPO_REF)  # C3: one checkout per job
+
+
 def test_local_flavour_gpu_challenge_runs_one_worker(tmp_path):
     d = c3_jobdir.write_job_dir(tmp_path / "job", req(challenge="hypergraph"), "1",
                                 local=LocalSettings(8, 12))

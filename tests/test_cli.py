@@ -1680,15 +1680,15 @@ def test_setup_checks_c3_with_the_environment_key_and_says_which_transport(tmp_p
     assert "C3_API_KEY" not in typed_out and "MCP" in typed_out
 
 
-def _local_docker(runtimes=("runc",), fail=False):
+def _local_docker(runtimes=("runc",), fail=False, ncpu=16, mem_gib=30):
     def run(cmd, **kw):
         if fail:
             return types.SimpleNamespace(returncode=1, stdout="",
                                          stderr="Cannot connect to the Docker daemon")
         # argv[0] is a full path on Windows (executables.argv0); match the command word
         assert cmd[1] == "info", cmd
-        return types.SimpleNamespace(returncode=0, stdout=json.dumps({r: {} for r in runtimes}),
-                                     stderr="")
+        doc = {"Runtimes": {r: {} for r in runtimes}, "NCPU": ncpu, "MemTotal": mem_gib * 2 ** 30}
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(doc), stderr="")
     return run
 
 
@@ -1719,13 +1719,46 @@ def test_setup_local_without_docker_writes_nothing(tmp_path, monkeypatch, capsys
     assert not (tmp_path / "talos.config.json").exists()
 
 
-def test_default_local_memory_floors_and_falls_back(monkeypatch):
-    monkeypatch.setattr(cli, "_total_memory_gib", lambda: 6)
-    assert cli.default_local_memory_gib() == 4
-    monkeypatch.setattr(cli, "_total_memory_gib", lambda: 30)
-    assert cli.default_local_memory_gib() == 26
-    monkeypatch.setattr(cli, "_total_memory_gib", lambda: None)
-    assert cli.default_local_memory_gib() == cli.LOCAL_DEFAULT_MEMORY_GIB
+def test_default_local_memory_floors_caps_and_falls_back():
+    assert cli.default_local_memory_gib(6) == 4
+    assert cli.default_local_memory_gib(30) == 26
+    # mutation: a floor above the daemon's total proposes a default setup then refuses
+    assert cli.default_local_memory_gib(3) == 3
+    assert cli.default_local_memory_gib(None) == cli.LOCAL_DEFAULT_MEMORY_GIB
+
+
+def test_setup_local_defaults_come_from_the_docker_daemon_not_the_host(tmp_path, monkeypatch):
+    # MEASURED 2026-09-24 (Docker 29.1.3): `docker run --cpus` above the daemon's CPU count is
+    # refused ("range of CPUs is from 0.01 to 16.00, as there are only 16 CPUs available"), and
+    # `--memory` above its total is accepted without a check. On Docker Desktop the daemon
+    # is a VM with fewer CPUs and less memory than the host, so host figures are wrong defaults.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli.os, "cpu_count", lambda: 99)
+    monkeypatch.setattr(cli, "subprocess",
+                        types.SimpleNamespace(run=_local_docker(ncpu=5, mem_gib=12)))
+    rc = cli.main(["setup"], ask=scripted(["local", "claude-cli", "", "single-shot", "", ""]))
+    assert rc == 0
+    cfg = load(tmp_path)
+    # mutation: defaults from os.cpu_count / os.sysconf write 99 CPUs and the host's memory
+    assert (cfg.local_cpus, cfg.local_memory_gib) == (5, 8)
+
+
+def test_setup_local_refuses_limits_above_the_daemons(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "validate_provider", lambda p: None)
+    monkeypatch.setattr(cli, "subprocess",
+                        types.SimpleNamespace(run=_local_docker(ncpu=4, mem_gib=8)))
+    # mutation: accepting 5 CPUs on a 4-CPU daemon fails every deploy with Docker's range error
+    rc = cli.main(["setup"], ask=scripted(["local", "claude-cli", "", "single-shot", "5", "8"]))
+    err = capsys.readouterr().err
+    assert rc == 2 and "4 CPUs" in err and "8 GiB" in err
+    rc = cli.main(["setup"], ask=scripted(["local", "claude-cli", "", "single-shot", "4", "9"]))
+    assert rc == 2 and "8 GiB" in capsys.readouterr().err
+    assert not (tmp_path / "talos.config.json").exists()
+    # the daemon's own figures are accepted
+    rc = cli.main(["setup"], ask=scripted(["local", "claude-cli", "", "single-shot", "4", "8"]))
+    assert rc == 0 and (load(tmp_path).local_cpus, load(tmp_path).local_memory_gib) == (4, 8)
 
 
 def test_make_bench_local_is_the_c3_bench_over_docker_and_the_local_class(tmp_path):
@@ -1743,14 +1776,26 @@ def test_make_bench_local_is_the_c3_bench_over_docker_and_the_local_class(tmp_pa
                                     gpu_name="NVIDIA L40S", host="box") == "local-box-gpu-nvidia-l40s"
 
 
-def test_local_settings_come_from_the_config_or_the_machine(monkeypatch):
-    monkeypatch.setattr(cli.os, "cpu_count", lambda: 16)
-    monkeypatch.setattr(cli, "_total_memory_gib", lambda: 30)
+def test_local_settings_come_from_the_config_or_the_docker_daemon(monkeypatch):
+    from talos.local_transport import DockerInfo
+    monkeypatch.setattr(cli.os, "cpu_count", lambda: 99)
+    calls = []
+
+    def info():
+        calls.append(1)
+        return DockerInfo(runtimes=["runc"], ncpu=16, mem_total_gib=30)
+    monkeypatch.setattr(cli, "docker_info", info)
     s = cli.local_settings(Config(provider="x", model="m", mode="single-shot", api_base=None,
                                   backend="local", local_cpus=6, local_memory_gib=10))
-    assert (s.cpus, s.memory_gib) == (6, 10)
-    # the agentic sandbox's `talos compile` has no config: the machine's defaults
-    assert (cli.local_settings(None).cpus, cli.local_settings(None).memory_gib) == (16, 26)
+    # a config written by setup never asks Docker
+    assert (s.cpus, s.memory_gib) == (6, 10) and calls == []
+    # the agentic sandbox's `talos compile` has no config: the daemon's figures, not the host's
+    # (mutation: os.cpu_count gives 99, which Docker Desktop's VM would refuse)
+    s = cli.local_settings(None)
+    assert (s.cpus, s.memory_gib) == (16, 26) and calls == [1]
+    # a config without the limits (`talos compile --backend local` beside a modal config) too
+    s = cli.local_settings(Config(provider="x", model="m", mode="single-shot", api_base=None))
+    assert (s.cpus, s.memory_gib) == (16, 26)
 
 
 def _local_config(root, cpus=8, memory=12):
@@ -1883,11 +1928,15 @@ def test_setup_local_refuses_zero_cpus_or_memory(tmp_path, monkeypatch, capsys):
 
 
 def test_compile_local_prepares_then_evaluates(tmp_path, monkeypatch, capsys):
+    from talos.local_transport import DockerInfo
     monkeypatch.chdir(tmp_path)
     (tmp_path / "algorithm").mkdir()
     (tmp_path / "algorithm" / "mod.rs").write_text("fn x(){}")
     order = []
     monkeypatch.setattr(cli, "prepare", lambda ch, **k: order.append("prepare"))
+    # no config here (the agentic sandbox): the limits come from the daemon, never the host
+    monkeypatch.setattr(cli, "docker_info", lambda: DockerInfo(["runc"], 4, 8))
+    seen = {}
 
     class B(_RefusingBench):
         def evaluate(self, request):
@@ -1897,6 +1946,10 @@ def test_compile_local_prepares_then_evaluates(tmp_path, monkeypatch, capsys):
             return EvalResult(CompileResult(ok=True, artifact_id="a", output="ok"), [], None,
                               "not_won")
 
-    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: B("x"))
+    def make(*a, local=None, **k):
+        seen["local"] = local
+        return B("x")
+    monkeypatch.setattr(cli, "make_bench", make)
     rc = cli.main(["compile", "--challenge", "knapsack", "--backend", "local"])
     assert rc == 0 and order == ["prepare", "evaluate"]
+    assert (seen["local"].cpus, seen["local"].memory_gib) == (4, 4)

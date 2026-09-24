@@ -30,7 +30,8 @@ from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_class, c3_im
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.diagnostics import first_error
-from talos.local_transport import DockerTransport, docker_runtimes, has_gpu_runtime, prepare
+from talos.local_transport import (DockerInfo, DockerTransport, docker_info, has_gpu_runtime,
+                                   prepare)
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.masked_input import ask_secret
 from talos.nonces import draw_nonce_sets, new_rand_hash
@@ -46,8 +47,9 @@ CLI_PROVIDERS = ("claude-cli", "codex-cli")
 UNMETERED = CLI_PROVIDERS + ("fake",)
 DEFAULT_COMPUTE_USD = 20.0
 BACKENDS = ("modal", "c3", "local")
-LOCAL_DEFAULT_MEMORY_GIB = 8
+LOCAL_DEFAULT_MEMORY_GIB = 8  # when the daemon does not report its memory
 LOCAL_MIN_MEMORY_GIB = 4
+LOCAL_MEMORY_HEADROOM_GIB = 4
 IMAGE_HINT = ("the C3 backend pulls the official TIG dev image from GHCR; check that "
               "`DEV_IMAGE_TAG` in talos/challenges.py names a published tag")
 
@@ -115,38 +117,36 @@ def check_c3(run=None, api_key: str | None = None, transport=None) -> float:
     return balance
 
 
-def _total_memory_gib() -> int | None:
-    """Physical memory in GiB, or None where os.sysconf cannot say (Windows)."""
-    try:
-        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2 ** 30)
-    except (AttributeError, ValueError, OSError):
-        return None
-
-
-def default_local_memory_gib() -> int:
-    total = _total_memory_gib()
-    if total is None:
+def default_local_memory_gib(total_gib: int | None) -> int:
+    """`total_gib` is what the daemon reports (talos/local_transport.py::docker_info), which on
+    Docker Desktop is the VM's allocation, not the host's memory. Never above the total: a floor
+    the daemon cannot give would be proposed by setup and then refused by it."""
+    if total_gib is None:
         return LOCAL_DEFAULT_MEMORY_GIB
-    return max(LOCAL_MIN_MEMORY_GIB, total - 4)
+    return min(total_gib, max(LOCAL_MIN_MEMORY_GIB, total_gib - LOCAL_MEMORY_HEADROOM_GIB))
 
 
-def local_settings(cfg: Config | None) -> LocalSettings:
-    """The container limits: from the config, or the machine's own for a `talos compile` in
-    the agentic sandbox, which has no config and scores no nonce (so no hardware class)."""
-    cpus = (cfg.local_cpus if cfg and cfg.local_cpus else None) or os.cpu_count() or 1
-    mem = ((cfg.local_memory_gib if cfg and cfg.local_memory_gib else None)
-           or default_local_memory_gib())
+def local_settings(cfg: Config | None, info: DockerInfo | None = None) -> LocalSettings:
+    """The container limits `talos setup` wrote. Without them (a `talos compile` in the agentic
+    sandbox has no config at all, and scores no nonce, so no hardware class) they are the
+    daemon's own figures, never the host's: Docker refuses `--cpus` above its CPU count, and on
+    Docker Desktop that count is the VM's."""
+    cpus = cfg.local_cpus if cfg else None
+    mem = cfg.local_memory_gib if cfg else None
+    if not (cpus and mem):
+        info = info or docker_info()
+        cpus = cpus or info.ncpu or os.cpu_count() or 1
+        mem = mem or default_local_memory_gib(info.mem_total_gib)
     return LocalSettings(cpus=cpus, memory_gib=mem)
 
 
-def check_local(run=None) -> bool:
-    """Docker must answer; returns whether the nvidia runtime is present."""
+def check_local(run=None) -> DockerInfo:
+    """Docker must answer; returns what the daemon reports (runtimes, CPUs, memory)."""
     try:
-        runtimes = docker_runtimes(run or subprocess.run)
+        return docker_info(run or subprocess.run)
     except C3CommandError as e:
         raise ConfigError(f"Docker check failed: {e}; install and start Docker "
                           f"(docker.com), then run `talos setup` again") from None
-    return "nvidia" in runtimes
 
 
 def image_available(challenge: str, fetch=None) -> bool:
@@ -275,19 +275,33 @@ def cmd_setup(args, ask) -> int:
     if backend == "modal":
         token_id = ask("Modal token id (create at modal.com/settings/tokens)")
         token_secret = ask("Modal token secret", secret=True)
-    local = None
+    local = info = None
     if backend == "local":
+        # Before the limits are asked: their defaults and their ceilings are the daemon's.
+        try:
+            info = check_local()
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 1
         try:
             local = LocalSettings(
-                cpus=_ask_number(ask, "CPUs for the local container", str(os.cpu_count() or 1),
-                                 int),
+                cpus=_ask_number(ask, "CPUs for the local container",
+                                 str(info.ncpu or os.cpu_count() or 1), int),
                 memory_gib=_ask_number(ask, "Memory for the local container in GiB",
-                                       str(default_local_memory_gib()), int))
+                                       str(default_local_memory_gib(info.mem_total_gib)), int))
         except ConfigError as e:  # three non-numbers, as the run wizard treats it
             print(str(e), file=sys.stderr)
             return 2
         if local.cpus < 1 or local.memory_gib < 1:
             print("CPUs and memory for the local container must each be at least 1",
+                  file=sys.stderr)
+            return 2
+        if ((info.ncpu and local.cpus > info.ncpu)
+                or (info.mem_total_gib and local.memory_gib > info.mem_total_gib)):
+            # Docker refuses --cpus above its count at every deploy; --memory above its total
+            # is accepted, so only this check stops it. On Docker Desktop both are the VM's.
+            print(f"Docker has {info.ncpu} CPUs and {info.mem_total_gib} GiB; the container "
+                  f"cannot have more (Docker Desktop: raise them under Settings > Resources)",
                   file=sys.stderr)
             return 2
     provider = make_provider(kind, model, api_key=api_key, api_base=api_base)
@@ -308,9 +322,8 @@ def cmd_setup(args, ask) -> int:
                 print("C3: using the c3 CLI and its `c3 login` session.")
             check_c3(api_key=check_key)
         elif backend == "local":
-            gpu = check_local()
             print("Local: jobs run in Docker on this machine. GPU challenges: "
-                  + ("available (nvidia runtime found)." if gpu
+                  + ("available (nvidia runtime found)." if "nvidia" in info.runtimes
                      else "not available (no nvidia runtime)."))
         else:
             deploy_bench(token_id or None, token_secret or None)
@@ -525,9 +538,6 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         provider = make_provider(cfg.provider, cfg.model, api_key=resolve_api_key(cfg),
                                  api_base=cfg.api_base)
         c3_api_key = resolve_c3_api_key(cfg) if cfg.backend == "c3" else None
-        local = local_settings(cfg) if cfg.backend == "local" else None
-        bench = make_bench(cfg.backend, store.run_dir, pending, c3_api_key=c3_api_key,
-                           local=local)
         if c3_api_key:
             # `talos compile` in the agentic sandbox has no secrets.json to read the key from.
             os.environ["C3_API_KEY"] = c3_api_key
@@ -544,6 +554,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
             return 1
         if cfg.backend == "local":
             try:
+                local = local_settings(cfg)  # asks Docker only if the config lacks the limits
                 if CHALLENGES[spec.challenge].is_gpu and not has_gpu_runtime():
                     state.status, state.stop_reason = "failed", "no NVIDIA container runtime"
                     store.save(state)
@@ -559,6 +570,8 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
                 store.save(state)
                 print(f"Docker failed while preparing {spec.challenge}: {e}", file=sys.stderr)
                 return 1
+        bench = make_bench(cfg.backend, store.run_dir, pending, c3_api_key=c3_api_key,
+                           local=local)
     from talos.loop import Loop
     hardware = bench_hardware_class(cfg.backend, spec.challenge, local=local, gpu_name=gpu_name)
     # `talos compile` inside the agentic sandbox runs in a worktree with no talos.config.json.
@@ -846,15 +859,17 @@ def cmd_compile(args, ask) -> int:
         cfg = load(Path.cwd())
     except ConfigError:
         cfg = None  # the agentic sandbox: the key comes from C3_API_KEY
+    local = None
     if backend == "local":
         try:
             prepare(args.challenge)
+            local = local_settings(cfg)
         except C3CommandError as e:
             print(f"Docker failed while preparing {args.challenge}: {e}", file=sys.stderr)
             return 1
     bench = make_bench(backend, Path.cwd() / ".talos" / "compile", PendingJobStore.memory(),
                        c3_api_key=resolve_c3_api_key(cfg) if backend == "c3" else None,
-                       local=local_settings(cfg) if backend == "local" else None)
+                       local=local)
     r = bench.evaluate(EvalRequest(args.challenge, files, [], [], 0, None,
                                    CHALLENGES[args.challenge].beat)).compile
     print(r.output[-4000:])

@@ -144,9 +144,12 @@ It asks, in order:
 7. **Modal token id and secret**: `modal` backend only; the secret shows as `*`.
 8. **C3 API key**: `c3` backend only; shows as `*`. Leave it blank to use your `c3 login`
    session. With it blank, a `C3_API_KEY` environment variable is used if set.
-9. **CPUs and memory for the local container**: `local` backend only. The defaults are every
-   core and total memory minus 4 GiB. Both are part of the local baseline cache key: change
-   them and local baselines are measured again.
+9. **CPUs and memory for the local container**: `local` backend only. The defaults are what
+   Docker reports: every CPU the daemon has and its memory minus 4 GiB. On Docker Desktop
+   those are the VM's figures (Settings > Resources), not the machine's, and values above them
+   are refused, because Docker rejects a container with more CPUs than the daemon has. Both
+   are part of the local baseline cache key: change them and local baselines are measured
+   again.
 
 It then checks everything before writing anything:
 
@@ -155,7 +158,8 @@ It then checks everything before writing anything:
 - on `modal`: sets your Modal token and deploys the benchmark app to your account;
 - on `c3`: runs `c3 whoami` and `c3 balance` (with the API key, if you gave one), and warns
   if the balance is below £1;
-- on `local`: that `docker info` answers, and says whether the NVIDIA runtime is present.
+- on `local`: `docker info` is run before the limits are asked (its CPU and memory figures
+  are their defaults and ceilings), and the summary says whether the NVIDIA runtime is present.
 
 On success it prints ``Setup complete. Run `talos run` to start a job.`` and writes:
 
