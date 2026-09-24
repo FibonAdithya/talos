@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+from typing import Callable
 import types
 import urllib.error
 import urllib.request
@@ -21,7 +22,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from talos import mainnet as mainnet_api
-from talos.budget import Budget, Spend
+from talos.budget import Budget, BudgetExhausted, Spend, exhausted
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
@@ -214,11 +215,16 @@ def bench_hardware_class(backend: str, challenge: str, local: LocalSettings | No
     return c3_hardware_class(spec, gpu) if backend == "c3" else hardware_class(spec, gpu)
 
 
-def freeze_gpu(bench, spec, state, store, backend: str, log=print) -> None:
+def freeze_gpu(bench, spec, state, store, backend: str, log=print,
+               clock: Callable[[], float] = time.time) -> None:
     """Fixes the GPU a GPU job runs on, once. The first run probes through the bench and saves
     the choice; a resume hands the saved choice back, so the candidates score on the GPU the
     baseline was measured on. Exported as TALOS_GPU for the sandbox's `talos compile`. CPU
-    challenges, the local backend and the fake bench choose nothing."""
+    challenges, the local backend and the fake bench choose nothing.
+
+    The probe is a compute call (invariant 5): the budget is checked before it, and what the
+    bench charged for it goes on compute spend, as `talos/loop.py::_BudgetedBench` does for
+    the baseline."""
     cs = CHALLENGES[spec.challenge]
     if state.gpu is None and state.baseline is not None and cs.is_gpu and backend != "local":
         # A job from before the choice existed: its baseline ran on the one GPU there was,
@@ -227,11 +233,18 @@ def freeze_gpu(bench, spec, state, store, backend: str, log=print) -> None:
         store.save(state)
         store.event("gpu_selected", gpu=state.gpu, reason="job predates the GPU choice")
     if state.gpu is None:
-        if cs.is_gpu:
+        if cs.is_gpu and backend != "local":
+            dim = exhausted(spec.budget, state.spend, clock())
+            if dim:
+                raise BudgetExhausted(dim)
             log(f"Probing GPU capacity for {spec.challenge}...")
-        state.gpu = bench.select_gpu(spec.challenge)
-        if state.gpu is not None:
+        mark = bench.cost_mark()
+        try:
+            state.gpu = bench.select_gpu(spec.challenge)
+        finally:
+            state.spend.compute_usd += bench.cost_usd_since(mark)
             store.save(state)
+        if state.gpu is not None:
             store.event("gpu_selected", gpu=state.gpu)
             log(f"GPU: {state.gpu}")
     else:
@@ -621,6 +634,11 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     except BenchCancelled as e:
         state.status, state.stop_reason = "cancelled", f"stopped; bench job cancelled: {e}"
         store.save(state)
+        return 1
+    except BudgetExhausted as e:
+        state.status, state.stop_reason = "exhausted", e.dimension
+        store.save(state)
+        print(f"budget exhausted before the GPU probe: {e.dimension}", file=sys.stderr)
         return 1
     hardware = bench_hardware_class(cfg.backend, spec.challenge, local=local, gpu_name=gpu_name,
                                     gpu=state.gpu)

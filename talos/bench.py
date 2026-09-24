@@ -175,12 +175,16 @@ class ModalBench:
                                f"{self.probe_window_s}s each; try again later")
 
     def _probe(self, gpu: str) -> bool:
+        t0 = self._clock()
         call = self._fn(f"probe_{gpu_slug(gpu)}").spawn()
         try:
             call.get(timeout=self.probe_window_s)
         except _timeout_types():
             call.cancel()
-            return False
+            return False  # never started: nothing to charge
+        # ESTIMATE: the whole wait at the GPU's rate. Queue time is in it, so this is never
+        # below what the container billed.
+        self._cost += GPU_USD_PER_SECOND[gpu] * (self._clock() - t0)
         return True
 
     def _name(self, kind: str, challenge: str) -> str:

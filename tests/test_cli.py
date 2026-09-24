@@ -2133,3 +2133,36 @@ def test_a_fake_run_on_a_gpu_challenge_freezes_the_first_gpu_without_probing(tmp
     st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     assert st["gpu"] == "L40S" and st["status"] in ("won", "exhausted")
     assert os.environ.get("TALOS_GPU") == "L40S"
+
+
+def test_the_gpu_probe_is_budget_checked_before_it_runs(tmp_path, monkeypatch, capsys):
+    # invariant 5: the probe is a real compute call; a zero compute cap must stop before it
+    b = _ProbingBench("A100-80GB")
+    rc = _gpu_run(tmp_path, monkeypatch, b, extra=["--budget-compute-usd", "0"])
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    # mutation: dropping the check lets `--budget-compute-usd 0` pay for up to three probes
+    assert b.selections == [] and rc == 1
+    assert st["status"] == "exhausted" and st["stop_reason"] == "compute_usd"
+    assert "compute_usd" in capsys.readouterr().err
+
+
+def test_the_gpu_probe_is_charged_to_compute_spend(tmp_path, monkeypatch):
+    class Billing(_ProbingBench):
+        def select_gpu(self, challenge, chosen=None):
+            self.charged = 0.05
+            return super().select_gpu(challenge, chosen)
+
+        def cost_usd_since(self, mark):
+            return getattr(self, "charged", 0.0) - mark
+
+        def cost_mark(self):
+            return getattr(self, "charged", 0.0)
+
+    b = Billing("A100-80GB")
+    _gpu_run(tmp_path, monkeypatch, b)
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    # mutation: not adding the bench's charge leaves the probe out of the printed estimate
+    # and out of the next budget check
+    assert st["spend"]["compute_usd"] == pytest.approx(0.05)

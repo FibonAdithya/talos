@@ -620,13 +620,20 @@ def test_select_gpu_probes_each_class_in_turn_until_one_leaves_the_queue(tmp_pat
                            CHALLENGES["hypergraph"].beat))
     assert _hw(t.dirs[-1]) == "a100"
     from talos.c3_bench import GBP_PER_HOUR, USD_PER_GBP
-    assert b.cost_mark() == pytest.approx(20 / 3600 * GBP_PER_HOUR["a100"] * USD_PER_GBP)
+    from talos.c3_jobdir import PROBE_WALLTIME_S
+    # mutation: an uncharged probe hides a billing job from the compute cap; the l40 probe
+    # never ran and charges nothing. The a100 probe is charged its whole walltime, then the
+    # real job its 20 s
+    assert b.cost_mark() == pytest.approx((PROBE_WALLTIME_S + 20) / 3600
+                                          * GBP_PER_HOUR["a100"] * USD_PER_GBP)
 
 
 def test_select_gpu_reports_all_classes_unavailable(tmp_path):
     t = ProbeTransport([["PENDING"], ["PENDING"], ["SCHEDULING"]])
+    b = tbench(tmp_path, t)
     with pytest.raises(BenchUnavailable) as ei:
-        tbench(tmp_path, t).select_gpu("hypergraph")
+        b.select_gpu("hypergraph")
+    assert b.cost_mark() == 0.0  # nothing ran
     assert [_hw(d) for d in t.dirs] == ["l40", "a100", "h100"]
     assert [c for c in t.calls if c[0] == "cancel"] == [("cancel", "job_1"), ("cancel", "job_2"),
                                                         ("cancel", "job_3")]

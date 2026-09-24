@@ -48,6 +48,12 @@ only GPU there was. If the frozen GPU runs out of capacity later, the run pauses
 any other capacity shortage and resumes on the same GPU; it never switches. When no GPU answers,
 the run is paused with the list of GPUs tried, and `talos run --resume` tries again.
 
+The probe is a compute call like any other: the budget is checked before it, so a job with
+`--budget-compute-usd 0` stops before probing, and its estimated cost goes on compute spend.
+Modal charges the wait for a successful probe at the GPU's rate (queue time included, so never
+below what the container billed); C3 charges the probe's whole two-minute walltime at the class
+rate, the most it can bill. A probe that never started charges nothing.
+
 CPU challenges and the local backend have one hardware class and no probe. The Modal app must be
 redeployed (`talos setup`) after upgrading to a version with this table: the old deploy has no
 per-GPU functions, and a run against it stops with "Run `talos setup` to deploy".
