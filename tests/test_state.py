@@ -114,15 +114,15 @@ def test_spec_hyperparameter_fields_round_trip_default_to_none_and_survive_redac
     assert "ab" * 32 not in json.dumps(red)
 
 
-def test_state_gpu_round_trips_and_defaults_to_none(tmp_path):
+def test_state_hardware_round_trips_and_defaults_to_none(tmp_path):
     # mutation: dropping the field from to_dict loses the frozen GPU on the first save, so a
     # resume probes again and can land the candidates on a different GPU from the baseline
     store = JobStore(tmp_path)
     st = JobState.fresh(Spend(started_at=0.0))
-    assert st.gpu is None
-    st.gpu = "A100-80GB"
+    assert st.hardware is None
+    st.hardware = "A100-80GB"
     store.save(st)
-    assert store.load().gpu == "A100-80GB"
+    assert store.load().hardware == "A100-80GB"
     old = st.to_dict()
-    del old["gpu"]
-    assert JobState.from_dict(old).gpu is None  # a state.json written before the field
+    del old["hardware"]
+    assert JobState.from_dict(old).hardware is None  # a state.json written before the field

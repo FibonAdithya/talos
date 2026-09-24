@@ -10,7 +10,7 @@ DEV_IMAGE_TAG = "0.0.7"
 C3_CPU_PROFILE = "cpu-d3-4vcpu-16gb"  # 4 vCPU / 16 GB, matches the 4-core Modal spec
 C3_CPU_WORKERS = 4
 # GPU preference order, tried in turn at job start until one has capacity (`talos/bench.py::
-# ModalBench.select_gpu`, `talos/c3_bench.py::C3Bench.select_gpu`). The choice is then frozen
+# ModalBench.select_hardware`, `talos/c3_bench.py::C3Bench.select_hardware`). The choice is then frozen
 # in state.json for the whole job: the baseline and every candidate must score on the same
 # class (AGENTS.md invariant 1), so a fallback can never happen per call. Only classes with at
 # least the L40S's 48 GB of VRAM, cheapest first; a smaller card could OOM a candidate the
@@ -53,25 +53,26 @@ def _gpu(name: str, cid: str) -> ChallengeSpec:
     return ChallengeSpec(name=name, id=cid, is_gpu=True)
 
 
-def gpu_options(spec: ChallengeSpec) -> tuple[str, ...]:
+def hardware_options(spec: ChallengeSpec) -> tuple[str, ...]:
     """The Modal GPUs a job for this challenge may be frozen to, in preference order."""
     return MODAL_GPUS if spec.is_gpu else ()
 
 
-def c3_gpu_options(spec: ChallengeSpec) -> tuple[str, ...]:
+def c3_hardware_options(spec: ChallengeSpec) -> tuple[str, ...]:
     """The C3 hardware classes a job for this challenge may be frozen to, in preference order."""
     return C3_GPU_CLASSES if spec.is_gpu else ()
 
 
-def _chosen_gpu(spec: ChallengeSpec, gpu: str | None, options: tuple[str, ...]) -> str:
+def _chosen(spec: ChallengeSpec, hardware: str | None, options: tuple[str, ...]) -> str:
     """The GPU a job was frozen to, checked against the list. No default: a helper that fell
     back to the first option would let a job frozen to an A100 look up (and hit) an L40S
     baseline whenever the caller forgot to pass the choice."""
-    if gpu is None:
+    if hardware is None:
         raise ValueError(f"{spec.name} is a GPU challenge; pass the GPU the job was frozen to")
-    if gpu not in options:
-        raise ValueError(f"unknown GPU {gpu!r} for {spec.name}; one of {', '.join(options)}")
-    return gpu
+    if hardware not in options:
+        raise ValueError(f"unknown hardware {hardware!r} for {spec.name}; one of "
+                         f"{', '.join(options)}")
+    return hardware
 
 
 def gpu_slug(gpu: str) -> str:
@@ -80,28 +81,29 @@ def gpu_slug(gpu: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", gpu.lower()).strip("_")
 
 
-def hardware_class(spec: ChallengeSpec, gpu: str | None = None) -> str:
+def hardware_class(spec: ChallengeSpec, hardware: str | None = None) -> str:
     """Part of the baseline cache key. A measurement is only reusable on the same hardware, and
     memory belongs in the key as much as cores do: changing memory_mib alone changes the timings
     (and the price per second) a cached baseline was measured under. For a GPU challenge the
-    key carries the GPU the job was frozen to; `gpu` is ignored for a CPU challenge."""
+    key carries the GPU the job was frozen to; `hardware` is ignored for a CPU challenge, which
+    has one class on Modal."""
     if spec.is_gpu:
-        return f"gpu-{_chosen_gpu(spec, gpu, MODAL_GPUS)}"
+        return f"gpu-{_chosen(spec, hardware, MODAL_GPUS)}"
     return f"cpu{spec.cpu}-mem{spec.memory_mib}"
 
 
-def c3_profile(spec: ChallengeSpec, gpu: str | None = None) -> str:
+def c3_profile(spec: ChallengeSpec, hardware: str | None = None) -> str:
     """The C3 `hardware:` setting: the CPU profile, or the GPU class the job was frozen to."""
-    return _chosen_gpu(spec, gpu, C3_GPU_CLASSES) if spec.is_gpu else C3_CPU_PROFILE
+    return _chosen(spec, hardware, C3_GPU_CLASSES) if spec.is_gpu else C3_CPU_PROFILE
 
 
 def c3_workers(spec: ChallengeSpec) -> int:
     return 1 if spec.is_gpu else C3_CPU_WORKERS
 
 
-def c3_hardware_class(spec: ChallengeSpec, gpu: str | None = None) -> str:
+def c3_hardware_class(spec: ChallengeSpec, hardware: str | None = None) -> str:
     """Baseline cache key component. Prefixed so a C3 baseline never matches a Modal one."""
-    return f"c3-{c3_profile(spec, gpu)}"
+    return f"c3-{c3_profile(spec, hardware)}"
 
 
 def host_slug(host: str) -> str:

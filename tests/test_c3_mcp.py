@@ -272,7 +272,7 @@ def test_deploy_sends_gpu_hardware_and_accelerator_for_a_gpu_challenge(tmp_path)
     from tests.test_c3_jobdir import req as jobdir_req
 
     c = FakeClient({"deploy": {"job_id": "job_6"}})
-    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", gpu="l40")
+    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", hardware="l40")
     assert McpTransport("k", client=c).deploy(d) == "job_6"
     _name, args = c.calls[0]
     # mutation: "docker_requires_accelerator": "none" forced in the deploy args
@@ -546,7 +546,7 @@ def test_urllib_post_does_not_follow_a_redirect_to_a_second_host():
 def test_deploy_sends_the_settings_the_c3_file_names_including_the_frozen_gpu(tmp_path):
     from tests.test_c3_jobdir import req as jobdir_req
     c = FakeClient({"deploy": {"job_id": "job_8"}})
-    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", gpu="h100")
+    d = write_job_dir(tmp_path / "job", jobdir_req(challenge="hypergraph"), "3", hardware="h100")
     assert McpTransport("k", client=c).deploy(d) == "job_8"
     _name, args = c.calls[0]
     # mutation: recomputing the settings from the challenge (rather than reading .c3) sends

@@ -62,7 +62,7 @@ progress.
    and the container's CPU and memory limits, so changing either at
    `talos setup` invalidates every local baseline. On Modal and C3 a GPU
    challenge's GPU is chosen once, by a capacity probe at job start
-   (`talos/cli.py::freeze_gpu`), frozen in `state.json`
+   (`talos/cli.py::freeze_hardware`), frozen in `state.json`
    (`talos/state.py::JobState`) and handed back on every resume; the fallback
    order is `talos/challenges.py::MODAL_GPUS` and
    `talos/challenges.py::C3_GPU_CLASSES`. A fallback per call, such as Modal's

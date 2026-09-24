@@ -33,14 +33,14 @@ must score on the same hardware class (AGENTS.md invariant 1) and the class is i
 cache key. Modal's own `gpu=["L40S", "A100-80GB"]` fallback list is deliberately not used: it
 picks a GPU per container. Instead `talos setup` deploys one `compile_<challenge>_<gpu>` and
 `score_nonce_<challenge>_<gpu>` pair per GPU, plus one `probe_<gpu>` function on a stock image,
-and `talos/cli.py::freeze_gpu` fixes the GPU before the baseline:
+and `talos/cli.py::freeze_hardware` fixes the GPU before the baseline:
 
 | Backend | Probe | "No capacity" means | Cost of one probe |
 |---|---|---|---|
 | Modal | `probe_<gpu>` is spawned; the call must return within `ModalBench.probe_window_s` (120 s). A call still queued then is cancelled, or it would run and bill whenever that GPU freed up. | Every probe timed out. | A few seconds of the GPU on a slim image. ESTIMATE (unverified live). |
 | C3 | A two-minute job whose script is `true`, on `ubuntu:24.04`, written by `talos/c3_jobdir.py::write_probe_dir` to `runs/<job_id>/c3/probe-<class>/`. It must leave the queue within the capacity window (`C3Bench.pending_timeout_s`, 30 min); once RUNNING it is cancelled. A job still queued at the window's end is cancelled and the next class tried. | Every class stayed queued for the whole window, so up to 90 minutes before the run pauses. | Under a minute of the class, plus its queue time. ESTIMATE (unverified live). |
 
-The chosen GPU is `gpu` in `state.json`, a `gpu_selected` event in the timeline, and `TALOS_GPU`
+The chosen GPU is `gpu` in `state.json`, a `hardware_selected` event in the timeline, and `TALOS_HARDWARE`
 in the agentic sandbox's environment so `talos compile` there builds on the same GPU. A resume
 hands the saved choice back and probes nothing. A job that was created before this choice
 existed (a measured baseline and no `gpu` field) is frozen to the first option, which is the

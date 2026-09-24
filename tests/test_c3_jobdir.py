@@ -67,10 +67,10 @@ def test_job_settings_and_the_c3_file_agree():
     assert s["hardware"] == "cpu-d3-4vcpu-16gb"
     assert s["docker_requires_accelerator"] == "none"
     assert s["docker_image"] == f"ghcr.io/tig-foundation/tig-monorepo/knapsack/dev:{DEV_IMAGE_TAG}"
-    g = c3_jobdir.job_settings("hypergraph", "1", 60, gpu="l40")
+    g = c3_jobdir.job_settings("hypergraph", "1", 60, hardware="l40")
     assert g["docker_requires_accelerator"] == "cuda" and g["hardware"] == "l40"
     # mutation: a hard-coded "l40" runs a job frozen to the a100 class on the wrong hardware
-    assert c3_jobdir.job_settings("hypergraph", "1", 60, gpu="a100")["hardware"] == "a100"
+    assert c3_jobdir.job_settings("hypergraph", "1", 60, hardware="a100")["hardware"] == "a100"
 
 
 def test_c3_config_text_is_exact():
@@ -236,7 +236,7 @@ def test_request_hash_is_the_same_for_both_flavours():
 
 def test_parse_c3_inverts_render_c3():
     from talos.c3_jobdir import parse_c3, render_c3
-    s = c3_jobdir.job_settings("hypergraph", "7", 1380, gpu="a100")
+    s = c3_jobdir.job_settings("hypergraph", "7", 1380, hardware="a100")
     # mutation: a regex that drops the minutes term, or reads hardware from the wrong line,
     # sends the MCP path a different job from the one the CLI path reads out of .c3
     assert parse_c3(render_c3(s)) == s
@@ -269,7 +269,7 @@ def test_probe_dir_is_a_tiny_job_on_the_named_class(tmp_path):
 
 def test_write_job_dir_takes_the_frozen_gpu(tmp_path):
     from talos.c3_jobdir import parse_c3
-    d = c3_jobdir.write_job_dir(tmp_path / "job", req(challenge="hypergraph"), "3", gpu="a100")
+    d = c3_jobdir.write_job_dir(tmp_path / "job", req(challenge="hypergraph"), "3", hardware="a100")
     # mutation: dropping the argument submits every GPU job on the first class
     assert parse_c3((d / ".c3").read_text(encoding="utf-8"))["hardware"] == "a100"
     with pytest.raises(ValueError):  # a GPU job with no chosen GPU is a programming error

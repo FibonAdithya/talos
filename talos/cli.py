@@ -25,8 +25,8 @@ from talos.budget import Budget, Spend
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
-from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_gpu_options, c3_hardware_class,
-                              c3_image, gpu_options, hardware_class, local_hardware_class)
+from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_options, c3_hardware_class,
+                              c3_image, hardware_options, hardware_class, local_hardware_class)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.diagnostics import first_error
@@ -204,42 +204,44 @@ def make_bench(backend: str, run_dir: Path, pending, c3_api_key: str | None = No
 
 def bench_hardware_class(backend: str, challenge: str, local: LocalSettings | None = None,
                          gpu_name: str | None = None, host: str | None = None,
-                         gpu: str | None = None) -> str:
-    """`gpu` is the Modal GPU or C3 class the job was frozen to (JobState.gpu); the local
+                         hardware: str | None = None) -> str:
+    """`hardware` is the Modal GPU or C3 class or profile the job was frozen to
+    (JobState.hardware); the local
     backend's class carries the `nvidia-smi` name instead."""
     spec = CHALLENGES[challenge]
     if backend == "local":
         return local_hardware_class(spec, local.cpus, local.memory_gib, gpu_name,
                                     host or socket.gethostname())
-    return c3_hardware_class(spec, gpu) if backend == "c3" else hardware_class(spec, gpu)
+    return c3_hardware_class(spec, hardware) if backend == "c3" else hardware_class(spec, hardware)
 
 
-def freeze_gpu(bench, spec, state, store, backend: str, log=print) -> None:
+def freeze_hardware(bench, spec, state, store, backend: str, log=print) -> None:
     """Fixes the GPU a GPU job runs on, once. The first run probes through the bench and saves
     the choice; a resume hands the saved choice back, so the candidates score on the GPU the
-    baseline was measured on. Exported as TALOS_GPU for the sandbox's `talos compile`. CPU
+    baseline was measured on. Exported as TALOS_HARDWARE for the sandbox's `talos compile`. CPU
     challenges, the local backend and the fake bench choose nothing."""
     cs = CHALLENGES[spec.challenge]
-    if state.gpu is None and state.baseline is not None and cs.is_gpu and backend != "local":
+    if state.hardware is None and state.baseline is not None and cs.is_gpu and backend != "local":
         # A job from before the choice existed: its baseline ran on the one GPU there was,
         # the first option. Probing now could move its candidates elsewhere.
-        state.gpu = (c3_gpu_options(cs) if backend == "c3" else gpu_options(cs))[0]
+        state.hardware = (c3_hardware_options(cs) if backend == "c3" else hardware_options(cs))[0]
         store.save(state)
-        store.event("gpu_selected", gpu=state.gpu, reason="job predates the GPU choice")
-    if state.gpu is None:
+        store.event("hardware_selected", hardware=state.hardware,
+                    reason="job predates the hardware choice")
+    if state.hardware is None:
         if cs.is_gpu:
             log(f"Probing GPU capacity for {spec.challenge}...")
-        state.gpu = bench.select_gpu(spec.challenge)
-        if state.gpu is not None:
+        state.hardware = bench.select_hardware(spec.challenge)
+        if state.hardware is not None:
             store.save(state)
-            store.event("gpu_selected", gpu=state.gpu)
-            log(f"GPU: {state.gpu}")
+            store.event("hardware_selected", hardware=state.hardware)
+            log(f"GPU: {state.hardware}")
     else:
-        bench.select_gpu(spec.challenge, chosen=state.gpu)
-    if state.gpu is None:
-        os.environ.pop("TALOS_GPU", None)
+        bench.select_hardware(spec.challenge, chosen=state.hardware)
+    if state.hardware is None:
+        os.environ.pop("TALOS_HARDWARE", None)
     else:
-        os.environ["TALOS_GPU"] = state.gpu
+        os.environ["TALOS_HARDWARE"] = state.hardware
 
 
 def _model_prompt(kind: str) -> tuple[str, str | None]:
@@ -611,7 +613,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     # `talos compile` inside the agentic sandbox runs in a worktree with no talos.config.json.
     os.environ["TALOS_BACKEND"] = "modal" if fake else cfg.backend
     try:
-        freeze_gpu(bench, spec, state, store, "modal" if fake else cfg.backend)
+        freeze_hardware(bench, spec, state, store, "modal" if fake else cfg.backend)
     except BenchUnavailable as e:
         # Resumable: the GPUs may free up. A `failed` job could not be resumed at all.
         state.status, state.stop_reason = "paused", f"bench: {e}"
@@ -623,7 +625,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         store.save(state)
         return 1
     hardware = bench_hardware_class(cfg.backend, spec.challenge, local=local, gpu_name=gpu_name,
-                                    gpu=state.gpu)
+                                    hardware=state.hardware)
 
     def on_event(kind, data):
         # loop._n is the iteration the event belongs to; state.iteration only catches up when an
@@ -922,7 +924,7 @@ def cmd_compile(args, ask) -> int:
     try:
         # The job's GPU when run from the agentic sandbox (execute_job exports it); a probe of
         # its own for an ad hoc compile, which has no job to match.
-        bench.select_gpu(args.challenge, chosen=os.environ.get("TALOS_GPU") or None)
+        bench.select_hardware(args.challenge, chosen=os.environ.get("TALOS_HARDWARE") or None)
     except BenchUnavailable as e:
         print(str(e), file=sys.stderr)
         return 1

@@ -2,8 +2,8 @@
 job (AGENTS.md invariant 1): every helper here takes the chosen GPU explicitly."""
 import pytest
 
-from talos.challenges import (C3_GPU_CLASSES, CHALLENGES, MODAL_GPUS, c3_gpu_options,
-                              c3_hardware_class, c3_profile, gpu_options, gpu_slug,
+from talos.challenges import (C3_GPU_CLASSES, CHALLENGES, MODAL_GPUS, c3_hardware_options,
+                              c3_hardware_class, c3_profile, hardware_options, gpu_slug,
                               hardware_class)
 
 
@@ -16,14 +16,14 @@ def test_preference_lists_start_with_the_l40s_and_hold_only_48gb_or_larger_gpus(
 
 
 def test_only_gpu_challenges_have_options():
-    assert gpu_options(CHALLENGES["hypergraph"]) == MODAL_GPUS
-    assert c3_gpu_options(CHALLENGES["hypergraph"]) == C3_GPU_CLASSES
+    assert hardware_options(CHALLENGES["hypergraph"]) == MODAL_GPUS
+    assert c3_hardware_options(CHALLENGES["hypergraph"]) == C3_GPU_CLASSES
     # mutation: giving CPU challenges a list makes execute_job probe (and pay) for a GPU
-    assert gpu_options(CHALLENGES["knapsack"]) == ()
-    assert c3_gpu_options(CHALLENGES["knapsack"]) == ()
+    assert hardware_options(CHALLENGES["knapsack"]) == ()
+    assert c3_hardware_options(CHALLENGES["knapsack"]) == ()
 
 
-def test_hardware_class_carries_the_chosen_gpu():
+def test_hardware_class_carries_the_chosen():
     gpu = CHALLENGES["hypergraph"]
     assert hardware_class(gpu, "L40S") == "gpu-L40S"
     # mutation: ignoring the argument keys an A100 baseline as an L40S one
@@ -36,7 +36,7 @@ def test_hardware_class_carries_the_chosen_gpu():
     assert c3_profile(CHALLENGES["knapsack"]) == "cpu-d3-4vcpu-16gb"
 
 
-def test_a_gpu_challenge_without_a_chosen_gpu_or_with_an_unknown_one_is_an_error():
+def test_a_gpu_challenge_without_a_chosen_or_with_an_unknown_one_is_an_error():
     gpu = CHALLENGES["hypergraph"]
     # mutation: defaulting to the first option lets a job frozen to an A100 look up (and hit)
     # an L40S baseline after the state field is lost

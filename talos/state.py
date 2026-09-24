@@ -126,11 +126,12 @@ class JobState:
     # The compute job in flight, if any: written before the call and cleared after it, so a
     # resume can rebuild the request and reattach to a job that outlived this process.
     pending_job: dict | None = None
-    # The GPU (Modal name or C3 class) this job was frozen to by the first run's capacity
-    # probe; None until then, and always None for a CPU challenge or the local backend. A
-    # resume hands it back to the bench instead of probing again, so the candidates score on
-    # the GPU the baseline was measured on (AGENTS.md invariant 1).
-    gpu: str | None = None
+    # The hardware (a Modal GPU, or a C3 GPU class or CPU profile) this job was frozen to by
+    # the first run's capacity probe; None until then, and always None where there is nothing
+    # to choose (a CPU challenge on Modal, the local backend). A resume hands it back to the
+    # bench instead of probing again, so the candidates score on the hardware the baseline was
+    # measured on (AGENTS.md invariant 1).
+    hardware: str | None = None
 
     @classmethod
     def fresh(cls, spend: Spend) -> "JobState":
@@ -146,7 +147,7 @@ class JobState:
                 "confirmed": self.confirmed, "false_positives": self.false_positives,
                 "stop_reason": self.stop_reason, "tacit": self.tacit,
                 "strategy_counts": self.strategy_counts, "pending_job": self.pending_job,
-                "gpu": self.gpu}
+                "hardware": self.hardware}
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobState":
@@ -158,7 +159,8 @@ class JobState:
                    confirmed=d.get("confirmed", []), false_positives=d.get("false_positives", []),
                    stop_reason=d.get("stop_reason"), tacit=d.get("tacit", ""),
                    strategy_counts=d.get("strategy_counts", {}),
-                   pending_job=d.get("pending_job"), gpu=d.get("gpu"))
+                   pending_job=d.get("pending_job"),
+                   hardware=d.get("hardware", d.get("gpu")))
 
 
 def _atomic_write(path: Path, text: str) -> None:

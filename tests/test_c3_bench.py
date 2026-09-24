@@ -604,10 +604,10 @@ def _hw(job_dir):
     return parse_c3((Path(job_dir) / ".c3").read_text(encoding="utf-8"))["hardware"]
 
 
-def test_select_gpu_probes_each_class_in_turn_until_one_leaves_the_queue(tmp_path):
+def test_select_hardware_probes_each_class_in_turn_until_one_leaves_the_queue(tmp_path):
     t = ProbeTransport([["PENDING"], ["SCHEDULING", "RUNNING"]])
     b = tbench(tmp_path, t)
-    assert b.select_gpu("hypergraph") == "a100"
+    assert b.select_hardware("hypergraph") == "a100"
     assert [_hw(d) for d in t.dirs] == ["l40", "a100"]
     # mutation: not cancelling the stuck probe leaves it billing when an L40 frees up; not
     # cancelling the running one bills its whole walltime
@@ -623,42 +623,42 @@ def test_select_gpu_probes_each_class_in_turn_until_one_leaves_the_queue(tmp_pat
     assert b.cost_mark() == pytest.approx(20 / 3600 * GBP_PER_HOUR["a100"] * USD_PER_GBP)
 
 
-def test_select_gpu_reports_all_classes_unavailable(tmp_path):
+def test_select_hardware_reports_all_classes_unavailable(tmp_path):
     t = ProbeTransport([["PENDING"], ["PENDING"], ["SCHEDULING"]])
     with pytest.raises(BenchUnavailable) as ei:
-        tbench(tmp_path, t).select_gpu("hypergraph")
+        tbench(tmp_path, t).select_hardware("hypergraph")
     assert [_hw(d) for d in t.dirs] == ["l40", "a100", "h100"]
     assert [c for c in t.calls if c[0] == "cancel"] == [("cancel", "job_1"), ("cancel", "job_2"),
                                                         ("cancel", "job_3")]
     assert "l40" in str(ei.value) and "h100" in str(ei.value) and "1800" in str(ei.value)
 
 
-def test_select_gpu_treats_a_probe_that_already_finished_as_capacity(tmp_path):
+def test_select_hardware_treats_a_probe_that_already_finished_as_capacity(tmp_path):
     # a 20 s poll can miss RUNNING on a job whose script is `true`
     t = ProbeTransport([["PENDING", "SUCCEEDED"]])
-    assert tbench(tmp_path, t).select_gpu("hypergraph") == "l40"
+    assert tbench(tmp_path, t).select_hardware("hypergraph") == "l40"
     assert ("cancel", "job_1") not in t.calls
 
 
-def test_select_gpu_honours_a_frozen_choice_and_skips_cpu_and_local(tmp_path):
+def test_select_hardware_honours_a_frozen_choice_and_skips_cpu_and_local(tmp_path):
     t = ProbeTransport([])
     b = tbench(tmp_path, t)
-    assert b.select_gpu("hypergraph", chosen="h100") == "h100" and t.dirs == []
+    assert b.select_hardware("hypergraph", chosen="h100") == "h100" and t.dirs == []
     with pytest.raises(ValueError):
-        b.select_gpu("hypergraph", chosen="L40S")
-    assert tbench(tmp_path, ProbeTransport([])).select_gpu("knapsack") is None
+        b.select_hardware("hypergraph", chosen="L40S")
+    assert tbench(tmp_path, ProbeTransport([])).select_hardware("knapsack") is None
     local = C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
                     local=LocalSettings(4, 8), usd_per_hour=0.0)
     # mutation: probing on the local backend submits a C3-shaped job to Docker
-    assert local.select_gpu("hypergraph") is None and t.dirs == []
+    assert local.select_hardware("hypergraph") is None and t.dirs == []
 
 
-def test_select_gpu_stop_request_cancels_the_probe(tmp_path):
+def test_select_hardware_stop_request_cancels_the_probe(tmp_path):
     t = ProbeTransport([["PENDING"]])
     b = tbench(tmp_path, t)
     b.request_stop()
     with pytest.raises(BenchCancelled):
-        b.select_gpu("hypergraph")
+        b.select_hardware("hypergraph")
     assert ("cancel", "job_1") in t.calls
 
 
@@ -673,5 +673,5 @@ def test_a_probe_never_touches_the_pending_record(tmp_path):
     b = C3Bench(tmp_path, pending=pending, run=_no_cli, transport=t, clock=clock,
                 sleep=lambda s: setattr(clock, "t", clock.t + s), poll_s=20.0,
                 pending_timeout_s=1800)
-    assert b.select_gpu("hypergraph") == "a100"
+    assert b.select_hardware("hypergraph") == "a100"
     assert pending.get() == keep

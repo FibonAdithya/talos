@@ -474,7 +474,7 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
 
     def stub(ok):
         class B:
-            def select_gpu(self, challenge, chosen=None):
+            def select_hardware(self, challenge, chosen=None):
                 return None
 
             def evaluate(self, request):
@@ -978,7 +978,7 @@ class _RefusingBench:
     def __init__(self, why):
         self._why = why
 
-    def select_gpu(self, challenge, chosen=None):
+    def select_hardware(self, challenge, chosen=None):
         return None
 
     def evaluate(self, request):
@@ -1488,7 +1488,7 @@ def test_compile_uses_the_c3_key_from_the_config(tmp_path, monkeypatch):
     seen = {}
 
     class B:
-        def select_gpu(self, challenge, chosen=None):
+        def select_hardware(self, challenge, chosen=None):
             return None
 
         def evaluate(self, request):
@@ -1991,24 +1991,24 @@ def hypergraph_info():
 
 
 class _ProbingBench(_RefusingBench):
-    """Records select_gpu calls; evaluate stops the run before any job."""
+    """Records select_hardware calls; evaluate stops the run before any job."""
 
     def __init__(self, choose="A100-80GB"):
         super().__init__("no job may be submitted")
         self.choose, self.selections, self.seen_env = choose, [], []
 
-    def select_gpu(self, challenge, chosen=None):
+    def select_hardware(self, challenge, chosen=None):
         self.selections.append((challenge, chosen))
         return chosen or self.choose
 
     def evaluate(self, request):
-        self.seen_env.append(os.environ.get("TALOS_GPU"))
+        self.seen_env.append(os.environ.get("TALOS_HARDWARE"))
         raise BenchCancelled("stop")
 
 
 def _gpu_run(tmp_path, monkeypatch, bench, backend="modal", extra=()):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("TALOS_GPU", raising=False)
+    monkeypatch.delenv("TALOS_HARDWARE", raising=False)
     save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
                           backend=backend), None)
     monkeypatch.setattr(cli, "image_available", lambda ch, fetch=None: True)
@@ -2030,9 +2030,9 @@ def test_execute_job_freezes_the_probed_gpu_in_state_and_exports_it(tmp_path, mo
     real_event = JobStore.event
 
     def event(self, kind, **data):
-        if kind == "gpu_selected":  # what state.json says at the moment the choice is announced
-            on_disk["gpu"] = json.loads(
-                (self.run_dir / "state.json").read_text(encoding="utf-8")).get("gpu")
+        if kind == "hardware_selected":  # what state.json says at the moment the choice is announced
+            on_disk["hardware"] = json.loads(
+                (self.run_dir / "state.json").read_text(encoding="utf-8")).get("hardware")
         real_event(self, kind, **data)
     monkeypatch.setattr(JobStore, "event", event)
     rc = _gpu_run(tmp_path, monkeypatch, b)
@@ -2042,7 +2042,7 @@ def test_execute_job_freezes_the_probed_gpu_in_state_and_exports_it(tmp_path, mo
     # mutation: not saving the choice at once leaves a crash before the baseline's own save
     # to probe again on resume (and maybe land elsewhere); not exporting it makes the
     # sandbox's `talos compile` probe for its own
-    assert st["gpu"] == "A100-80GB" and on_disk == {"gpu": "A100-80GB"}
+    assert st["hardware"] == "A100-80GB" and on_disk == {"hardware": "A100-80GB"}
     assert b.seen_env == ["A100-80GB"]
     # a resume hands the frozen choice back and does not probe
     b2 = _ProbingBench("H100")
@@ -2055,7 +2055,7 @@ def test_execute_job_pauses_when_no_gpu_is_available(tmp_path, monkeypatch, caps
     from talos.bench import BenchUnavailable
 
     class NoGpu(_ProbingBench):
-        def select_gpu(self, challenge, chosen=None):
+        def select_hardware(self, challenge, chosen=None):
             raise BenchUnavailable("no Modal capacity for any of L40S, A100-80GB, H100")
 
     rc = _gpu_run(tmp_path, monkeypatch, NoGpu())
@@ -2064,14 +2064,14 @@ def test_execute_job_pauses_when_no_gpu_is_available(tmp_path, monkeypatch, caps
     # mutation: letting BenchUnavailable fall into the blanket handler marks the job failed
     # (not resumable) and never says which GPUs were tried
     assert rc == 1 and st["status"] == "paused" and "L40S" in st["stop_reason"]
-    assert st["gpu"] is None
+    assert st["hardware"] is None
     assert "no Modal capacity" in capsys.readouterr().err
 
 
 def test_bench_hardware_class_uses_the_frozen_gpu():
     # mutation: ignoring `gpu` keys every GPU baseline as an L40S one
-    assert cli.bench_hardware_class("modal", "hypergraph", gpu="H100") == "gpu-H100"
-    assert cli.bench_hardware_class("c3", "hypergraph", gpu="a100") == "c3-a100"
+    assert cli.bench_hardware_class("modal", "hypergraph", hardware="H100") == "gpu-H100"
+    assert cli.bench_hardware_class("c3", "hypergraph", hardware="a100") == "c3-a100"
     assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192"
 
 
@@ -2088,12 +2088,12 @@ def test_compile_uses_the_exported_gpu_or_probes_for_one(tmp_path, monkeypatch):
 
     b = B("L40S")
     monkeypatch.setattr(cli, "make_bench", lambda *a, **k: b)
-    monkeypatch.setenv("TALOS_GPU", "A100-80GB")
+    monkeypatch.setenv("TALOS_HARDWARE", "A100-80GB")
     assert cli.main(["compile", "--challenge", "hypergraph", "--dir", "src",
                      "--backend", "modal"]) == 0
-    # mutation: ignoring TALOS_GPU compiles the sandbox's candidate on a GPU of its own
+    # mutation: ignoring TALOS_HARDWARE compiles the sandbox's candidate on a GPU of its own
     assert b.selections == [("hypergraph", "A100-80GB")]
-    monkeypatch.delenv("TALOS_GPU")
+    monkeypatch.delenv("TALOS_HARDWARE")
     assert cli.main(["compile", "--challenge", "hypergraph", "--dir", "src",
                      "--backend", "modal"]) == 0
     assert b.selections[-1] == ("hypergraph", None)
@@ -2106,7 +2106,7 @@ def test_a_job_from_before_the_gpu_choice_is_frozen_to_the_first_option_not_prob
     run_dir = next((tmp_path / "runs").iterdir())
     # forge the pre-change shape: a measured baseline and no gpu field at all
     st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
-    del st["gpu"]
+    del st["hardware"]
     st["status"], st["baseline"] = "paused", {
         "name": "fake_base", "adoption": 1, "artifact_id": "a", "files": {"mod.rs": ""},
         "training": [], "holdout": []}
@@ -2116,4 +2116,4 @@ def test_a_job_from_before_the_gpu_choice_is_frozen_to_the_first_option_not_prob
     # mutation: probing here can land the candidates on an H100 under an L40S baseline
     assert b2.selections == [("hypergraph", "L40S")]
     st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
-    assert st["gpu"] == "L40S"
+    assert st["hardware"] == "L40S"
