@@ -108,3 +108,50 @@ def test_local_knapsack_job(tmp_path):
         assert art.stat().st_uid == os.getuid(), "artifacts must belong to the user"
     print({"gpu": gpu, "prepare_s": round(t_prep), "job_s": round(t_job),
            "training": [x.to_dict() for x in r.training]})
+
+
+def test_c3_gpu_probe(tmp_path):
+    """Manual: the C3 GPU capacity probe, for real. Run:
+    TALOS_LIVE_BACKEND=c3 .venv/bin/pytest -m live tests/test_live.py -k c3_gpu_probe -s
+    Submits a two-minute `true` job per class until one leaves the queue (docs/compute-backends.md
+    #gpu-fallback); costs under £0.10 and takes from a minute to the capacity window per class."""
+    if os.environ.get("TALOS_LIVE_BACKEND") != "c3":
+        pytest.skip("set TALOS_LIVE_BACKEND=c3")
+    import time
+    from pathlib import Path
+
+    from talos.c3_bench import C3Bench
+    from talos.challenges import C3_GPU_CLASSES
+    from talos.config import ConfigError, load, resolve_c3_api_key
+    try:
+        cfg = load(Path.cwd())
+    except ConfigError:
+        cfg = None
+    # TALOS_LIVE_TRANSPORT=cli forces the `c3` CLI path even with a key configured
+    key = None if os.environ.get("TALOS_LIVE_TRANSPORT") == "cli" else resolve_c3_api_key(cfg)
+    b = C3Bench(tmp_path, api_key=key)
+    t0 = time.monotonic()
+    cls = b.select_gpu("hypergraph")
+    assert cls in C3_GPU_CLASSES
+    assert 0 < b.cost_mark() < 0.20
+    print({"transport": b._t.name, "keyed": bool(key), "class": cls,
+           "probe_s": round(time.monotonic() - t0), "cost_usd_estimate": round(b.cost_mark(), 4)})
+
+
+def test_modal_gpu_probe():
+    """Manual: the Modal GPU capacity probe, for real. Run:
+    TALOS_LIVE_BACKEND=modal .venv/bin/pytest -m live tests/test_live.py -k modal_gpu_probe -s
+    Needs the app deployed at this version (`talos setup`, or `modal deploy -m
+    modal_app.talos_bench`): the probe functions are new. Costs seconds of one GPU."""
+    if os.environ.get("TALOS_LIVE_BACKEND") != "modal":
+        pytest.skip("set TALOS_LIVE_BACKEND=modal")
+    import time
+
+    from talos.challenges import MODAL_GPUS
+    b = ModalBench()
+    t0 = time.monotonic()
+    gpu = b.select_gpu("hypergraph")
+    assert gpu in MODAL_GPUS
+    assert 0 < b.cost_mark() < 0.20
+    print({"gpu": gpu, "probe_s": round(time.monotonic() - t0),
+           "cost_usd_estimate": round(b.cost_mark(), 4)})

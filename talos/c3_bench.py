@@ -40,6 +40,14 @@ class _JobFailed(RuntimeError):
     pass
 
 
+def _out_of_stock(e: Exception) -> bool:
+    """C3 can refuse a deploy outright instead of queueing it: HTTP 409 GPU_OUT_OF_STOCK,
+    "does not currently have ... capacity" (MEASURED 2026-09-23 on the CPU profile). For the
+    probe that is the answer, not an outage."""
+    text = str(e)
+    return "OUT_OF_STOCK" in text or "capacity" in text.lower()
+
+
 class _NoCapacity(BenchUnavailable):
     """A job still queued after the capacity window. A BenchUnavailable to every caller but the
     GPU probe, which moves on to the next class."""
@@ -186,6 +194,8 @@ class C3Bench:
             try:
                 job_id = _safe_job_id(self._t.deploy(job_dir))
             except (C3CommandError, ValueError) as e:
+                if _out_of_stock(e):
+                    continue  # C3 refused to queue it at all: no capacity, next class
                 raise BenchUnavailable(f"{self._label} probe deploy failed: "
                                        f"{_redact(str(e))[:300]}") from None
             try:

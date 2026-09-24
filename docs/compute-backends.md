@@ -37,8 +37,8 @@ and `talos/cli.py::freeze_gpu` fixes the GPU before the baseline:
 
 | Backend | Probe | "No capacity" means | Cost of one probe |
 |---|---|---|---|
-| Modal | `probe_<gpu>` is spawned; the call must return within `ModalBench.probe_window_s` (120 s). A call still queued then is cancelled, or it would run and bill whenever that GPU freed up. | Every probe timed out. | A few seconds of the GPU on a slim image. ESTIMATE (unverified live). |
-| C3 | A two-minute job whose script is `true`, on `ubuntu:24.04`, written by `talos/c3_jobdir.py::write_probe_dir` to `runs/<job_id>/c3/probe-<class>/`. It must leave the queue within the capacity window (`C3Bench.pending_timeout_s`, 30 min); once RUNNING it is cancelled. A job still queued at the window's end is cancelled and the next class tried. | Every class stayed queued for the whole window, so up to 90 minutes before the run pauses. | Under a minute of the class, plus its queue time. ESTIMATE (unverified live). |
+| Modal | `probe_<gpu>` is spawned; the call must return within `ModalBench.probe_window_s` (120 s). A call still queued then is cancelled, or it would run and bill whenever that GPU freed up. | Every probe timed out. | The wait at the GPU's rate. MEASURED 2026-09-24: the L40S probe returned in 33 s from a cold start and was charged $0.018. |
+| C3 | A two-minute job whose script is `true`, on `ubuntu:24.04`, written by `talos/c3_jobdir.py::write_probe_dir` to `runs/<job_id>/c3/probe-<class>/`. It must leave the queue within the capacity window (`C3Bench.pending_timeout_s`, 30 min); once RUNNING it is cancelled. A job still queued at the window's end is cancelled and the next class tried. | Every class stayed queued for the whole window, so up to 90 minutes before the run pauses. | The probe's two-minute walltime at the class rate. MEASURED 2026-09-24 over MCP: the `l40` probe left the queue in 6 s, was cancelled, and was charged $0.067. |
 
 The chosen GPU is `gpu` in `state.json`, a `gpu_selected` event in the timeline, and `TALOS_GPU`
 in the agentic sandbox's environment so `talos compile` there builds on the same GPU. A resume
@@ -58,9 +58,9 @@ CPU challenges and the local backend have one hardware class and no probe. The M
 redeployed (`talos setup`) after upgrading to a version with this table: the old deploy has no
 per-GPU functions, and a run against it stops with "Run `talos setup` to deploy".
 
-Neither probe has been run against a live account as of 2026-09-24. The C3 probe's
-`requires_accelerator: cuda` on a non-CUDA image is the one setting the live test should
-confirm first.
+Both probes were run against live accounts on 2026-09-24 (`tests/test_live.py`, the
+`c3_gpu_probe` and `modal_gpu_probe` tests): C3 accepted the `ubuntu:24.04` probe with
+`requires_accelerator: cuda`, and the redeployed Modal app scheduled the `probe_l40s` call.
 
 ## C3 job directories
 

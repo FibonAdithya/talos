@@ -682,3 +682,29 @@ def test_a_probe_never_touches_the_pending_record(tmp_path):
                 pending_timeout_s=1800)
     assert b.select_gpu("hypergraph") == "a100"
     assert pending.get() == keep
+
+
+def test_select_gpu_treats_a_deploy_refused_for_stock_as_no_capacity(tmp_path):
+    from talos.c3_bench import C3CommandError
+
+    class Refusing(ProbeTransport):
+        def deploy(self, job_dir):
+            if _hw(job_dir) == "l40":
+                self.dirs.append(Path(job_dir))
+                raise C3CommandError("c3 deploy failed: HTTP 409 GPU_OUT_OF_STOCK: the l40 "
+                                     "class does not currently have capacity")
+            return super().deploy(job_dir)
+
+    t = Refusing([["RUNNING"]])
+    # mutation: treating the refusal as an outage pauses the run on the first class instead
+    # of trying the next
+    assert tbench(tmp_path, t).select_gpu("hypergraph") == "a100"
+    assert [_hw(d) for d in t.dirs] == ["l40", "a100"]
+
+    class Broken(ProbeTransport):
+        def deploy(self, job_dir):
+            raise C3CommandError("c3 deploy failed: HTTP 401 unauthorised")
+
+    with pytest.raises(BenchUnavailable) as ei:  # any other refusal is still an outage
+        tbench(tmp_path, Broken([])).select_gpu("hypergraph")
+    assert "probe deploy failed" in str(ei.value)
