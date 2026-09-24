@@ -44,8 +44,14 @@ therefore to the class.
 MEASURED 2026-09-24 on the development machine with a stand-in `tig-runtime` that sleeps for
 one second, so these are the pool's overheads and nothing about real nonces: the C3 job runner
 scored 16 nonces in 16.2 s with one worker, 4.1 s with four and 1.1 s with sixteen, and a
-Modal batch of 4 took 4.04 s with one worker and 1.04 s with four. Neither has been timed on a
-live backend since batching.
+Modal batch of 4 took 4.04 s with one worker and 1.04 s with four.
+
+MEASURED 2026-09-24 on Modal, live, with the redeployed app: the live test
+(`tests/test_live.py::test_baseline_compiles_and_scores`, knapsack, cached compile) passed in
+12.3 s with both nonces in one batch, and a follow-up of 8 nonces of the top knapsack
+algorithm ran as two batches of 4, each container reporting 1.9 s and 1.8 s of wall time
+against 4.7 s and 4.4 s of summed per-nonce runtime, so four nonces did share a container at
+once; the client's estimate for the 8 nonces was $0.0004.
 
 ## Hardware fallback
 
