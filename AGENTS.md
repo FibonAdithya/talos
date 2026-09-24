@@ -16,9 +16,13 @@ baseline on training and then held-out nonces, or when the budget runs out.
 Its output is a local, submit-ready package under `runs/<job_id>/package/`;
 the user submits it to TIG themselves. Talos is not a hosted service and not a
 swarm, it never submits on the user's behalf, and LLM-authored code never
-executes on the user's machine. C3 (cthree.cloud) is the alternative compute
-backend chosen at `talos setup`, running the same compile-and-score work as
-one batch job per iteration instead of a Modal container call.
+executes outside a container. Only the `local` backend runs that container on
+the user's own machine, with networking off, capabilities dropped, and CPU and
+memory limits (`talos/local_transport.py::run_args`). C3 (cthree.cloud) is the
+alternative hosted compute backend chosen at `talos setup`, running the same
+compile-and-score work as one batch job per iteration instead of a Modal
+container call. The local backend (Docker on the user's machine) is the third,
+chosen the same way and running the same batch job through a Docker transport.
 
 ## Source of truth, in order
 
@@ -31,7 +35,8 @@ When two documents disagree, the one higher in this list wins.
 2. **`README.md`** — setup and the commands you run day to day.
 3. **`docs/architecture.md`** and **`docs/compute-backends.md`** — the research
    loop, the guards between build and scoring, the agentic sandbox, the
-   baseline cache, how Modal and C3 are used, C3 timings and the C3 dev images.
+   baseline cache, how Modal, C3 and local Docker are used, C3 and local
+   timings, and the dev images.
 4. **`docs/ai/`** — *not authoritative*. Design specs and plans written by
    agents during development, kept for the reasoning behind decisions. They
    are not updated as the code changes. See `docs/ai/README.md`. Agents
@@ -52,7 +57,10 @@ progress.
    (`talos/state.py::JobStore.write_spec`). The hardware class is part of the
    baseline cache key (`talos/challenges.py::hardware_class`,
    `talos/baseline.py::cache_key`); a cached baseline measured under different
-   hardware or fuel is a different key, never a hit.
+   hardware or fuel is a different key, never a hit. The local backend's class
+   is `talos/challenges.py::local_hardware_class`, which carries the host name
+   and the container's CPU and memory limits, so changing either at
+   `talos setup` invalidates every local baseline.
    Both sides also run with identical hyperparameters: the per-track map is
    frozen into `job.json` (`talos/state.py::JobSpec`) together with the
    algorithm it belongs to, every request takes it from there
@@ -115,7 +123,11 @@ progress.
    `talos/c3_bench.py::USD_PER_GBP`; LLM spend is measured tokens times
    `talos/providers/pricing.py::PRICES`. An unknown model is "unpriced"
    (`None`), never zero, and a dollar-only budget with an unpriced model is
-   refused rather than allowed to run uncapped.
+   refused rather than allowed to run uncapped. The one fixed price is the
+   local backend's compute, which is zero by design rather than estimated:
+   `talos/cli.py::make_bench` passes `usd_per_hour=0.0`, the machine is the
+   user's own, and `talos run` neither asks for nor defaults a compute cap
+   there (`talos/cli.py::cmd_run`).
 
 ## What "done" means
 
@@ -146,6 +158,10 @@ Do not decide these yourself. Raise them and stop.
   per-second rate in `talos/bench.py`. Those tables are the budget.
 - Loosening the agentic sandbox (`talos/agentic.py::sandbox_settings`), the
   child-process environment allowlist, or the codex opt-in.
+- Loosening the local job container's isolation flags
+  (`talos/local_transport.py::run_args`): networking, capabilities, the pids
+  limit, the user it runs as. They are the sandbox for LLM-authored code on
+  the user's machine.
 - Anything that submits to TIG, stores a credential anywhere other than
   `.talos/secrets.json`, or sends data anywhere other than the user's own LLM
   provider and Modal account.
@@ -170,7 +186,7 @@ nobody.
 | Set up and run day-to-day commands | `README.md` |
 | Run the gate | `Makefile` |
 | The research loop, its guards, the agentic sandbox, the baseline cache | `docs/architecture.md` |
-| Modal and C3 transports, C3 job directories, timings, the dev images | `docs/compute-backends.md` |
+| Modal, C3 and local transports, job directories, timings, the dev images | `docs/compute-backends.md` |
 | Why a decision was made (non-authoritative) | `docs/ai/specs/` |
 | CLI entry point, wizards, flags | `talos/cli.py::main` |
 | Per-challenge pins, beat rules, hardware | `talos/challenges.py::CHALLENGES` |
@@ -182,7 +198,9 @@ nobody.
 | Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
 | C3 client: deploy, poll, pull, cost estimate | `talos/c3_bench.py::C3Bench` |
 | C3 job directory: .c3 config, job.sh, payload.json | `talos/c3_jobdir.py::write_job_dir` |
-| C3 in-container runner: build, score, write results | `talos/c3_job.py::main` |
+| C3 in-container runner: build, score, write results (the local backend runs it too) | `talos/c3_job.py::main` |
+| Local backend: Docker transport, container flags | `talos/local_transport.py::DockerTransport`, `talos/local_transport.py::run_args` |
+| Local backend: image pull, volumes, clone, warm build | `talos/local_transport.py::prepare` |
 | LLM providers and prices | `talos/providers/__init__.py`, `talos/providers/pricing.py::PRICES` |
 | Agentic mode: sandbox and scope check | `talos/agentic.py::sandbox_settings`, `talos/agentic.py::read_back` |
 | Budget rules | `talos/budget.py::exhausted`, `README.md#budget` |

@@ -2,7 +2,7 @@
 
 What a job does from `talos run` to the hand-back package, and the rules that keep a
 candidate's score comparable with the baseline's. For setup and the commands, see
-[README.md](../README.md). For the two compute backends, see
+[README.md](../README.md). For the three compute backends, see
 [compute-backends.md](compute-backends.md).
 
 The design reasoning is in
@@ -21,7 +21,7 @@ flowchart TD
     budget{"Budget left?"}
     propose["LLM writes a hypothesis and an edit<br/>single-shot: one API call<br/>agentic: a sandboxed claude or codex session"]
     scope{"Edit touches only<br/>the algorithm files?"}
-    compile["Compile on Modal or C3"]
+    compile["Compile on Modal, C3 or local Docker"]
     builds{"Compiles, and every<br/>new function is called?"}
     fix["LLM fix round<br/>up to 3"]
     score["Score training nonces<br/>per-nonce timeout: 3x the baseline's slowest nonce,<br/>between 60 s and 600 s"]

@@ -67,3 +67,44 @@ def test_c3_knapsack_job(tmp_path):
     assert r.holdout_reason == "forced"
     assert b.cost_mark() < 0.10 * 1.35
     print({"cost_usd_estimate": b.cost_mark(), "training": [x.to_dict() for x in r.training]})
+
+
+def test_local_knapsack_job(tmp_path):
+    """Manual: one real local Docker job. Run:
+    TALOS_LIVE_BACKEND=local .venv/bin/pytest -m live tests/test_live.py -k local -s
+    Needs Docker. Costs time, not money: the first run pulls a 13 GB image and does one warm-up
+    build (MEASURED 2026-09-23: 12 minutes on 16 cores); the job is one candidate build (about
+    as long: the image re-instruments every dependency on each build) plus 4 nonces."""
+    if os.environ.get("TALOS_LIVE_BACKEND") != "local":
+        pytest.skip("set TALOS_LIVE_BACKEND=local")
+    import time
+
+    from talos.bench import EvalRequest
+    from talos.c3_bench import C3Bench
+    from talos.c3_jobdir import LocalSettings
+    from talos.challenges import CHALLENGES
+    from talos.local_transport import DockerTransport, prepare
+    ch = os.environ.get("TALOS_LIVE_CHALLENGE", "knapsack")
+    info = mainnet.fetch_challenge_info(ch)
+    name, _algorithm_id, _adoption = mainnet.top_algorithm(ch)
+    files = mainnet.fetch_algorithm_files(ch, name)
+    tr, ho = draw_nonce_sets(info.tracks[:1], new_rand_hash(), training_count=2, holdout_count=2)
+    t0 = time.monotonic()
+    gpu = prepare(ch)
+    t_prep = time.monotonic() - t0
+    local = LocalSettings(cpus=os.cpu_count() or 1, memory_gib=8)
+    b = C3Bench(tmp_path, transport=DockerTransport(), local=local, usd_per_hour=0.0,
+                poll_s=5.0)
+    t1 = time.monotonic()
+    r = b.evaluate(EvalRequest(ch, files, tr, ho, info.max_fuel, None, CHALLENGES[ch].beat))
+    t_job = time.monotonic() - t1
+    assert r.compile.ok, r.compile.output[-3000:]
+    assert len(r.training) == 2 and r.holdout is not None and len(r.holdout) == 2
+    assert any(x.ok and x.quality > 0 for x in r.training), [x.to_dict() for x in r.training]
+    assert r.holdout_reason == "forced" and b.cost_mark() == 0.0
+    art = next((tmp_path / "local" / "adhoc").glob("talos-*/artifacts/results.json"))
+    if os.name != "nt":
+        # copied out by this process, so owned by this user, never by root
+        assert art.stat().st_uid == os.getuid(), "artifacts must belong to the user"
+    print({"gpu": gpu, "prepare_s": round(t_prep), "job_s": round(t_job),
+           "training": [x.to_dict() for x in r.training]})

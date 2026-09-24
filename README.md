@@ -3,12 +3,15 @@
 Single-user autoresearch for [TIG](https://tig.foundation). You pick a TIG challenge and
 describe what to explore. An LLM then repeatedly edits the current top mainnet algorithm for
 that challenge, and each candidate is compiled and scored with TIG's own `tig-runtime` and
-`tig-verifier` on your own Modal or C3 account. The run stops when a candidate beats the
+`tig-verifier` on your own Modal or C3 account, or in Docker on your own machine. The run
+stops when a candidate beats the
 baseline on both training and held-out nonces, or when the budget runs out. The best
 candidate is written to a local, submit-ready package.
 
-Talos never submits to TIG for you, and LLM-authored code never runs on your machine (with
-one opt-in exception: [agentic codex](#agentic-mode)).
+Talos never submits to TIG for you, and LLM-authored code never runs outside a container.
+Only the `local` backend runs that container on your machine, with networking off,
+capabilities dropped, and CPU and memory limits; the one opt-in exception is
+[agentic codex](#agentic-mode).
 
 ## Contents
 
@@ -36,8 +39,8 @@ LLM never sees the `rand_hash` that seeds the nonces.
 
 [docs/architecture.md](docs/architecture.md) has the full flowchart, the guards between
 build and scoring, the agentic sandbox and the baseline cache.
-[docs/compute-backends.md](docs/compute-backends.md) covers how Modal and C3 are used, C3
-timings and the C3 dev images.
+[docs/compute-backends.md](docs/compute-backends.md) covers how Modal, C3 and local Docker
+are used, C3 and local timings, and the dev images.
 
 ## Try it with no accounts
 
@@ -70,7 +73,9 @@ you do not want the demo job listed by `talos status`.
 ### 1. Prerequisites
 
 - Linux, macOS or Windows. CI runs the test suite on all three. Compiling and scoring happen
-  on the compute backend, so nothing Rust- or CUDA-related is needed locally.
+  on the compute backend, so nothing Rust- or CUDA-related is needed locally. The `local`
+  backend needs Docker (and, for GPU challenges, the NVIDIA container toolkit); the compiler
+  still runs inside the container.
 - Python 3.10 or newer, and Git.
 - [`uv`](https://docs.astral.sh/uv/) to create the virtualenv (recommended; plain `pip`
   works too).
@@ -98,12 +103,13 @@ the repository root.
 
 ### 3. Pick a compute backend
 
-Candidates are compiled and scored on one of two backends. You choose one in `talos setup`.
+Candidates are compiled and scored on one of three backends. You choose one in `talos setup`.
 
 | Backend | What you need before setup | Cost per iteration |
 |---|---|---|
 | `modal` (default) | A [Modal](https://modal.com) account (the free tier works) and an API token created at modal.com/settings/tokens. Keep the token id and secret to hand. | Container seconds only; no fixed per-job overhead. |
 | `c3` | With a C3 API key (`c3 apikey create`): nothing to install — Talos talks to C3 over HTTPS. Without a key: the `c3` CLI ([cthree.cloud](https://cthree.cloud)) installed and logged in with `c3 login`. Either way, credit on the account; top up with `c3 topup`. | One batch job of about 12 minutes before the first nonce is scored. See [docs/compute-backends.md](docs/compute-backends.md#c3-timings). |
+| `local` | Docker running on this machine. The first run per challenge pulls the 13 GB dev image and does one warm-up build (MEASURED 2026-09-23: about 13 minutes on a 16-core machine with the image already pulled). Every iteration then builds the candidate (MEASURED 2026-09-23: 14 to 15 minutes for one build and 4 nonces over two runs, of which the nonces took under 2 s each): the dev image re-instruments every dependency on each build, so this is not incremental. GPU challenges need the NVIDIA container toolkit and are unverified; see [docs/compute-backends.md](docs/compute-backends.md#local-backend). | Nothing. The compute budget question is skipped. |
 
 ### 4. Pick an LLM provider
 
@@ -129,7 +135,7 @@ talos setup
 
 It asks, in order:
 
-1. **Compute backend**: `modal` or `c3`.
+1. **Compute backend**: `modal`, `c3` or `local`.
 2. **Provider**: one of the kinds in the table above.
 3. **Model**: press Enter for the default. For `codex-cli` it first prints the models your
    login accepts; for `claude-cli` an alias such as `fable`, `opus` or `sonnet` works.
@@ -141,6 +147,12 @@ It asks, in order:
 7. **Modal token id and secret**: `modal` backend only; the secret shows as `*`.
 8. **C3 API key**: `c3` backend only; shows as `*`. Leave it blank to use your `c3 login`
    session. With it blank, a `C3_API_KEY` environment variable is used if set.
+9. **CPUs and memory for the local container**: `local` backend only. The defaults are what
+   Docker reports: every CPU the daemon has and its memory minus 4 GiB. On Docker Desktop
+   those are the VM's figures (Settings > Resources), not the machine's, and values above them
+   are refused, because Docker rejects a container with more CPUs than the daemon has. Both
+   are part of the local baseline cache key: change them and local baselines are measured
+   again.
 
 It then checks everything before writing anything:
 
@@ -148,7 +160,9 @@ It then checks everything before writing anything:
   trivial call succeeds);
 - on `modal`: sets your Modal token and deploys the benchmark app to your account;
 - on `c3`: runs `c3 whoami` and `c3 balance` (with the API key, if you gave one), and warns
-  if the balance is below £1.
+  if the balance is below £1;
+- on `local`: `docker info` is run before the limits are asked (its CPU and memory figures
+  are their defaults and ceilings), and the summary says whether the NVIDIA runtime is present.
 
 On success it prints ``Setup complete. Run `talos run` to start a job.`` and writes:
 
@@ -441,7 +455,7 @@ Prompts for anything not given as a flag, unless `--yes` is passed.
 | `--budget-iterations N` | Iteration cap. |
 | `--budget-compute-usd N` | Estimated compute spend cap in USD. |
 | `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track or hyperparameters. |
-| `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20. |
+| `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20 (not asked and not set on the `local` backend, where it is always zero). |
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
 providers, default 20; iterations for CLI providers, default 50), a wall-clock budget
@@ -466,7 +480,7 @@ talos compile --challenge knapsack --dir algorithm
 |---|---|
 | `--challenge NAME` | Required. |
 | `--dir PATH` | Directory whose `.rs` and `.cu` files are compiled (default `algorithm`). |
-| `--backend modal\|c3` | Backend to use. Without it: `TALOS_BACKEND`, then `talos.config.json`, then `modal`. |
+| `--backend modal\|c3\|local` | Backend to use. Without it: `TALOS_BACKEND`, then `talos.config.json`, then `modal`. |
 
 Prints the last 4000 characters of compiler output. Exit code 0 if the build succeeded, 1 if
 it failed, 2 if the directory has no `.rs`/`.cu` files. Agentic mode uses this command to
@@ -474,8 +488,11 @@ check its own edits.
 
 On Modal it is one function call. On C3 it is one batch job
 ([about 12 minutes](docs/compute-backends.md#c3-timings)) whose job directory is
-`.talos/compile/`. Each run overwrites that directory, so do not run two `talos compile`
-commands at once from the same directory.
+`.talos/compile/`. On `local` it is one Docker container on this machine, after the same
+prepare step as `talos run` (image pull, clone and warm-up build on the first run per
+challenge; [about 15 minutes](docs/compute-backends.md#local-timings) per build after that),
+with its job directory under `.talos/compile/` too. Each run overwrites that directory, so do
+not run two `talos compile` commands at once from the same directory.
 
 ### `talos status`
 
@@ -563,7 +580,8 @@ is cached outside the run directory, in `~/.talos/baselines/`; see
   directly or through the wizard. Zero is a valid, real cap, not "unset".
 - Compute spend is always capped separately by `--budget-compute-usd`, which defaults to $20
   when `--yes` is passed without it. It is checked before every compute call, whatever the
-  other caps are.
+  other caps are. The one exception is the `local` backend, where compute costs nothing: the
+  question is skipped, no default is applied, and the cap stays unset.
 - The wall-clock budget (`--budget-hours`) counts elapsed time from the job's start,
   including time spent resumed.
 
@@ -595,6 +613,16 @@ wall clock, job `SUCCEEDED`, `1 passed`; the breakdown is under
 
 ```bash
 TALOS_LIVE_BACKEND=c3 .venv/bin/pytest -m live tests/test_live.py -k c3 -s
+```
+
+For the local backend, a third test runs one real job in Docker on this machine. It costs
+time, not money: the first run pulls the image and does the warm-up build (MEASURED
+2026-09-23: about 13 minutes before the job, image already pulled), a later run finds
+everything in place and takes only the job (MEASURED 2026-09-23, two runs: `1 passed` in
+14 min 7 s and in 15 min 3 s, `prepare_s: 1`, `job_s: 844` and `899`):
+
+```bash
+TALOS_LIVE_BACKEND=local .venv/bin/pytest -m live tests/test_live.py -k local -s
 ```
 
 Both need `pytest`: install it with `uv pip install --python .venv/bin/python pytest`, or use

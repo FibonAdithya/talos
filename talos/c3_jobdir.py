@@ -6,22 +6,37 @@ import json
 import math
 import shutil
 import stat
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from talos.bench import EvalRequest
 from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_image, c3_profile,
-                              c3_workers)
+                              c3_workers, dev_image, local_workers)
 from talos.inside import NONCE_TIMEOUT_S
 
 BUILD_ALLOWANCE_S = 1200
+# The local job's build allowance. MEASURED 2026-09-23: a candidate build took 14m44s on 16
+# cores (the dev image re-instruments every dependency on each build), and fewer cores take
+# longer; 20 minutes would time out every job on a smaller machine.
+LOCAL_BUILD_ALLOWANCE_S = 3600
+LOCAL_APP = "/app"  # where the local job container mounts the challenge's monorepo volume
+LOCAL_LOCK = f"{LOCAL_APP}/.talos-lock"  # held by every container that writes the volume
 TIME_CAP_S = 6 * 3600
 JOB_MODULES = ("__init__", "inside", "scoring", "types", "challenges", "diagnostics", "c3_job")
 _PKG = Path(__file__).resolve().parent
 
 
-def time_limit_s(nonce_count: int, workers: int) -> int:
-    raw = BUILD_ALLOWANCE_S + math.ceil(nonce_count * NONCE_TIMEOUT_S / workers)
+@dataclass(frozen=True)
+class LocalSettings:
+    """What the local backend fixes at `talos setup`: the job container's CPU and memory limits.
+    Both are in the local hardware class, so changing either invalidates local baselines."""
+    cpus: int
+    memory_gib: int
+
+
+def time_limit_s(nonce_count: int, workers: int,
+                 build_allowance_s: int = BUILD_ALLOWANCE_S) -> int:
+    raw = build_allowance_s + math.ceil(nonce_count * NONCE_TIMEOUT_S / workers)
     return min(TIME_CAP_S, math.ceil(raw / 60) * 60)
 
 
@@ -54,7 +69,28 @@ def job_sh_text(monorepo_ref: str) -> str:
             "cd \"$C3_JOB_WORKDIR\"\nexec python3 -m talos.c3_job\n")
 
 
-def payload(request: EvalRequest) -> dict:
+def local_job_sh_text() -> str:
+    """The monorepo is already on the /app volume (talos/local_transport.py::prepare), so the
+    local job only changes into the bind-mounted job dir and runs the same runner as C3, under
+    the volume's lock: /app is shared by every job of the challenge on this machine (two runs,
+    or a `talos compile` beside a run), and the runner stages the candidate into that checkout,
+    so two jobs at once must take turns or one is built from the other's files. A waiting job's
+    time limit still counts from its start."""
+    return ("#!/bin/bash\nset -euo pipefail\ncd \"$C3_JOB_WORKDIR\"\n"
+            f"exec flock {LOCAL_LOCK} python3 -m talos.c3_job\n")
+
+
+def local_settings_doc(request: EvalRequest, local: LocalSettings, seconds: int) -> dict:
+    """local.json: everything DockerTransport.deploy needs and nothing else reads. The request
+    hash names the container; the rand hash must not be here (the name shows in `docker ps`)."""
+    spec = CHALLENGES[request.challenge]
+    return {"challenge": request.challenge, "image": dev_image(request.challenge),
+            "cpus": local.cpus, "memory_gib": local.memory_gib, "gpu": spec.is_gpu,
+            "workers": local_workers(spec, local.cpus), "time_limit_s": seconds,
+            "request_hash": request_hash(request)}
+
+
+def payload(request: EvalRequest, workers: int | None = None) -> dict:
     spec = CHALLENGES[request.challenge]
     p = {"challenge": request.challenge, "challenge_id": spec.id, "files": request.files,
          "training": [asdict(n) for n in request.training],
@@ -63,7 +99,8 @@ def payload(request: EvalRequest) -> dict:
                                if request.baseline_training is not None else None),
          "rule": asdict(request.rule), "monorepo_ref": MONOREPO_REF,
          "prior_functions": request.prior_functions, "timeouts": request.timeouts,
-         "workers": c3_workers(spec), "nonce_timeout_s": NONCE_TIMEOUT_S,
+         "workers": c3_workers(spec) if workers is None else workers,
+         "nonce_timeout_s": NONCE_TIMEOUT_S,
          "dev_image_tag": DEV_IMAGE_TAG}
     if request.hyperparameters is not None:
         # Only when present, so a request identical to a pre-upgrade one hashes the same way;
@@ -85,21 +122,34 @@ def request_hash(request: EvalRequest) -> str:
     return hashlib.sha256(json.dumps(p, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str) -> Path:
-    """Writes the deploy directory, wiping `job_dir` first if it already exists."""
+def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str,
+                  local: LocalSettings | None = None) -> Path:
+    """Writes the deploy directory, wiping `job_dir` first if it already exists. With `local`
+    it is the local flavour: local.json instead of .c3, a job.sh that does not download the
+    monorepo, and the local worker count in the payload."""
     job_dir = Path(job_dir)
     if job_dir.exists():
         shutil.rmtree(job_dir)
     (job_dir / "talos").mkdir(parents=True)
     spec = CHALLENGES[request.challenge]
     nonces = sum(n.count for n in request.training) + sum(n.count for n in request.holdout)
-    (job_dir / ".c3").write_text(c3_config_text(request.challenge, purpose,
-                                                time_limit_s(max(nonces, 1), c3_workers(spec))),
-                                 encoding="utf-8", newline="\n")
+    if local is None:
+        workers = c3_workers(spec)
+        seconds = time_limit_s(max(nonces, 1), workers)
+        (job_dir / ".c3").write_text(c3_config_text(request.challenge, purpose, seconds),
+                                     encoding="utf-8", newline="\n")
+        sh_text = job_sh_text(MONOREPO_REF)
+    else:
+        workers = local_workers(spec, local.cpus)
+        seconds = time_limit_s(max(nonces, 1), workers, LOCAL_BUILD_ALLOWANCE_S)
+        (job_dir / "local.json").write_text(
+            json.dumps(local_settings_doc(request, local, seconds), indent=1),
+            encoding="utf-8", newline="\n")
+        sh_text = local_job_sh_text()
     sh = job_dir / "job.sh"
-    sh.write_text(job_sh_text(MONOREPO_REF), encoding="utf-8", newline="\n")
+    sh.write_text(sh_text, encoding="utf-8", newline="\n")
     sh.chmod(sh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    (job_dir / "payload.json").write_text(json.dumps(payload(request), indent=1),
+    (job_dir / "payload.json").write_text(json.dumps(payload(request, workers), indent=1),
                                           encoding="utf-8", newline="\n")
     for mod in JOB_MODULES:
         shutil.copy2(_PKG / f"{mod}.py", job_dir / "talos" / f"{mod}.py")
