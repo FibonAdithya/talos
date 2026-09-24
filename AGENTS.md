@@ -35,7 +35,8 @@ When two documents disagree, the one higher in this list wins.
 2. **`README.md`** — setup and the commands you run day to day.
 3. **`docs/architecture.md`** and **`docs/compute-backends.md`** — the research
    loop, the guards between build and scoring, the agentic sandbox, the
-   baseline cache, how Modal and C3 are used, C3 timings and the C3 dev images.
+   baseline cache, how Modal, C3 and local Docker are used, C3 and local
+   timings, and the dev images.
 4. **`docs/ai/`** — *not authoritative*. Design specs and plans written by
    agents during development, kept for the reasoning behind decisions. They
    are not updated as the code changes. See `docs/ai/README.md`. Agents

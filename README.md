@@ -3,12 +3,15 @@
 Single-user autoresearch for [TIG](https://tig.foundation). You pick a TIG challenge and
 describe what to explore. An LLM then repeatedly edits the current top mainnet algorithm for
 that challenge, and each candidate is compiled and scored with TIG's own `tig-runtime` and
-`tig-verifier` on your own Modal or C3 account. The run stops when a candidate beats the
+`tig-verifier` on your own Modal or C3 account, or in Docker on your own machine. The run
+stops when a candidate beats the
 baseline on both training and held-out nonces, or when the budget runs out. The best
 candidate is written to a local, submit-ready package.
 
-Talos never submits to TIG for you, and LLM-authored code never runs on your machine (with
-one opt-in exception: [agentic codex](#agentic-mode)).
+Talos never submits to TIG for you, and LLM-authored code never runs outside a container.
+Only the `local` backend runs that container on your machine, with networking off,
+capabilities dropped, and CPU and memory limits; the one opt-in exception is
+[agentic codex](#agentic-mode).
 
 ## Contents
 
@@ -36,8 +39,8 @@ LLM never sees the `rand_hash` that seeds the nonces.
 
 [docs/architecture.md](docs/architecture.md) has the full flowchart, the guards between
 build and scoring, the agentic sandbox and the baseline cache.
-[docs/compute-backends.md](docs/compute-backends.md) covers how Modal and C3 are used, C3
-timings and the C3 dev images.
+[docs/compute-backends.md](docs/compute-backends.md) covers how Modal, C3 and local Docker
+are used, C3 and local timings, and the dev images.
 
 ## Try it with no accounts
 
