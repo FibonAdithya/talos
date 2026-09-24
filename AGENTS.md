@@ -123,7 +123,11 @@ progress.
    `talos/c3_bench.py::USD_PER_GBP`; LLM spend is measured tokens times
    `talos/providers/pricing.py::PRICES`. An unknown model is "unpriced"
    (`None`), never zero, and a dollar-only budget with an unpriced model is
-   refused rather than allowed to run uncapped.
+   refused rather than allowed to run uncapped. The one fixed price is the
+   local backend's compute, which is zero by design rather than estimated:
+   `talos/cli.py::make_bench` passes `usd_per_hour=0.0`, the machine is the
+   user's own, and `talos run` neither asks for nor defaults a compute cap
+   there (`talos/cli.py::cmd_run`).
 
 ## What "done" means
 
