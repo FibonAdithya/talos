@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -199,7 +198,7 @@ class McpTransport:
         return float(v) if isinstance(v, (int, float)) else None
 
     def deploy(self, job_dir: Path) -> str:
-        from talos.c3_jobdir import job_settings
+        from talos.c3_jobdir import parse_c3
         job_dir = Path(job_dir)
         files = []
         for p in sorted(job_dir.rglob("*")):
@@ -210,8 +209,15 @@ class McpTransport:
             if rel == "job.sh":
                 entry["executable"] = True  # mode 0755; Windows cannot set it on disk
             files.append(entry)
-        challenge, purpose, seconds = _job_dir_settings_inputs(job_dir)
-        args = {**job_settings(challenge, purpose, seconds), "files": files}
+        # The settings come out of the `.c3` the job dir writer rendered, so this path and the
+        # CLI path (which reads `.c3` natively) submit one set of values, and a probe dir with
+        # no payload deploys the same way as a job.
+        try:
+            settings = parse_c3((job_dir / ".c3").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise C3CommandError(f"job dir is not one write_job_dir wrote: "
+                                 f"{_redact(str(e))[:200]}") from None
+        args = {**settings, "files": files}
         doc = self._c.tool("deploy", args, timeout_s=600)
         job_id = doc.get("job_id") or doc.get("id")
         if not job_id:
@@ -273,23 +279,3 @@ def _download(url: str, timeout_s: int) -> bytes:
             return r.read()
     except Exception as e:
         raise C3CommandError(f"artifact download failed: {_redact(str(e))[:200]}") from None
-
-
-def _job_dir_settings_inputs(job_dir: Path) -> tuple[str, str, int]:
-    """Recover (challenge, purpose, walltime seconds) from the job dir write_job_dir produced:
-    the challenge from payload.json, and the purpose and walltime from the `.c3` the same
-    function rendered, so both paths use one set of values. AUDIT: the purpose first came from
-    the directory name, which the deploy test's own job dir ("job", purpose "3") disproves."""
-    try:
-        challenge = json.loads((job_dir / "payload.json").read_text(encoding="utf-8"))["challenge"]
-        text = (job_dir / ".c3").read_text(encoding="utf-8")
-    except (OSError, ValueError, KeyError) as e:
-        raise C3CommandError(f"job dir is not one write_job_dir wrote: "
-                             f"{_redact(str(e))[:200]}") from None
-    t = re.search(r'^time:\s*"(\d+):(\d\d):(\d\d)"', text, re.M)
-    prefix = f"talos-{challenge}-"
-    n = re.search(r"^job_name:\s*(\S+)\s*$", text, re.M)
-    if not t or not n or not n.group(1).startswith(prefix):
-        raise C3CommandError("job dir has no usable time: or job_name: in .c3")
-    h, mi, sec = (int(x) for x in t.groups())
-    return challenge, n.group(1)[len(prefix):], h * 3600 + mi * 60 + sec

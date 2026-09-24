@@ -474,6 +474,9 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
 
     def stub(ok):
         class B:
+            def select_gpu(self, challenge, chosen=None):
+                return None
+
             def evaluate(self, request):
                 seen.update(challenge=request.challenge, files=request.files,
                             training=request.training, holdout=request.holdout)
@@ -974,6 +977,9 @@ class _RefusingBench:
 
     def __init__(self, why):
         self._why = why
+
+    def select_gpu(self, challenge, chosen=None):
+        return None
 
     def evaluate(self, request):
         raise AssertionError(self._why)
@@ -1482,6 +1488,9 @@ def test_compile_uses_the_c3_key_from_the_config(tmp_path, monkeypatch):
     seen = {}
 
     class B:
+        def select_gpu(self, challenge, chosen=None):
+            return None
+
         def evaluate(self, request):
             return EvalResult(CompileResult(ok=True, artifact_id="a1", output="ok"), [], None,
                               "forced")
@@ -1973,3 +1982,187 @@ def test_deploy_bench_deploys_the_app_as_a_package_module():
     assert cmd[-3:] == ["deploy", "-m", "modal_app.talos_bench"]
     # mutation: without the cwd, `-m` cannot import modal_app from outside the checkout
     assert (Path(kw["cwd"]) / "modal_app" / "talos_bench.py").is_file()
+
+
+# ── GPU fallback ──────────────────────────────────────────────────────
+def hypergraph_info():
+    return type("I", (), {"id": "c005", "name": "hypergraph", "is_gpu": True,
+                          "tracks": ["n=1"], "max_fuel": 7})()
+
+
+class _ProbingBench(_RefusingBench):
+    """Records select_gpu calls; evaluate stops the run before any job."""
+
+    def __init__(self, choose="A100-80GB"):
+        super().__init__("no job may be submitted")
+        self.choose, self.selections, self.seen_env = choose, [], []
+
+    def select_gpu(self, challenge, chosen=None):
+        self.selections.append((challenge, chosen))
+        return chosen or self.choose
+
+    def evaluate(self, request):
+        self.seen_env.append(os.environ.get("TALOS_GPU"))
+        raise BenchCancelled("stop")
+
+
+def _gpu_run(tmp_path, monkeypatch, bench, backend="modal", extra=()):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TALOS_GPU", raising=False)
+    save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
+                          backend=backend), None)
+    monkeypatch.setattr(cli, "image_available", lambda ch, fetch=None: True)
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: hypergraph_info())
+    monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("fake_base", "c005_a000", 1))
+    monkeypatch.setattr("talos.mainnet.fetch_template", lambda ch: "pub fn solve_challenge(")
+    monkeypatch.setattr("talos.mainnet.fetch_algorithm_files",
+                        lambda ch, name: {"mod.rs": "fn solve() {}\n"})
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: bench)
+    return cli.main(["run", "--challenge", "hypergraph", "--direction", "go",
+                     "--budget-iterations", "1", "--yes", *extra])
+
+
+def test_execute_job_freezes_the_probed_gpu_in_state_and_exports_it(tmp_path, monkeypatch):
+    from talos.state import JobStore
+    b = _ProbingBench("A100-80GB")
+    on_disk = {}
+    real_event = JobStore.event
+
+    def event(self, kind, **data):
+        if kind == "gpu_selected":  # what state.json says at the moment the choice is announced
+            on_disk["gpu"] = json.loads(
+                (self.run_dir / "state.json").read_text(encoding="utf-8")).get("gpu")
+        real_event(self, kind, **data)
+    monkeypatch.setattr(JobStore, "event", event)
+    rc = _gpu_run(tmp_path, monkeypatch, b)
+    assert rc == 1 and b.selections == [("hypergraph", None)]
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    # mutation: not saving the choice at once leaves a crash before the baseline's own save
+    # to probe again on resume (and maybe land elsewhere); not exporting it makes the
+    # sandbox's `talos compile` probe for its own
+    assert st["gpu"] == "A100-80GB" and on_disk == {"gpu": "A100-80GB"}
+    assert b.seen_env == ["A100-80GB"]
+    # a resume hands the frozen choice back and does not probe
+    b2 = _ProbingBench("H100")
+    rc = _gpu_run(tmp_path, monkeypatch, b2, extra=["--resume", run_dir.name])
+    assert rc == 1 and b2.selections == [("hypergraph", "A100-80GB")]
+    assert b2.seen_env == ["A100-80GB"]
+
+
+def test_execute_job_pauses_when_no_gpu_is_available(tmp_path, monkeypatch, capsys):
+    from talos.bench import BenchUnavailable
+
+    class NoGpu(_ProbingBench):
+        def select_gpu(self, challenge, chosen=None):
+            raise BenchUnavailable("no Modal capacity for any of L40S, A100-80GB, H100")
+
+    rc = _gpu_run(tmp_path, monkeypatch, NoGpu())
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    # mutation: letting BenchUnavailable fall into the blanket handler marks the job failed
+    # (not resumable) and never says which GPUs were tried
+    assert rc == 1 and st["status"] == "paused" and "L40S" in st["stop_reason"]
+    assert st["gpu"] is None
+    assert "no Modal capacity" in capsys.readouterr().err
+
+
+def test_bench_hardware_class_uses_the_frozen_gpu():
+    # mutation: ignoring `gpu` keys every GPU baseline as an L40S one
+    assert cli.bench_hardware_class("modal", "hypergraph", gpu="H100") == "gpu-H100"
+    assert cli.bench_hardware_class("c3", "hypergraph", gpu="a100") == "c3-a100"
+    assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192"
+
+
+def test_compile_uses_the_exported_gpu_or_probes_for_one(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TALOS_BACKEND", raising=False)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "mod.rs").write_text("fn x(){}")
+
+    class B(_ProbingBench):
+        def evaluate(self, request):
+            return EvalResult(CompileResult(ok=True, artifact_id="a", output="ok"), [], None,
+                              "not_won")
+
+    b = B("L40S")
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: b)
+    monkeypatch.setenv("TALOS_GPU", "A100-80GB")
+    assert cli.main(["compile", "--challenge", "hypergraph", "--dir", "src",
+                     "--backend", "modal"]) == 0
+    # mutation: ignoring TALOS_GPU compiles the sandbox's candidate on a GPU of its own
+    assert b.selections == [("hypergraph", "A100-80GB")]
+    monkeypatch.delenv("TALOS_GPU")
+    assert cli.main(["compile", "--challenge", "hypergraph", "--dir", "src",
+                     "--backend", "modal"]) == 0
+    assert b.selections[-1] == ("hypergraph", None)
+
+
+def test_a_job_from_before_the_gpu_choice_is_frozen_to_the_first_option_not_probed(tmp_path,
+                                                                                  monkeypatch):
+    b = _ProbingBench("H100")
+    _gpu_run(tmp_path, monkeypatch, b)
+    run_dir = next((tmp_path / "runs").iterdir())
+    # forge the pre-change shape: a measured baseline and no gpu field at all
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    del st["gpu"]
+    st["status"], st["baseline"] = "paused", {
+        "name": "fake_base", "adoption": 1, "artifact_id": "a", "files": {"mod.rs": ""},
+        "training": [], "holdout": []}
+    (run_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
+    b2 = _ProbingBench("H100")
+    _gpu_run(tmp_path, monkeypatch, b2, extra=["--resume", run_dir.name])
+    # mutation: probing here can land the candidates on an H100 under an L40S baseline
+    assert b2.selections == [("hypergraph", "L40S")]
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert st["gpu"] == "L40S"
+
+
+def test_a_fake_run_on_a_gpu_challenge_freezes_the_first_gpu_without_probing(tmp_path,
+                                                                            monkeypatch):
+    # The review of PR #20 found this path crashing: FakeBench.select_gpu returned None for a
+    # GPU challenge, and hardware_class(spec, None) raises for one. No probe, no Modal: the
+    # fake run keys its baseline under the first option, as a real run did before the choice.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TALOS_GPU", raising=False)
+    rc = cli.main(["run", "--challenge", "hypergraph", "--direction", "go",
+                   "--budget-iterations", "1", "--yes", "--fake"])
+    assert rc in (0, 1)  # won or exhausted, never a traceback
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert st["gpu"] == "L40S" and st["status"] in ("won", "exhausted")
+    assert os.environ.get("TALOS_GPU") == "L40S"
+
+
+def test_the_gpu_probe_is_budget_checked_before_it_runs(tmp_path, monkeypatch, capsys):
+    # invariant 5: the probe is a real compute call; a zero compute cap must stop before it
+    b = _ProbingBench("A100-80GB")
+    rc = _gpu_run(tmp_path, monkeypatch, b, extra=["--budget-compute-usd", "0"])
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    # mutation: dropping the check lets `--budget-compute-usd 0` pay for up to three probes
+    assert b.selections == [] and rc == 1
+    assert st["status"] == "exhausted" and st["stop_reason"] == "compute_usd"
+    assert "compute_usd" in capsys.readouterr().err
+
+
+def test_the_gpu_probe_is_charged_to_compute_spend(tmp_path, monkeypatch):
+    class Billing(_ProbingBench):
+        def select_gpu(self, challenge, chosen=None):
+            self.charged = 0.05
+            return super().select_gpu(challenge, chosen)
+
+        def cost_usd_since(self, mark):
+            return getattr(self, "charged", 0.0) - mark
+
+        def cost_mark(self):
+            return getattr(self, "charged", 0.0)
+
+    b = Billing("A100-80GB")
+    _gpu_run(tmp_path, monkeypatch, b)
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    # mutation: not adding the bench's charge leaves the probe out of the printed estimate
+    # and out of the next budget check
+    assert st["spend"]["compute_usd"] == pytest.approx(0.05)

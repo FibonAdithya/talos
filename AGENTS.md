@@ -60,7 +60,15 @@ progress.
    hardware or fuel is a different key, never a hit. The local backend's class
    is `talos/challenges.py::local_hardware_class`, which carries the host name
    and the container's CPU and memory limits, so changing either at
-   `talos setup` invalidates every local baseline.
+   `talos setup` invalidates every local baseline. On Modal and C3 a GPU
+   challenge's GPU is chosen once, by a capacity probe at job start
+   (`talos/cli.py::freeze_gpu`), frozen in `state.json`
+   (`talos/state.py::JobState`) and handed back on every resume; the fallback
+   order is `talos/challenges.py::MODAL_GPUS` and
+   `talos/challenges.py::C3_GPU_CLASSES`. A fallback per call, such as Modal's
+   own `gpu=[...]` list, would score candidates on a GPU the baseline never ran
+   on, which is why `modal_app/talos_bench.py::register` pins each function to
+   one GPU.
    Both sides also run with identical hyperparameters: the per-track map is
    frozen into `job.json` (`talos/state.py::JobSpec`) together with the
    algorithm it belongs to, every request takes it from there
@@ -110,9 +118,12 @@ progress.
    zero is a real cap.** `talos/budget.py::exhausted` uses `>=`. Two mechanisms
    apply it: `talos/loop.py::_BudgetedBench` wraps the baseline's compute calls,
    and an iteration's own calls go through `talos/loop.py::Loop._bench_evaluate`,
-   which checks the budget and then charges the spend inline. A job with
-   `--budget-compute-usd 0` must stop before the baseline compile. A guard
-   written as `if budget:` reintroduces the bug this was fixed for.
+   which checks the budget and then charges the spend inline. The GPU
+   capacity probe that runs before the baseline is a compute call too:
+   `talos/cli.py::freeze_gpu` checks the budget before it and charges what
+   the bench estimated for it. A job with `--budget-compute-usd 0` must stop
+   before the baseline compile, and before the probe. A guard written as
+   `if budget:` reintroduces the bug this was fixed for.
 6. **`state.json` is written atomically and fsynced.**
    `talos/state.py::_atomic_write` is the only way it is written. A resume
    reads it back; a truncated `state.json` is an unresumable job.

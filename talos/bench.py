@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from talos.challenges import CHALLENGES, BeatRule
+from talos.challenges import CHALLENGES, BeatRule, gpu_options, gpu_slug
 from talos.diagnostics import dead_new_functions
 from talos.inside import NONCE_TIMEOUT_S
 from talos.scoring import holdout_decision
@@ -17,7 +17,8 @@ from talos.types import CompileResult, NonceResult, NonceSet
 # Rough Modal list prices, $/second, used only for budget accounting (marked estimated).
 CPU_USD_PER_CORE_SECOND = 0.0000131
 MEM_USD_PER_GIB_SECOND = 0.00000222
-GPU_USD_PER_SECOND = {"L40S": 0.000542}
+# MEASURED from modal.com/pricing on 2026-09-24; one entry per GPU in MODAL_GPUS.
+GPU_USD_PER_SECOND = {"L40S": 0.000542, "A100-80GB": 0.000694, "H100": 0.001097}
 
 HOLDOUT_REASONS = ("won", "not_won", "forced", "not_compiled", "timeout", "dead_code")
 
@@ -40,6 +41,15 @@ def _stale_deploy(e: Exception) -> bool:
     """A remote function refusing its arguments is a deploy older than this client, never a
     transport outage. Modal re-raises the container's TypeError with its message intact."""
     return "positional argument" in str(e) or "unexpected keyword argument" in str(e)
+
+
+def _timeout_types() -> tuple[type, ...]:
+    """What FunctionCall.get raises when the client-side wait runs out. modal 1.5.5 raises the
+    builtin TimeoutError; its own modal.exception.TimeoutError is caught too in case a later
+    SDK switches (a fake `modal` module in tests may lack it)."""
+    import modal
+    own = getattr(getattr(modal, "exception", None), "TimeoutError", None)
+    return (TimeoutError, own) if isinstance(own, type) else (TimeoutError,)
 
 
 def timeout_for(timeouts: dict[str, int] | None, track: str) -> int:
@@ -113,15 +123,16 @@ class PendingJobStore:
 
 class Bench(Protocol):
     def evaluate(self, request: EvalRequest) -> EvalResult: ...
+    def select_gpu(self, challenge: str, chosen: str | None = None) -> str | None: ...
     def request_stop(self) -> None: ...
     def cost_mark(self) -> float: ...
     def cost_usd_since(self, mark: float) -> float: ...
 
 
-def _seconds_cost(challenge: str, seconds: float) -> float:
+def _seconds_cost(challenge: str, seconds: float, gpu: str | None) -> float:
     spec = CHALLENGES[challenge]
     if spec.is_gpu:
-        return seconds * GPU_USD_PER_SECOND[spec.gpu]
+        return seconds * GPU_USD_PER_SECOND[gpu]
     return seconds * (spec.cpu * CPU_USD_PER_CORE_SECOND
                       + spec.memory_mib / 1024 * MEM_USD_PER_GIB_SECOND)
 
@@ -129,13 +140,61 @@ def _seconds_cost(challenge: str, seconds: float) -> float:
 class ModalBench:
     def __init__(self, app_name: str = "talos-bench", retry_window_s: int = 900,
                  clock: Callable[[], float] = time.time,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, probe_window_s: int = 120):
         self.app_name = app_name
         self.retry_window_s = retry_window_s
+        self.probe_window_s = probe_window_s
         self._clock = clock
         self._sleep = sleep
         self._cost = 0.0
         self._fns: dict[str, object] = {}
+        self.gpu: str | None = None  # set by select_gpu; None for CPU challenges
+
+    def select_gpu(self, challenge: str, chosen: str | None = None) -> str | None:
+        """Freezes the GPU this bench calls for `challenge`. With `chosen` (a resumed job, or
+        the sandbox's `talos compile` given TALOS_GPU) nothing is probed. Otherwise each GPU in
+        preference order gets a probe call; the first whose probe returns within probe_window_s
+        is the choice, a probe that has not started by then is cancelled (it would otherwise
+        run, and bill, whenever that GPU freed up) and the next GPU is tried. None answering is
+        BenchUnavailable, which pauses the run. CPU challenges have no options: None."""
+        options = gpu_options(CHALLENGES[challenge])
+        if not options:
+            self.gpu = None
+            return None
+        if chosen is not None:
+            if chosen not in options:
+                raise ValueError(f"unknown GPU {chosen!r} for {challenge}; one of "
+                                 f"{', '.join(options)}")
+            self.gpu = chosen
+            return chosen
+        for gpu in options:
+            if self._with_retry(lambda: self._probe(gpu)):
+                self.gpu = gpu
+                return gpu
+        raise BenchUnavailable(f"no Modal capacity for any of {', '.join(options)} within "
+                               f"{self.probe_window_s}s each; try again later")
+
+    def _probe(self, gpu: str) -> bool:
+        t0 = self._clock()
+        call = self._fn(f"probe_{gpu_slug(gpu)}").spawn()
+        try:
+            call.get(timeout=self.probe_window_s)
+        except _timeout_types():
+            call.cancel()
+            return False  # never started: nothing to charge
+        # ESTIMATE: the whole wait at the GPU's rate. Queue time is in it, so this is never
+        # below what the container billed.
+        self._cost += GPU_USD_PER_SECOND[gpu] * (self._clock() - t0)
+        return True
+
+    def _name(self, kind: str, challenge: str) -> str:
+        """The deployed function for `kind` ("compile" or "score_nonce") of `challenge`: the
+        bare name for a CPU challenge, the frozen GPU's variant for a GPU one."""
+        if not CHALLENGES[challenge].is_gpu:
+            return f"{kind}_{challenge}"
+        if self.gpu is None:
+            raise ValueError(f"{challenge} is a GPU challenge; select_gpu was not called")
+        return f"{kind}_{challenge}_{gpu_slug(self.gpu)}"
 
     def _fn(self, name: str):
         """Only a genuine "not deployed" becomes BenchUnavailable. Anything else — a network
@@ -184,8 +243,9 @@ class ModalBench:
 
     def _compile(self, challenge: str, files: dict[str, str]) -> CompileResult:
         t0 = self._clock()
-        out = self._with_retry(lambda: self._fn(f"compile_{challenge}").remote(files))
-        self._cost += _seconds_cost(challenge, self._clock() - t0)
+        name = self._name("compile", challenge)  # outside the retry: a missing GPU is a bug
+        out = self._with_retry(lambda: self._fn(name).remote(files))
+        self._cost += _seconds_cost(challenge, self._clock() - t0, self.gpu)
         return CompileResult(ok=out["ok"], artifact_id=out.get("artifact_id"), output=out["output"])
 
     def _score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
@@ -198,10 +258,11 @@ class ModalBench:
             # A holdout count of 0 still yields one NonceSet per track, each with no nonces.
             # modal 1.5.5 never returns from starmap([]), so the client would hang here.
             return []
-        rows = self._with_retry(
-            lambda: list(self._fn(f"score_nonce_{challenge}").starmap(args)))
+        name = self._name("score_nonce", challenge)
+        rows = self._with_retry(lambda: list(self._fn(name).starmap(args)))
         results = [NonceResult.from_dict(r) for r in rows]
-        self._cost += sum(_seconds_cost(challenge, r.runtime_ms / 1000) for r in results)
+        self._cost += sum(_seconds_cost(challenge, r.runtime_ms / 1000, self.gpu)
+                          for r in results)
         return results
 
     def evaluate(self, request: EvalRequest) -> EvalResult:
@@ -246,6 +307,13 @@ class FakeBench:
         self._cost = 0.0
         self.calls: list[EvalRequest] = []
         self.holdout_runs = 0
+
+    def select_gpu(self, challenge: str, chosen: str | None = None) -> str | None:
+        """In-process, so nothing is probed; but a GPU challenge still gets a GPU (the first
+        option, or the frozen one), because the hardware class the fake run keys its baseline
+        under needs one just as a real run's does."""
+        options = gpu_options(CHALLENGES[challenge])
+        return (chosen or options[0]) if options else None
 
     def evaluate(self, request: EvalRequest) -> EvalResult:
         self.calls.append(request)

@@ -437,3 +437,124 @@ def test_modal_starmap_carries_each_tracks_hyperparameters(monkeypatch):
     ModalBench().evaluate(r_ho)
     # mutation: passing None instead of request.hyperparameters to the holdout _score call
     assert seen == [("t", {"x": 1}), ("u", None)]
+
+
+# ── GPU fallback ──────────────────────────────────────────────────────
+def _fake_modal_gpu(monkeypatch, probes: dict, lookups: list, cancelled: list, clock=None):
+    """`probes` maps a probe function name to True (starts at once) or False (never starts).
+    A successful probe advances `clock` by 3 s, so its charge is checkable."""
+    class Call:
+        def __init__(self, name):
+            self.name = name
+
+        def get(self, timeout=None):
+            if probes[self.name]:
+                if clock is not None:
+                    clock.t += 3
+                return self.name
+            raise TimeoutError()  # modal 1.5.5 raises the builtin from FunctionCall.get
+
+        def cancel(self):
+            cancelled.append(self.name)
+
+    class Fn:
+        def __init__(self, name):
+            self.name = name
+
+        def hydrate(self):
+            pass
+
+        def spawn(self):
+            return Call(self.name)
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": f"built on {self.name}"}
+
+        def starmap(self, args):
+            return [{"track": t, "nonce": n, "ok": True, "quality": 1, "runtime_ms": 1000,
+                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
+
+    def from_name(app_name, name):
+        lookups.append(name)
+        return Fn(name)
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=from_name)
+    monkeypatch.setitem(sys.modules, "modal", mod)
+
+
+def gpu_req():
+    return EvalRequest(challenge="hypergraph", files={"mod.rs": "x"}, training=TR, holdout=[],
+                       fuel=1, baseline_training=None, rule=BeatRule())
+
+
+def test_select_gpu_takes_the_first_gpu_whose_probe_starts_and_cancels_the_rest(monkeypatch):
+    lookups, cancelled = [], []
+    clock = FakeClock()
+    _fake_modal_gpu(monkeypatch, {"probe_l40s": False, "probe_a100_80gb": True, "probe_h100": True},
+                lookups, cancelled, clock=clock)
+    b = ModalBench(probe_window_s=30, clock=clock)  # the clock moves only inside a probe
+    assert b.select_gpu("hypergraph") == "A100-80GB"
+    from talos.bench import GPU_USD_PER_SECOND
+    # mutation: an unchanged probe cost hides a real GPU call from the compute cap; the
+    # timed-out L40S probe never ran and must charge nothing
+    assert b.cost_mark() == pytest.approx(3 * GPU_USD_PER_SECOND["A100-80GB"], abs=1e-9)
+    # mutation: not cancelling the timed-out probe leaves an input queued that runs (and
+    # bills) whenever an L40S frees up; probing past the first success pays for an H100 start
+    assert cancelled == ["probe_l40s"] and lookups == ["probe_l40s", "probe_a100_80gb"]
+    # the choice routes every later call to that GPU's function set
+    r = b.evaluate(gpu_req())
+    assert r.compile.output == "built on compile_hypergraph_a100_80gb"
+    assert "score_nonce_hypergraph_a100_80gb" in lookups
+    # ...and prices it as that GPU: the probe's 3 s plus 3 nonces x 1 s at the A100-80GB rate
+    assert b.cost_mark() == pytest.approx(6 * GPU_USD_PER_SECOND["A100-80GB"], abs=1e-9)
+
+
+def test_select_gpu_reports_all_unavailable_after_trying_every_gpu(monkeypatch):
+    lookups, cancelled = [], []
+    _fake_modal_gpu(monkeypatch, {"probe_l40s": False, "probe_a100_80gb": False,
+                                  "probe_h100": False}, lookups, cancelled)
+    b = ModalBench(probe_window_s=30)
+    with pytest.raises(BenchUnavailable) as ei:
+        b.select_gpu("hypergraph")
+    # mutation: stopping at the first miss never reaches the fallbacks
+    assert cancelled == ["probe_l40s", "probe_a100_80gb", "probe_h100"]
+    assert b.cost_mark() == 0.0  # nothing ran
+    assert "L40S" in str(ei.value) and "H100" in str(ei.value) and "30" in str(ei.value)
+
+
+def test_select_gpu_honours_a_frozen_choice_without_probing(monkeypatch):
+    lookups, cancelled = [], []
+    _fake_modal_gpu(monkeypatch, {"probe_l40s": True}, lookups, cancelled)
+    b = ModalBench()
+    # mutation: probing again on a resume can move the candidates to another GPU than the
+    # one the baseline was measured on
+    assert b.select_gpu("hypergraph", chosen="H100") == "H100"
+    assert lookups == []
+    b.evaluate(gpu_req())
+    assert lookups[0] == "compile_hypergraph_h100"
+    with pytest.raises(ValueError):
+        b.select_gpu("hypergraph", chosen="T4")
+
+
+def test_select_gpu_is_a_no_op_for_cpu_challenges_and_the_fake_bench(monkeypatch):
+    lookups, cancelled = [], []
+    _fake_modal_gpu(monkeypatch, {}, lookups, cancelled)
+    b = ModalBench()
+    assert b.select_gpu("knapsack") is None and lookups == []
+    b.evaluate(req())
+    assert lookups[0] == "compile_knapsack"  # CPU function names are unchanged
+    fake = FakeBench(lambda c, f, ns: [1] * ns.count)
+    assert fake.select_gpu("knapsack") is None
+    # in-process, so no probe, but a GPU challenge still needs a GPU for its hardware class
+    assert fake.select_gpu("hypergraph") == "L40S"
+    assert fake.select_gpu("hypergraph", chosen="H100") == "H100"
+
+
+def test_a_gpu_call_before_select_gpu_is_refused_loudly(monkeypatch):
+    lookups, cancelled = [], []
+    _fake_modal_gpu(monkeypatch, {}, lookups, cancelled)
+    with pytest.raises(ValueError):  # mutation: defaulting to the first GPU hides the bug
+        ModalBench().evaluate(gpu_req())
+    assert lookups == []

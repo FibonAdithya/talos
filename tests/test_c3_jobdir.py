@@ -2,6 +2,8 @@ import json
 import os
 import stat
 
+import pytest
+
 from talos import c3_jobdir
 from talos.bench import EvalRequest
 from talos.c3_jobdir import LocalSettings
@@ -29,11 +31,12 @@ def test_c3_pulls_the_official_ghcr_dev_image():
 
 def test_profile_workers_and_hardware_class():
     cpu, gpu = CHALLENGES["knapsack"], CHALLENGES["hypergraph"]
-    assert c3_profile(cpu) == "cpu-d3-4vcpu-16gb" and c3_profile(gpu) == "l40"
+    assert c3_profile(cpu) == "cpu-d3-4vcpu-16gb" and c3_profile(gpu, "l40") == "l40"
     # mutation: 4 workers on one GPU would serialise on the device and time out the job
     assert c3_workers(cpu) == 4 and c3_workers(gpu) == 1
     # mutation: reusing the Modal hardware class string lets a Modal baseline serve a C3 run
-    assert c3_hardware_class(cpu) == "c3-cpu-d3-4vcpu-16gb" and c3_hardware_class(gpu) == "c3-l40"
+    assert c3_hardware_class(cpu) == "c3-cpu-d3-4vcpu-16gb"
+    assert c3_hardware_class(gpu, "l40") == "c3-l40"
 
 
 def test_time_limit_formula_and_cap():
@@ -64,8 +67,10 @@ def test_job_settings_and_the_c3_file_agree():
     assert s["hardware"] == "cpu-d3-4vcpu-16gb"
     assert s["docker_requires_accelerator"] == "none"
     assert s["docker_image"] == f"ghcr.io/tig-foundation/tig-monorepo/knapsack/dev:{DEV_IMAGE_TAG}"
-    g = c3_jobdir.job_settings("hypergraph", "1", 60)
+    g = c3_jobdir.job_settings("hypergraph", "1", 60, gpu="l40")
     assert g["docker_requires_accelerator"] == "cuda" and g["hardware"] == "l40"
+    # mutation: a hard-coded "l40" runs a job frozen to the a100 class on the wrong hardware
+    assert c3_jobdir.job_settings("hypergraph", "1", 60, gpu="a100")["hardware"] == "a100"
 
 
 def test_c3_config_text_is_exact():
@@ -80,8 +85,8 @@ def test_c3_config_text_is_exact():
         f"  image: ghcr.io/tig-foundation/tig-monorepo/knapsack/dev:{DEV_IMAGE_TAG}\n"
         "  requires_accelerator: none\n")
     # mutation: a GPU image on a CPU-flagged job is rejected only at run time, after the pull
-    assert "requires_accelerator: cuda" in c3_jobdir.c3_config_text("hypergraph", "1", 60)
-    assert "hardware: l40\n" in c3_jobdir.c3_config_text("hypergraph", "1", 60)
+    assert "requires_accelerator: cuda" in c3_jobdir.c3_config_text("hypergraph", "1", 60, "l40")
+    assert "hardware: h100\n" in c3_jobdir.c3_config_text("hypergraph", "1", 60, "h100")
 
 
 def test_write_job_dir_contents_and_secrecy(tmp_path):
@@ -227,3 +232,46 @@ def test_request_hash_is_the_same_for_both_flavours():
     assert c3_jobdir.request_hash(r) == c3_jobdir.request_hash(r)
     assert c3_jobdir.payload(r, workers=8)["workers"] == 8
     assert c3_jobdir.payload(r)["workers"] == 4
+
+
+def test_parse_c3_inverts_render_c3():
+    from talos.c3_jobdir import parse_c3, render_c3
+    s = c3_jobdir.job_settings("hypergraph", "7", 1380, gpu="a100")
+    # mutation: a regex that drops the minutes term, or reads hardware from the wrong line,
+    # sends the MCP path a different job from the one the CLI path reads out of .c3
+    assert parse_c3(render_c3(s)) == s
+    assert parse_c3(c3_jobdir.c3_config_text("knapsack", "3", 1380)) == \
+        c3_jobdir.job_settings("knapsack", "3", 1380)
+    with pytest.raises(ValueError):
+        parse_c3("project: talos\n")
+
+
+def test_probe_dir_is_a_tiny_job_on_the_named_class(tmp_path):
+    from talos.c3_jobdir import (PROBE_IMAGE, PROBE_WALLTIME_S, parse_c3, probe_settings,
+                                 write_probe_dir)
+    d = write_probe_dir(tmp_path / "probe", "h100")
+    s = parse_c3((d / ".c3").read_text(encoding="utf-8"))
+    assert s == probe_settings("h100")
+    # mutation: the dev image (13 GB) makes every probe a minutes-long pull; the challenge's
+    # walltime makes a probe that is never cancelled bill for hours
+    assert s["hardware"] == "h100" and s["docker_image"] == PROBE_IMAGE
+    assert s["walltime_seconds"] == PROBE_WALLTIME_S <= 300
+    assert s["docker_requires_accelerator"] == "cuda"
+    assert s["job_name"] == "talos-probe-h100" and s["script"] == "job.sh"
+    sh = d / "job.sh"
+    assert sh.read_text(encoding="utf-8").startswith("#!/bin/bash")
+    if os.name != "nt":  # Windows has no execute bit to set
+        assert stat.S_IMODE(sh.stat().st_mode) & stat.S_IXUSR
+    # nothing of a real job: no payload (no rand_hash) and no talos modules
+    assert sorted(p.name for p in d.iterdir()) == [".c3", "job.sh"]
+    write_probe_dir(tmp_path / "probe", "l40")  # rewriting is fine
+    assert parse_c3((d / ".c3").read_text(encoding="utf-8"))["hardware"] == "l40"
+
+
+def test_write_job_dir_takes_the_frozen_gpu(tmp_path):
+    from talos.c3_jobdir import parse_c3
+    d = c3_jobdir.write_job_dir(tmp_path / "job", req(challenge="hypergraph"), "3", gpu="a100")
+    # mutation: dropping the argument submits every GPU job on the first class
+    assert parse_c3((d / ".c3").read_text(encoding="utf-8"))["hardware"] == "a100"
+    with pytest.raises(ValueError):  # a GPU job with no chosen GPU is a programming error
+        c3_jobdir.write_job_dir(tmp_path / "job2", req(challenge="hypergraph"), "3")
