@@ -293,3 +293,16 @@ def test_run_nonces_never_pools_an_injected_runner_without_an_injected_pool(tmp_
     rows = list(inside.run_nonces([_task(n, tmp_path) for n in range(2)], 4,
                                   run=_capture_run(seen)))
     assert len(rows) == 2 and len([c for c in seen if c[0] == "tig-runtime"]) == 2
+def test_artifact_paths_follow_the_container_architecture(tmp_path):
+    """The TIG build writes lib/<challenge>/<arch>/, amd64 on x86 and arm64 on
+    aarch64 hosts; the path must follow the machine the build ran on."""
+    from talos import inside
+
+    lib = tmp_path / "tig-algorithms" / "lib" / "knapsack"
+    (lib / "arm64").mkdir(parents=True)
+    (lib / "amd64").mkdir()
+    so, ptx = inside.artifact_paths(tmp_path, "knapsack", "talos_cand", machine="aarch64")
+    assert so == lib / "arm64" / "talos_cand.so"
+    so, _ = inside.artifact_paths(tmp_path, "knapsack", "talos_cand", machine="x86_64")
+    assert so == lib / "amd64" / "talos_cand.so"
+    assert ptx is None

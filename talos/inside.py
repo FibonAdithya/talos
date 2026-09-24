@@ -8,6 +8,7 @@ import hashlib
 import json
 import multiprocessing
 import re
+import platform
 import subprocess
 import tempfile
 import time
@@ -84,9 +85,17 @@ def build(monorepo: Path, challenge: str, name: str, run=subprocess.run) -> tupl
     return r.returncode == 0, out[-BUILD_OUTPUT_CAP:]
 
 
-def artifact_paths(monorepo: Path, challenge: str, name: str) -> tuple[Path, Path | None]:
+# The TIG build writes lib/<challenge>/<arch>/ using Docker's architecture names,
+# not uname's: amd64 on x86_64 hosts, arm64 on aarch64 hosts.
+_ARCH_DIR = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+
+
+def artifact_paths(monorepo: Path, challenge: str, name: str,
+                   machine: str | None = None) -> tuple[Path, Path | None]:
+    machine = machine or platform.machine()
+    arch = _ARCH_DIR.get(machine, machine)
     lib = monorepo / "tig-algorithms" / "lib" / challenge
-    so = lib / "amd64" / f"{name}.so"
+    so = lib / arch / f"{name}.so"
     ptx = lib / "ptx" / f"{name}.ptx"
     return so, (ptx if ptx.exists() else None)
 
