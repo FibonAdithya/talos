@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, PendingJobStore
-from talos.c3_bench import C3Bench, fill_timeouts, parse_json_stdout
+from talos.c3_bench import C3Bench, C3CommandError, fill_timeouts, parse_json_stdout
 from talos.c3_jobdir import LocalSettings
 from talos.challenges import CHALLENGES
 from talos.types import NonceResult, NonceSet
@@ -96,7 +96,8 @@ def bench(tmp_path, c3, pending=None, clock=None):
     def sleep(s):
         clock.t += s
     return C3Bench(tmp_path, pending=pending or PendingJobStore.memory(), run=c3, clock=clock,
-                   sleep=sleep, poll_s=20.0, pending_timeout_s=1800), clock
+                   sleep=sleep, poll_s=20.0, pending_timeout_s=1800,
+                   hardware="cpu-d3-4vcpu-16gb"), clock
 
 
 def test_parse_json_stdout_skips_the_warning_line():
@@ -413,7 +414,8 @@ def test_every_c3_call_carries_the_api_key_in_its_environment(tmp_path):
 
     def sleep(s):
         clock.t += s
-    b = C3Bench(tmp_path, run=c3, clock=clock, sleep=sleep, api_key="c3_key_secret")
+    b = C3Bench(tmp_path, run=c3, clock=clock, sleep=sleep, api_key="c3_key_secret",
+                hardware="cpu-d3-4vcpu-16gb")
     b.evaluate(req())
     assert {cmd[1] for cmd, _ in c3.calls} >= {"deploy", "squeue", "pull"}
     # mutation: passing env= on deploy only authenticates the submit and not the polling
@@ -470,7 +472,8 @@ def tbench(tmp_path, t):
     def sleep(s):
         clock.t += s
     return C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
-                   clock=clock, sleep=sleep, poll_s=20.0, pending_timeout_s=1800)
+                   clock=clock, sleep=sleep, poll_s=20.0, pending_timeout_s=1800,
+                   hardware="cpu-d3-4vcpu-16gb")
 
 
 def test_an_injected_transport_carries_the_whole_job(tmp_path):
@@ -566,7 +569,8 @@ def test_a_given_rate_is_charged_and_none_keeps_the_c3_rate(tmp_path):
     def sleep(s):
         clock.t += s
     b = C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
-                clock=clock, sleep=sleep, poll_s=20.0, usd_per_hour=3.6)
+                clock=clock, sleep=sleep, poll_s=20.0, usd_per_hour=3.6,
+                hardware="cpu-d3-4vcpu-16gb")
     b.evaluate(req())
     # RUNNING first seen at t=0, terminal at t=40: 40 s at $3.6/h = $0.04
     assert abs(b.cost_mark() - 0.04) < 1e-9
@@ -582,7 +586,7 @@ def test_messages_name_the_transport_label_when_it_has_one(tmp_path):
     assert "local Docker job failed twice" in str(ei.value) and "C3" not in str(ei.value)
 
 
-# ── GPU fallback ──────────────────────────────────────────────────────
+# ── Hardware fallback ──────────────────────────────────────────────────────
 class ProbeTransport(FakeTransport):
     """Statuses per deployed job, in deploy order; a job's list is replayed like FakeTransport's."""
 
@@ -640,17 +644,88 @@ def test_select_hardware_treats_a_probe_that_already_finished_as_capacity(tmp_pa
     assert ("cancel", "job_1") not in t.calls
 
 
-def test_select_hardware_honours_a_frozen_choice_and_skips_cpu_and_local(tmp_path):
+def test_select_hardware_honours_a_frozen_choice_and_skips_local(tmp_path):
     t = ProbeTransport([])
     b = tbench(tmp_path, t)
     assert b.select_hardware("hypergraph", chosen="h100") == "h100" and t.dirs == []
     with pytest.raises(ValueError):
         b.select_hardware("hypergraph", chosen="L40S")
-    assert tbench(tmp_path, ProbeTransport([])).select_hardware("knapsack") is None
+    assert b.select_hardware("knapsack", chosen="cpu-e2-4vcpu-16gb") == "cpu-e2-4vcpu-16gb"
+    assert t.dirs == []
+    with pytest.raises(ValueError):
+        b.select_hardware("knapsack", chosen="l40")
     local = C3Bench(tmp_path, pending=PendingJobStore.memory(), run=_no_cli, transport=t,
                     local=LocalSettings(4, 8), usd_per_hour=0.0)
     # mutation: probing on the local backend submits a C3-shaped job to Docker
     assert local.select_hardware("hypergraph") is None and t.dirs == []
+
+
+def test_select_hardware_probes_the_cpu_profiles_for_a_cpu_challenge(tmp_path):
+    t = ProbeTransport([["PENDING"], ["SCHEDULING", "RUNNING"]])
+    b = tbench(tmp_path, t)
+    # mutation: a CPU challenge with no options stays on d3 when d3 is out of stock, which is
+    # the shortage that was seen live on 2026-09-23
+    assert b.select_hardware("knapsack") == "cpu-e2-4vcpu-16gb"
+    assert [_hw(d) for d in t.dirs] == ["cpu-d3-4vcpu-16gb", "cpu-e2-4vcpu-16gb"]
+    assert [d.name for d in t.dirs] == ["probe-cpu-d3-4vcpu-16gb", "probe-cpu-e2-4vcpu-16gb"]
+    assert ("cancel", "job_1") in t.calls and ("cancel", "job_2") in t.calls
+    # the chosen profile reaches the real job's .c3 and its rate
+    t.results = results_doc()
+    b.evaluate(req())
+    assert _hw(t.dirs[-1]) == "cpu-e2-4vcpu-16gb"
+    from talos.c3_bench import GBP_PER_HOUR, USD_PER_GBP
+    assert b.cost_mark() == pytest.approx(20 / 3600 * GBP_PER_HOUR["cpu-e2-4vcpu-16gb"]
+                                          * USD_PER_GBP)
+
+
+class RefusingProbeTransport(ProbeTransport):
+    """deploy raises the given C3CommandError text for a job (None accepts it), then behaves
+    like ProbeTransport for the accepted ones."""
+
+    def __init__(self, refusals, per_job):
+        super().__init__(per_job)
+        self.refusals = list(refusals)
+
+    def deploy(self, job_dir):
+        msg = self.refusals.pop(0) if self.refusals else None
+        if msg is not None:
+            self.dirs.append(Path(job_dir))
+            self.calls.append(("deploy", str(job_dir)))
+            raise C3CommandError(msg)
+        return super().deploy(job_dir)
+
+
+OUT_OF_STOCK = ("c3 deploy failed (1): 409 GPU_OUT_OF_STOCK: cpu-d3-4vcpu-16gb does not "
+                "currently have capacity")
+
+
+def test_select_hardware_moves_on_when_a_profile_is_refused_at_deploy_as_out_of_stock(tmp_path):
+    # C3 can refuse the deploy itself (409, seen live 2026-09-23) rather than queue the job
+    t = RefusingProbeTransport([OUT_OF_STOCK, None], [["RUNNING"]])
+    b = tbench(tmp_path, t)
+    # mutation: treating the refusal as a deploy failure pauses the run without trying e2
+    assert b.select_hardware("knapsack") == "cpu-e2-4vcpu-16gb"
+    assert [_hw(d) for d in t.dirs] == ["cpu-d3-4vcpu-16gb", "cpu-e2-4vcpu-16gb"]
+    # nothing was queued for d3, so there is nothing to cancel there
+    assert [c for c in t.calls if c[0] == "cancel"] == [("cancel", "job_1")]
+
+
+def test_select_hardware_reports_every_profile_refused_as_out_of_stock(tmp_path):
+    t = RefusingProbeTransport([OUT_OF_STOCK, OUT_OF_STOCK.replace("d3", "e2")], [])
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).select_hardware("knapsack")
+    assert "cpu-d3-4vcpu-16gb" in str(ei.value) and "cpu-e2-4vcpu-16gb" in str(ei.value)
+    assert not any(c[0] == "cancel" for c in t.calls)
+
+
+def test_select_hardware_still_fails_fast_on_a_deploy_error_that_is_not_a_shortage(tmp_path):
+    t = RefusingProbeTransport(["c3 deploy failed (1): 401 unauthorized"], [["RUNNING"]])
+    with pytest.raises(BenchUnavailable) as ei:
+        tbench(tmp_path, t).select_hardware("knapsack")
+    # mutation: moving on from every deploy error retries a bad key on each option and then
+    # reports "no capacity", hiding the real cause
+    assert "probe deploy failed" in str(ei.value) and "401" in str(ei.value)
+    assert len(t.dirs) == 1
 
 
 def test_select_hardware_stop_request_cancels_the_probe(tmp_path):

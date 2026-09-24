@@ -232,7 +232,7 @@ class FakeClient:
 def job_dir_for(tmp_path):
     from tests.test_c3_jobdir import req
     # The directory is deliberately not named after the purpose: the settings come from `.c3`.
-    return write_job_dir(tmp_path / "job", req(), "3")
+    return write_job_dir(tmp_path / "job", req(), "3", hardware="cpu-d3-4vcpu-16gb")
 
 
 def test_deploy_sends_the_files_with_job_sh_executable_and_the_c3_settings(tmp_path):
@@ -242,7 +242,7 @@ def test_deploy_sends_the_files_with_job_sh_executable_and_the_c3_settings(tmp_p
 
     c = FakeClient({"deploy": {"job_id": "job_5"}})
     request = jobdir_req()
-    d = write_job_dir(tmp_path / "job", request, "3")
+    d = write_job_dir(tmp_path / "job", request, "3", hardware="cpu-d3-4vcpu-16gb")
     assert McpTransport("k", client=c).deploy(d) == "job_5"
     name, args = c.calls[0]
     assert name == "deploy"
@@ -264,7 +264,8 @@ def test_deploy_sends_the_files_with_job_sh_executable_and_the_c3_settings(tmp_p
     assert isinstance(args["walltime_seconds"], int)
     assert args["walltime_seconds"] > 0
     # mutation: a hard-coded profile breaks invariant 1
-    for k, v in job_settings("knapsack", "3", expected_walltime).items():
+    settings = job_settings("knapsack", "3", expected_walltime, hardware="cpu-d3-4vcpu-16gb")
+    for k, v in settings.items():
         assert args[k] == v
 
 

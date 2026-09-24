@@ -11,8 +11,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from talos.bench import EvalRequest
-from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_image, c3_profile,
-                              c3_workers, dev_image, local_workers)
+from talos.challenges import (C3_GPU_CLASSES, CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_image,
+                              c3_profile, c3_workers, dev_image, local_workers)
 from talos.inside import NONCE_TIMEOUT_S
 
 BUILD_ALLOWANCE_S = 1200
@@ -23,7 +23,7 @@ LOCAL_BUILD_ALLOWANCE_S = 3600
 LOCAL_APP = "/app"  # where the local job container mounts the challenge's monorepo volume
 LOCAL_LOCK = f"{LOCAL_APP}/.talos-lock"  # held by every container that writes the volume
 TIME_CAP_S = 6 * 3600
-# The GPU capacity probe (`talos/c3_bench.py::C3Bench.select_hardware`): a job whose script is
+# The capacity probe (`talos/c3_bench.py::C3Bench.select_hardware`): a job whose script is
 # `true`, on a stock image so the pull is seconds rather than the dev image's 13 GB, with a
 # walltime short enough that one the client never cancelled bills for minutes, not hours.
 PROBE_IMAGE = "ubuntu:24.04"
@@ -64,11 +64,12 @@ def job_settings(challenge: str, purpose: str, seconds: int,
 
 
 def probe_settings(hardware: str) -> dict:
-    """A capacity probe on one GPU class: the same keys as `job_settings`, so either transport
-    deploys it, but no challenge behind it."""
+    """A capacity probe on one GPU class or CPU profile: the same keys as `job_settings`, so
+    either transport deploys it, but no challenge behind it."""
     return {"project": "talos", "job_name": f"talos-probe-{hardware}", "script": "job.sh",
             "hardware": hardware, "walltime_seconds": PROBE_WALLTIME_S,
-            "docker_image": PROBE_IMAGE, "docker_requires_accelerator": "cuda"}
+            "docker_image": PROBE_IMAGE,
+            "docker_requires_accelerator": "cuda" if hardware in C3_GPU_CLASSES else "none"}
 
 
 def render_c3(s: dict) -> str:
@@ -192,7 +193,8 @@ def write_job_dir(job_dir: Path, request: EvalRequest, purpose: str,
                   local: LocalSettings | None = None, hardware: str | None = None) -> Path:
     """Writes the deploy directory, wiping `job_dir` first if it already exists. With `local`
     it is the local flavour: local.json instead of .c3, a job.sh that does not download the
-    monorepo, and the local worker count in the payload. `hardware` is the C3 class or profile the job was
+    monorepo, and the local worker count in the payload. `hardware` is the C3 class or profile
+    the job was
     frozen to (see `talos/challenges.py::c3_profile`); the local flavour ignores it."""
     job_dir = Path(job_dir)
     if job_dir.exists():

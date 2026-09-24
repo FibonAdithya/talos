@@ -7,16 +7,19 @@ from dataclasses import dataclass
 MONOREPO_REF = "84a5787f5b14a630bdf40f52bccf37887d3d8464"
 DEV_IMAGE_TAG = "0.0.7"
 
-C3_CPU_PROFILE = "cpu-d3-4vcpu-16gb"  # 4 vCPU / 16 GB, matches the 4-core Modal spec
 C3_CPU_WORKERS = 4
-# GPU preference order, tried in turn at job start until one has capacity (`talos/bench.py::
-# ModalBench.select_hardware`, `talos/c3_bench.py::C3Bench.select_hardware`). The choice is then frozen
-# in state.json for the whole job: the baseline and every candidate must score on the same
-# class (AGENTS.md invariant 1), so a fallback can never happen per call. Only classes with at
-# least the L40S's 48 GB of VRAM, cheapest first; a smaller card could OOM a candidate the
-# baseline fit. C3's "l40" class spans both the L40 and the L40S.
+# Hardware preference order, tried in turn at job start until one has capacity
+# (`talos/bench.py::ModalBench.select_hardware`, `talos/c3_bench.py::C3Bench.select_hardware`).
+# The choice is then frozen in state.json for the whole job: the baseline and every candidate
+# must score on the same class (AGENTS.md invariant 1), so a fallback can never happen per
+# call. GPUs: only classes with at least the L40S's 48 GB of VRAM, cheapest first; a smaller
+# card could OOM a candidate the baseline fit. C3's "l40" class spans both the L40 and the
+# L40S. C3 CPU profiles: only the 4 vCPU / 16 GB ones (the 4-core Modal spec; the 4 GB
+# cpu-n1 profile is under the 8 GB the spec declares), the profile the existing baselines were
+# measured on first. Modal's CPU containers have one class and nothing to fall back to.
 MODAL_GPUS = ("L40S", "A100-80GB", "H100")
 C3_GPU_CLASSES = ("l40", "a100", "h100")
+C3_CPU_PROFILES = ("cpu-d3-4vcpu-16gb", "cpu-e2-4vcpu-16gb")
 
 
 def dev_image(name: str) -> str:
@@ -59,16 +62,18 @@ def hardware_options(spec: ChallengeSpec) -> tuple[str, ...]:
 
 
 def c3_hardware_options(spec: ChallengeSpec) -> tuple[str, ...]:
-    """The C3 hardware classes a job for this challenge may be frozen to, in preference order."""
-    return C3_GPU_CLASSES if spec.is_gpu else ()
+    """The C3 GPU classes or CPU profiles a job for this challenge may be frozen to, in
+    preference order."""
+    return C3_GPU_CLASSES if spec.is_gpu else C3_CPU_PROFILES
 
 
 def _chosen(spec: ChallengeSpec, hardware: str | None, options: tuple[str, ...]) -> str:
-    """The GPU a job was frozen to, checked against the list. No default: a helper that fell
-    back to the first option would let a job frozen to an A100 look up (and hit) an L40S
-    baseline whenever the caller forgot to pass the choice."""
+    """The hardware a job was frozen to, checked against the list. No default: a helper that
+    fell back to the first option would let a job frozen to an A100 (or the e2 CPU profile)
+    look up (and hit) an L40S (or d3) baseline whenever the caller forgot to pass the choice."""
     if hardware is None:
-        raise ValueError(f"{spec.name} is a GPU challenge; pass the GPU the job was frozen to")
+        raise ValueError(f"pass the hardware the {spec.name} job was frozen to; one of "
+                         f"{', '.join(options)}")
     if hardware not in options:
         raise ValueError(f"unknown hardware {hardware!r} for {spec.name}; one of "
                          f"{', '.join(options)}")
@@ -93,8 +98,8 @@ def hardware_class(spec: ChallengeSpec, hardware: str | None = None) -> str:
 
 
 def c3_profile(spec: ChallengeSpec, hardware: str | None = None) -> str:
-    """The C3 `hardware:` setting: the CPU profile, or the GPU class the job was frozen to."""
-    return _chosen(spec, hardware, C3_GPU_CLASSES) if spec.is_gpu else C3_CPU_PROFILE
+    """The C3 `hardware:` setting: the CPU profile or GPU class the job was frozen to."""
+    return _chosen(spec, hardware, c3_hardware_options(spec))
 
 
 def c3_workers(spec: ChallengeSpec) -> int:

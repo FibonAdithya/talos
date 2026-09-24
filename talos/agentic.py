@@ -155,7 +155,7 @@ _AGENT_ENV_ALLOWLIST = frozenset({
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
     "CLAUDE_CONFIG_DIR", "CODEX_HOME",
     # the sandbox runs `talos compile`, which has no talos.config.json to read the backend from,
-    # and no state.json to read the GPU the job was frozen to
+    # and no state.json to read the hardware the job was frozen to
     "TALOS_BACKEND", "TALOS_HARDWARE",
     # ...nor .talos/secrets.json to read a C3 API key from. The key is as reachable as the Modal
     # token in ~/.modal.toml or a `c3 login` session under HOME: claude-cli's permissions let the

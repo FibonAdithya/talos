@@ -13,6 +13,9 @@ from talos.types import NonceResult, NonceSet
 
 HASH = "ab" * 32
 
+D3 = "cpu-d3-4vcpu-16gb"  # the first C3 CPU profile; CPU jobs must name theirs
+
+
 
 def req(challenge="knapsack", n=4, baseline=True):
     tr = [NonceSet("t", HASH, 0, n)]
@@ -31,11 +34,12 @@ def test_c3_pulls_the_official_ghcr_dev_image():
 
 def test_profile_workers_and_hardware_class():
     cpu, gpu = CHALLENGES["knapsack"], CHALLENGES["hypergraph"]
-    assert c3_profile(cpu) == "cpu-d3-4vcpu-16gb" and c3_profile(gpu, "l40") == "l40"
+    assert c3_profile(cpu, "cpu-d3-4vcpu-16gb") == "cpu-d3-4vcpu-16gb"
+    assert c3_profile(gpu, "l40") == "l40"
     # mutation: 4 workers on one GPU would serialise on the device and time out the job
     assert c3_workers(cpu) == 4 and c3_workers(gpu) == 1
     # mutation: reusing the Modal hardware class string lets a Modal baseline serve a C3 run
-    assert c3_hardware_class(cpu) == "c3-cpu-d3-4vcpu-16gb"
+    assert c3_hardware_class(cpu, "cpu-d3-4vcpu-16gb") == "c3-cpu-d3-4vcpu-16gb"
     assert c3_hardware_class(gpu, "l40") == "c3-l40"
 
 
@@ -48,8 +52,8 @@ def test_time_limit_formula_and_cap():
 
 
 def test_job_settings_and_the_c3_file_agree():
-    s = c3_jobdir.job_settings("knapsack", "3", 1380)
-    text = c3_jobdir.c3_config_text("knapsack", "3", 1380)
+    s = c3_jobdir.job_settings("knapsack", "3", 1380, hardware=D3)
+    text = c3_jobdir.c3_config_text("knapsack", "3", 1380, hardware=D3)
     assert set(s) == {"project", "job_name", "script", "hardware", "walltime_seconds",
                       "docker_image", "docker_requires_accelerator"}
     # mutation: a hardware profile hard-coded on either path scores the baseline and the
@@ -74,7 +78,7 @@ def test_job_settings_and_the_c3_file_agree():
 
 
 def test_c3_config_text_is_exact():
-    text = c3_jobdir.c3_config_text("knapsack", "3", 1380)
+    text = c3_jobdir.c3_config_text("knapsack", "3", 1380, hardware=D3)
     assert text == (
         "project: talos\n"
         "job_name: talos-knapsack-3\n"
@@ -90,7 +94,7 @@ def test_c3_config_text_is_exact():
 
 
 def test_write_job_dir_contents_and_secrecy(tmp_path):
-    d = c3_jobdir.write_job_dir(tmp_path / "job", req(), "3")
+    d = c3_jobdir.write_job_dir(tmp_path / "job", req(), "3", hardware=D3)
     names = sorted(p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file())
     assert names == [".c3", "job.sh", "payload.json", "talos/__init__.py", "talos/c3_job.py",
                      "talos/challenges.py", "talos/diagnostics.py", "talos/inside.py",
@@ -111,7 +115,7 @@ def test_write_job_dir_contents_and_secrecy(tmp_path):
         assert HASH not in (d / name).read_text()
     # mutation: a job dir that is not wiped first ships the previous iteration's files
     (d / "stale.txt").write_text("x")
-    c3_jobdir.write_job_dir(tmp_path / "job", req(), "3")
+    c3_jobdir.write_job_dir(tmp_path / "job", req(), "3", hardware=D3)
     assert not (d / "stale.txt").exists()
 
 
@@ -129,7 +133,7 @@ def test_request_hash_tracks_files_and_nonces_only():
 def test_a_compile_only_request_gets_the_one_nonce_floor_and_empty_sets(tmp_path):
     r = EvalRequest("knapsack", {"mod.rs": "fn x(){}"}, [], [], 7, None,
                     CHALLENGES["knapsack"].beat)
-    d = c3_jobdir.write_job_dir(tmp_path / "job", r, "compile")
+    d = c3_jobdir.write_job_dir(tmp_path / "job", r, "compile", hardware=D3)
     floor = c3_jobdir.hhmmss(c3_jobdir.time_limit_s(1, c3_workers(CHALLENGES["knapsack"])))
     # mutation: dropping the max(nonces, 1) floor asks C3 for time_limit_s(0, 4) = 00:20:00,
     # the bare build allowance with no slack at all
@@ -240,8 +244,8 @@ def test_parse_c3_inverts_render_c3():
     # mutation: a regex that drops the minutes term, or reads hardware from the wrong line,
     # sends the MCP path a different job from the one the CLI path reads out of .c3
     assert parse_c3(render_c3(s)) == s
-    assert parse_c3(c3_jobdir.c3_config_text("knapsack", "3", 1380)) == \
-        c3_jobdir.job_settings("knapsack", "3", 1380)
+    assert parse_c3(c3_jobdir.c3_config_text("knapsack", "3", 1380, hardware=D3)) == \
+        c3_jobdir.job_settings("knapsack", "3", 1380, hardware=D3)
     with pytest.raises(ValueError):
         parse_c3("project: talos\n")
 
@@ -265,6 +269,30 @@ def test_probe_dir_is_a_tiny_job_on_the_named_class(tmp_path):
     assert sorted(p.name for p in d.iterdir()) == [".c3", "job.sh"]
     write_probe_dir(tmp_path / "probe", "l40")  # rewriting is fine
     assert parse_c3((d / ".c3").read_text(encoding="utf-8"))["hardware"] == "l40"
+
+
+def test_probe_dir_on_a_cpu_profile_asks_for_no_accelerator(tmp_path):
+    from talos.c3_jobdir import parse_c3, write_probe_dir
+    d = write_probe_dir(tmp_path / "probe", "cpu-e2-4vcpu-16gb")
+    s = parse_c3((d / ".c3").read_text(encoding="utf-8"))
+    # mutation: asking a CPU profile for CUDA is a probe C3 refuses (or never schedules), so
+    # every CPU profile looks out of capacity
+    assert s["hardware"] == "cpu-e2-4vcpu-16gb"
+    assert s["docker_requires_accelerator"] == "none"
+    assert s["job_name"] == "talos-probe-cpu-e2-4vcpu-16gb"
+
+
+def test_a_cpu_job_names_the_profile_it_was_frozen_to(tmp_path):
+    from talos.c3_jobdir import parse_c3
+    s = c3_jobdir.job_settings("knapsack", "3", 1380, hardware="cpu-e2-4vcpu-16gb")
+    # mutation: keeping a fixed CPU profile submits every CPU job on d3 whatever was frozen
+    assert s["hardware"] == "cpu-e2-4vcpu-16gb" and s["docker_requires_accelerator"] == "none"
+    d = c3_jobdir.write_job_dir(tmp_path / "job", req(), "3", hardware="cpu-e2-4vcpu-16gb")
+    assert parse_c3((d / ".c3").read_text(encoding="utf-8"))["hardware"] == "cpu-e2-4vcpu-16gb"
+    with pytest.raises(ValueError):  # a CPU job with no chosen profile is a programming error
+        c3_jobdir.write_job_dir(tmp_path / "job2", req(), "3")
+    with pytest.raises(ValueError):
+        c3_jobdir.write_job_dir(tmp_path / "job3", req(), "3", hardware="l40")
 
 
 def test_write_job_dir_takes_the_frozen_gpu(tmp_path):

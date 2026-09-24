@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 # ESTIMATE: `c3 list -al` on 2026-09-24 (cpu and l40 first read 2026-09-15). A class spans
 # several concrete profiles at different rates; the highest is used, so a job never costs more
 # than the estimate says.
-GBP_PER_HOUR = {"cpu-d3-4vcpu-16gb": 0.11, "l40": 1.49, "a100": 1.90, "h100": 3.67}
+GBP_PER_HOUR = {"cpu-d3-4vcpu-16gb": 0.11, "cpu-e2-4vcpu-16gb": 0.11,
+                "l40": 1.49, "a100": 1.90, "h100": 3.67}
 USD_PER_GBP = 1.35                                          # ESTIMATE
 ACTIVE = ("PENDING", "SCHEDULING", "RUNNING")
 QUEUED = ("PENDING", "SCHEDULING")
@@ -41,7 +42,13 @@ class _JobFailed(RuntimeError):
 
 class _NoCapacity(BenchUnavailable):
     """A job still queued after the capacity window. A BenchUnavailable to every caller but the
-    GPU probe, which moves on to the next class."""
+    capacity probe, which moves on to the next option."""
+
+
+# C3 can also refuse a deploy outright when the class or profile has no stock (HTTP 409
+# GPU_OUT_OF_STOCK, seen on the CPU profile on 2026-09-23), rather than queue the job. The
+# probe treats that like a job that never left the queue.
+_OUT_OF_STOCK_RE = re.compile(r"OUT_OF_STOCK", re.IGNORECASE)
 
 
 _JOB_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
@@ -163,20 +170,21 @@ class C3Bench:
 
     # ── GPU choice ───────────────────────────────────────────────────
     def select_hardware(self, challenge: str, chosen: str | None = None) -> str | None:
-        """Freezes the C3 class this bench submits `challenge` on. With `chosen` (a resumed job,
-        or the sandbox's `talos compile` given TALOS_HARDWARE) nothing is probed. Otherwise each
-        class in preference order gets a probe job (`write_probe_dir`); the first to leave the
-        queue within the capacity window is the choice and is cancelled at once (it is billing),
-        one still queued at the window's end is cancelled and the next class tried. None
-        scheduling is BenchUnavailable, which pauses the run. CPU challenges and the local
-        backend have no options: None."""
+        """Freezes the C3 GPU class or CPU profile this bench submits `challenge` on. With
+        `chosen` (a resumed job, or the sandbox's `talos compile` given TALOS_HARDWARE) nothing
+        is probed. Otherwise each option in preference order gets a probe job
+        (`write_probe_dir`); the first to leave the queue within the capacity window is the
+        choice and is cancelled at once (it is billing), one still queued at the window's end
+        is cancelled and the next option tried, and one whose deploy C3 refuses as out of
+        stock is skipped the same way. None scheduling is BenchUnavailable, which pauses the
+        run. The local backend has no options: None."""
         options = () if self.local is not None else c3_hardware_options(CHALLENGES[challenge])
         if not options:
             self.hardware = None
             return None
         if chosen is not None:
             if chosen not in options:
-                raise ValueError(f"unknown GPU class {chosen!r} for {challenge}; one of "
+                raise ValueError(f"unknown hardware {chosen!r} for {challenge}; one of "
                                  f"{', '.join(options)}")
             self.hardware = chosen
             return chosen
@@ -184,7 +192,12 @@ class C3Bench:
             job_dir = write_probe_dir(self.run_dir / self.subdir / f"probe-{cls}", cls)
             try:
                 job_id = _safe_job_id(self._t.deploy(job_dir))
-            except (C3CommandError, ValueError) as e:
+            except C3CommandError as e:
+                if _OUT_OF_STOCK_RE.search(str(e)):
+                    continue  # nothing was queued; the next option
+                raise BenchUnavailable(f"{self._label} probe deploy failed: "
+                                       f"{_redact(str(e))[:300]}") from None
+            except ValueError as e:
                 raise BenchUnavailable(f"{self._label} probe deploy failed: "
                                        f"{_redact(str(e))[:300]}") from None
             try:

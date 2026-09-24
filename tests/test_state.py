@@ -126,3 +126,6 @@ def test_state_hardware_round_trips_and_defaults_to_none(tmp_path):
     old = st.to_dict()
     del old["hardware"]
     assert JobState.from_dict(old).hardware is None  # a state.json written before the field
+    # mutation: dropping the old key re-freezes a job whose state.json still says `gpu` to
+    # the first option, which need not be the GPU its baseline ran on
+    assert JobState.from_dict({**old, "gpu": "H100"}).hardware == "H100"

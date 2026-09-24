@@ -60,6 +60,8 @@ def test_c3_knapsack_job(tmp_path):
     key = resolve_c3_api_key(cfg)
     b = C3Bench(tmp_path, api_key=key)
     print({"transport": b._t.name, "keyed": bool(key)})
+    # the CPU capacity probe, as `talos run` does it: a `true` job per profile until one starts
+    print({"hardware": b.select_hardware(ch)})
     r = b.evaluate(EvalRequest(ch, files, tr, ho, info.max_fuel, None, CHALLENGES[ch].beat))
     assert r.compile.ok, r.compile.output[-3000:]
     assert len(r.training) == 2 and r.holdout is not None and len(r.holdout) == 2

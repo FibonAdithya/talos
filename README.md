@@ -444,7 +444,7 @@ Prompts for anything not given as a flag, unless `--yes` is passed.
 
 | Flag | Meaning |
 |---|---|
-| `--challenge NAME` | `satisfiability`, `vehicle_routing`, `knapsack`, `job_scheduling`, `energy_arbitrage` (CPU), or `vector_search`, `hypergraph`, `neuralnet_optimizer` (GPU: an L40S, or when none is free the next of A100-80GB and H100; see [docs/compute-backends.md](docs/compute-backends.md#gpu-fallback)). |
+| `--challenge NAME` | `satisfiability`, `vehicle_routing`, `knapsack`, `job_scheduling`, `energy_arbitrage` (CPU), or `vector_search`, `hypergraph`, `neuralnet_optimizer` (GPU: an L40S, or when none is free the next of A100-80GB and H100). On C3 a CPU challenge likewise runs on `cpu-d3-4vcpu-16gb`, or `cpu-e2-4vcpu-16gb` when that is out of stock; see [docs/compute-backends.md](docs/compute-backends.md#hardware-fallback). |
 | `--direction TEXT` | What to explore, in free text. It becomes the first entry in the job's `tacit.md`. |
 | `--direction-file PATH` | The same, read from a file. Pass one of `--direction` or `--direction-file`, not both. |
 | `--track NAME` | Optimise one active track of the challenge instead of all of them (`all` is the default; the prompt lists the tracks). Training scores that track only. When a candidate wins on training, the confirmation scores that track's held-out nonces plus every other track's training nonces, and no other track may get worse. The LLM still sees and may edit every file. |

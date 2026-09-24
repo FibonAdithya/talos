@@ -216,26 +216,31 @@ def bench_hardware_class(backend: str, challenge: str, local: LocalSettings | No
 
 
 def freeze_hardware(bench, spec, state, store, backend: str, log=print) -> None:
-    """Fixes the GPU a GPU job runs on, once. The first run probes through the bench and saves
-    the choice; a resume hands the saved choice back, so the candidates score on the GPU the
-    baseline was measured on. Exported as TALOS_HARDWARE for the sandbox's `talos compile`. CPU
-    challenges, the local backend and the fake bench choose nothing."""
+    """Fixes the hardware a job runs on, once. The first run probes through the bench and saves
+    the choice; a resume hands the saved choice back, so the candidates score on the hardware
+    the baseline was measured on. Exported as TALOS_HARDWARE for the sandbox's `talos compile`.
+    Where there is nothing to choose (a CPU challenge on Modal, the local backend, the fake
+    bench) the choice stays None."""
     cs = CHALLENGES[spec.challenge]
-    if state.hardware is None and state.baseline is not None and cs.is_gpu and backend != "local":
-        # A job from before the choice existed: its baseline ran on the one GPU there was,
+    if backend == "local":
+        options = ()
+    else:
+        options = c3_hardware_options(cs) if backend == "c3" else hardware_options(cs)
+    if state.hardware is None and state.baseline is not None and options:
+        # A job from before the choice existed: its baseline ran on the one class there was,
         # the first option. Probing now could move its candidates elsewhere.
-        state.hardware = (c3_hardware_options(cs) if backend == "c3" else hardware_options(cs))[0]
+        state.hardware = options[0]
         store.save(state)
         store.event("hardware_selected", hardware=state.hardware,
                     reason="job predates the hardware choice")
     if state.hardware is None:
-        if cs.is_gpu:
-            log(f"Probing GPU capacity for {spec.challenge}...")
+        if options:
+            log(f"Probing capacity for {spec.challenge}...")
         state.hardware = bench.select_hardware(spec.challenge)
         if state.hardware is not None:
             store.save(state)
             store.event("hardware_selected", hardware=state.hardware)
-            log(f"GPU: {state.hardware}")
+            log(f"Hardware: {state.hardware}")
     else:
         bench.select_hardware(spec.challenge, chosen=state.hardware)
     if state.hardware is None:
