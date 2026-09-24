@@ -536,7 +536,11 @@ def test_select_gpu_is_a_no_op_for_cpu_challenges_and_the_fake_bench(monkeypatch
     assert b.select_gpu("knapsack") is None and lookups == []
     b.evaluate(req())
     assert lookups[0] == "compile_knapsack"  # CPU function names are unchanged
-    assert FakeBench(lambda c, f, ns: [1] * ns.count).select_gpu("hypergraph") is None
+    fake = FakeBench(lambda c, f, ns: [1] * ns.count)
+    assert fake.select_gpu("knapsack") is None
+    # in-process, so no probe, but a GPU challenge still needs a GPU for its hardware class
+    assert fake.select_gpu("hypergraph") == "L40S"
+    assert fake.select_gpu("hypergraph", chosen="H100") == "H100"
 
 
 def test_a_gpu_call_before_select_gpu_is_refused_loudly(monkeypatch):

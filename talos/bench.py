@@ -305,7 +305,11 @@ class FakeBench:
         self.holdout_runs = 0
 
     def select_gpu(self, challenge: str, chosen: str | None = None) -> str | None:
-        return None  # in-process: no hardware to choose
+        """In-process, so nothing is probed; but a GPU challenge still gets a GPU (the first
+        option, or the frozen one), because the hardware class the fake run keys its baseline
+        under needs one just as a real run's does."""
+        options = gpu_options(CHALLENGES[challenge])
+        return (chosen or options[0]) if options else None
 
     def evaluate(self, request: EvalRequest) -> EvalResult:
         self.calls.append(request)

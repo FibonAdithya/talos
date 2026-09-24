@@ -2117,3 +2117,19 @@ def test_a_job_from_before_the_gpu_choice_is_frozen_to_the_first_option_not_prob
     assert b2.selections == [("hypergraph", "L40S")]
     st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     assert st["gpu"] == "L40S"
+
+
+def test_a_fake_run_on_a_gpu_challenge_freezes_the_first_gpu_without_probing(tmp_path,
+                                                                            monkeypatch):
+    # The review of PR #20 found this path crashing: FakeBench.select_gpu returned None for a
+    # GPU challenge, and hardware_class(spec, None) raises for one. No probe, no Modal: the
+    # fake run keys its baseline under the first option, as a real run did before the choice.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TALOS_GPU", raising=False)
+    rc = cli.main(["run", "--challenge", "hypergraph", "--direction", "go",
+                   "--budget-iterations", "1", "--yes", "--fake"])
+    assert rc in (0, 1)  # won or exhausted, never a traceback
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert st["gpu"] == "L40S" and st["status"] in ("won", "exhausted")
+    assert os.environ.get("TALOS_GPU") == "L40S"

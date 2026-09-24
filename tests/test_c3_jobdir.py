@@ -260,7 +260,8 @@ def test_probe_dir_is_a_tiny_job_on_the_named_class(tmp_path):
     assert s["job_name"] == "talos-probe-h100" and s["script"] == "job.sh"
     sh = d / "job.sh"
     assert sh.read_text(encoding="utf-8").startswith("#!/bin/bash")
-    assert sh.stat().st_mode & stat.S_IXUSR
+    if os.name != "nt":  # Windows has no execute bit to set
+        assert stat.S_IMODE(sh.stat().st_mode) & stat.S_IXUSR
     # nothing of a real job: no payload (no rand_hash) and no talos modules
     assert sorted(p.name for p in d.iterdir()) == [".c3", "job.sh"]
     write_probe_dir(tmp_path / "probe", "l40")  # rewriting is fine
