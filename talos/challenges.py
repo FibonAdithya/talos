@@ -80,14 +80,16 @@ def local_workers(spec: ChallengeSpec, cpus: int) -> int:
 def local_hardware_class(spec: ChallengeSpec, cpus: int, memory_gib: int,
                          gpu_name: str | None, host: str) -> str:
     """Baseline cache key component for the local backend. Prefixed so a local baseline never
-    matches a Modal or C3 one. The limits are in it because they change the timings a baseline
-    was measured under; the host guards a home directory synced between machines."""
+    matches a Modal or C3 one. The limits are in it, for GPU challenges too, because they change
+    the timings a baseline was measured under (the build's instrumentation pass runs on the
+    CPUs whatever the device); the host guards a home directory synced between machines."""
+    limits = f"cpu{cpus}-mem{memory_gib}"
     if spec.is_gpu:
         if not gpu_name:
             raise ValueError(f"{spec.name} is a GPU challenge; its local hardware class needs "
                              f"the GPU name")
-        return f"local-{host_slug(host)}-gpu-{host_slug(gpu_name)}"
-    return f"local-{host_slug(host)}-cpu{cpus}-mem{memory_gib}"
+        return f"local-{host_slug(host)}-gpu-{host_slug(gpu_name)}-{limits}"
+    return f"local-{host_slug(host)}-{limits}"
 
 
 CHALLENGES: dict[str, ChallengeSpec] = {

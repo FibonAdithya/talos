@@ -452,7 +452,7 @@ Prompts for anything not given as a flag, unless `--yes` is passed.
 | `--budget-iterations N` | Iteration cap. |
 | `--budget-compute-usd N` | Estimated compute spend cap in USD. |
 | `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track or hyperparameters. |
-| `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20. |
+| `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20 (not asked and not set on the `local` backend, where it is always zero). |
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
 providers, default 20; iterations for CLI providers, default 50), a wall-clock budget
@@ -477,7 +477,7 @@ talos compile --challenge knapsack --dir algorithm
 |---|---|
 | `--challenge NAME` | Required. |
 | `--dir PATH` | Directory whose `.rs` and `.cu` files are compiled (default `algorithm`). |
-| `--backend modal\|c3` | Backend to use. Without it: `TALOS_BACKEND`, then `talos.config.json`, then `modal`. |
+| `--backend modal\|c3\|local` | Backend to use. Without it: `TALOS_BACKEND`, then `talos.config.json`, then `modal`. |
 
 Prints the last 4000 characters of compiler output. Exit code 0 if the build succeeded, 1 if
 it failed, 2 if the directory has no `.rs`/`.cu` files. Agentic mode uses this command to
@@ -485,8 +485,11 @@ check its own edits.
 
 On Modal it is one function call. On C3 it is one batch job
 ([about 12 minutes](docs/compute-backends.md#c3-timings)) whose job directory is
-`.talos/compile/`. Each run overwrites that directory, so do not run two `talos compile`
-commands at once from the same directory.
+`.talos/compile/`. On `local` it is one Docker container on this machine, after the same
+prepare step as `talos run` (image pull, clone and warm-up build on the first run per
+challenge; [about 15 minutes](docs/compute-backends.md#local-timings) per build after that),
+with its job directory under `.talos/compile/` too. Each run overwrites that directory, so do
+not run two `talos compile` commands at once from the same directory.
 
 ### `talos status`
 
@@ -574,7 +577,8 @@ is cached outside the run directory, in `~/.talos/baselines/`; see
   directly or through the wizard. Zero is a valid, real cap, not "unset".
 - Compute spend is always capped separately by `--budget-compute-usd`, which defaults to $20
   when `--yes` is passed without it. It is checked before every compute call, whatever the
-  other caps are.
+  other caps are. The one exception is the `local` backend, where compute costs nothing: the
+  question is skipped, no default is applied, and the cap stays unset.
 - The wall-clock budget (`--budget-hours`) counts elapsed time from the job's start,
   including time spent resumed.
 

@@ -128,7 +128,7 @@ earlier iterations are removed then. The local build allowance in the time limit
 (`talos/c3_jobdir.py::LOCAL_BUILD_ALLOWANCE_S`), against 20 minutes on C3, because the
 candidate build takes about 15 minutes on 16 cores and longer on fewer.
 
-The hardware class is `local-<host>-cpu<N>-mem<M>` (or `local-<host>-gpu-<name>`), so a local
+The hardware class is `local-<host>-cpu<N>-mem<M>` (or `local-<host>-gpu-<name>-cpu<N>-mem<M>`), so a local
 baseline never matches a Modal or C3 one, and a changed CPU or memory setting is a re-measure.
 
 ### Local timings

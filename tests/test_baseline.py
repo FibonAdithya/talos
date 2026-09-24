@@ -209,7 +209,13 @@ def test_local_hardware_class_separates_limits_host_and_gpu():
     # mutation: dropping cpus or memory lets a baseline measured under other limits serve a run
     assert local_hardware_class(knapsack, 4, 12, None, "box") != "local-box-cpu8-mem12"
     assert local_hardware_class(knapsack, 8, 8, None, "box") != "local-box-cpu8-mem12"
-    assert local_hardware_class(hypergraph, 8, 12, "NVIDIA L40S", "box") == "local-box-gpu-nvidia-l40s"
+    gpu = local_hardware_class(hypergraph, 8, 12, "NVIDIA L40S", "box")
+    assert gpu == "local-box-gpu-nvidia-l40s-cpu8-mem12"
+    # mutation: a GPU class without the limits (review bot, 2026-09-24) serves a baseline
+    # measured under other limits; the build's instrumentation pass runs on the CPUs either way
+    assert local_hardware_class(hypergraph, 4, 12, "NVIDIA L40S", "box") != gpu
+    assert local_hardware_class(hypergraph, 8, 8, "NVIDIA L40S", "box") != gpu
+    assert local_hardware_class(hypergraph, 8, 12, "NVIDIA A100", "box") != gpu
     with pytest.raises(ValueError):
         local_hardware_class(hypergraph, 8, 12, None, "box")
     # mutation: a local class that does not start with "local-" could equal a Modal or C3 one

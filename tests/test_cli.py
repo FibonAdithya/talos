@@ -1773,8 +1773,9 @@ def test_make_bench_local_is_the_c3_bench_over_docker_and_the_local_class(tmp_pa
     assert b.usd_per_hour == 0.0 and b.subdir == "local"
     cls = cli.bench_hardware_class("local", "knapsack", local=LocalSettings(8, 12), host="Box")
     assert cls == "local-box-cpu8-mem12"
-    assert cli.bench_hardware_class("local", "hypergraph", local=LocalSettings(8, 12),
-                                    gpu_name="NVIDIA L40S", host="box") == "local-box-gpu-nvidia-l40s"
+    gpu = cli.bench_hardware_class("local", "hypergraph", local=LocalSettings(8, 12),
+                                   gpu_name="NVIDIA L40S", host="box")
+    assert gpu == "local-box-gpu-nvidia-l40s-cpu8-mem12"
 
 
 def test_local_settings_come_from_the_config_or_the_docker_daemon(monkeypatch):
