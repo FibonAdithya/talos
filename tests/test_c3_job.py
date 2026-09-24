@@ -36,7 +36,9 @@ def fake_run(quality=120, build_rc=0):
         calls.append(cmd)
         if cmd[0] == "build_algorithm":
             mono = Path(kw["cwd"])
-            so = mono / "tig-algorithms" / "lib" / "knapsack" / "amd64" / "talos_cand.so"
+            # where the job will look for it: lib/<challenge>/<arch>/ for this host's
+            # architecture (amd64 on x86_64, arm64 on the macOS runners), as the real build
+            so, _ = inside.artifact_paths(mono, "knapsack", "talos_cand")
             so.parent.mkdir(parents=True, exist_ok=True)
             so.write_bytes(b"\x7fELF")
             err = "" if build_rc == 0 else "error[E0308]"
