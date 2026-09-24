@@ -22,7 +22,7 @@ def setup(tmp_path, n=2, baseline_q=100, baseline=True):
     base = [NonceResult("t", i, True, baseline_q, 1) for i in range(n)] if baseline else None
     req = EvalRequest("knapsack", {"mod.rs": "fn x(){}"}, [NonceSet("t", HASH, 0, n)],
                       [NonceSet("t", HASH, 1_000_000, n)], 7, base, CHALLENGES["knapsack"].beat)
-    work = write_job_dir(tmp_path / "work", req, "1")
+    work = write_job_dir(tmp_path / "work", req, "1", hardware="cpu-d3-4vcpu-16gb")
     art = tmp_path / "art"
     art.mkdir()
     return mono, work, art
@@ -110,7 +110,7 @@ def test_staging_error_is_a_compile_failure_not_a_crash(tmp_path):
     base = [NonceResult("t", i, True, 100, 1) for i in range(2)]
     req = EvalRequest("knapsack", {"../evil.rs": "x"}, [NonceSet("t", HASH, 0, 2)],
                       [NonceSet("t", HASH, 1_000_000, 2)], 7, base, CHALLENGES["knapsack"].beat)
-    work = write_job_dir(tmp_path / "work", req, "1")
+    work = write_job_dir(tmp_path / "work", req, "1", hardware="cpu-d3-4vcpu-16gb")
     art = tmp_path / "art"
     art.mkdir()
     # mutation: an uncaught ValueError from stage_algorithm's path check crashes the job and

@@ -276,7 +276,7 @@ def test_agent_env_passes_the_c3_api_key_through(monkeypatch):
 
 def test_agent_env_passes_the_frozen_gpu_through(monkeypatch):
     from talos.agentic import _agent_env
-    monkeypatch.setenv("TALOS_GPU", "A100-80GB")
-    # mutation: dropping TALOS_GPU from the allowlist makes every sandbox `talos compile`
+    monkeypatch.setenv("TALOS_HARDWARE", "A100-80GB")
+    # mutation: dropping TALOS_HARDWARE from the allowlist makes every sandbox `talos compile`
     # probe for a GPU of its own instead of using the job's
-    assert _agent_env()["TALOS_GPU"] == "A100-80GB"
+    assert _agent_env()["TALOS_HARDWARE"] == "A100-80GB"

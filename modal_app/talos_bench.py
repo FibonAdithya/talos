@@ -114,12 +114,12 @@ def register(app, image=_image, probe_image=_probe_image) -> None:
     """Registers every function on `app`. CPU challenges get `compile_<name>` and
     `score_batch_<name>`. GPU challenges get one such pair per GPU in MODAL_GPUS, suffixed
     `_<gpu_slug>`, each pinned to a single GPU: a job is frozen to one of them at start
-    (`talos/bench.py::ModalBench.select_gpu`), and the baseline and every candidate run on it.
+    (`talos/bench.py::ModalBench.select_hardware`), and the baseline and every candidate run on it.
     Modal's own `gpu=[...]` fallback list is deliberately not used, because it picks a GPU per
     container, which is a per-call fallback AGENTS.md invariant 1 forbids. One `probe_<slug>`
-    per GPU, on a stock image, is what select_gpu spawns to see whether that GPU has capacity.
-    A batch holds `talos/challenges.py::modal_workers` nonces scored at once, so the score
-    function's timeout still covers one nonce plus slack."""
+    per GPU, on a stock image, is what select_hardware spawns to see whether that GPU has
+    capacity. A batch holds `talos/challenges.py::modal_workers` nonces scored at once, so the
+    score function's timeout still covers one nonce plus slack."""
     for name, spec in CHALLENGES.items():
         variants = [(f"_{gpu_slug(g)}", {"gpu": g}) for g in MODAL_GPUS] if spec.is_gpu \
             else [("", {"cpu": spec.cpu, "memory": spec.memory_mib})]

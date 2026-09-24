@@ -60,6 +60,8 @@ def test_c3_knapsack_job(tmp_path):
     key = resolve_c3_api_key(cfg)
     b = C3Bench(tmp_path, api_key=key)
     print({"transport": b._t.name, "keyed": bool(key)})
+    # the CPU capacity probe, as `talos run` does it: a `true` job per profile until one starts
+    print({"hardware": b.select_hardware(ch)})
     r = b.evaluate(EvalRequest(ch, files, tr, ho, info.max_fuel, None, CHALLENGES[ch].beat))
     assert r.compile.ok, r.compile.output[-3000:]
     assert len(r.training) == 2 and r.holdout is not None and len(r.holdout) == 2
@@ -114,7 +116,7 @@ def test_c3_gpu_probe(tmp_path):
     """Manual: the C3 GPU capacity probe, for real. Run:
     TALOS_LIVE_BACKEND=c3 .venv/bin/pytest -m live tests/test_live.py -k c3_gpu_probe -s
     Submits a two-minute `true` job per class until one leaves the queue (docs/compute-backends.md
-    #gpu-fallback); costs under £0.10 and takes from a minute to the capacity window per class."""
+    #hardware-fallback); costs under £0.10 and takes from a minute to the capacity window per class."""
     if os.environ.get("TALOS_LIVE_BACKEND") != "c3":
         pytest.skip("set TALOS_LIVE_BACKEND=c3")
     import time
@@ -131,7 +133,7 @@ def test_c3_gpu_probe(tmp_path):
     key = None if os.environ.get("TALOS_LIVE_TRANSPORT") == "cli" else resolve_c3_api_key(cfg)
     b = C3Bench(tmp_path, api_key=key)
     t0 = time.monotonic()
-    cls = b.select_gpu("hypergraph")
+    cls = b.select_hardware("hypergraph")
     assert cls in C3_GPU_CLASSES
     assert 0 < b.cost_mark() < 0.20
     print({"transport": b._t.name, "keyed": bool(key), "class": cls,
@@ -150,7 +152,7 @@ def test_modal_gpu_probe():
     from talos.challenges import MODAL_GPUS
     b = ModalBench()
     t0 = time.monotonic()
-    gpu = b.select_gpu("hypergraph")
+    gpu = b.select_hardware("hypergraph")
     assert gpu in MODAL_GPUS
     assert 0 < b.cost_mark() < 0.20
     print({"gpu": gpu, "probe_s": round(time.monotonic() - t0),

@@ -474,7 +474,7 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
 
     def stub(ok):
         class B:
-            def select_gpu(self, challenge, chosen=None):
+            def select_hardware(self, challenge, chosen=None):
                 return None
 
             def evaluate(self, request):
@@ -926,7 +926,8 @@ def test_make_bench_picks_the_backend_and_hardware_class(tmp_path):
     with pytest.raises(ConfigError):
         cli.make_bench("aws", tmp_path, PendingJobStore.memory())
     # mutation: using the Modal hardware class for C3 lets a Modal baseline serve a C3 run
-    assert cli.bench_hardware_class("c3", "knapsack") == "c3-cpu-d3-4vcpu-16gb"
+    assert cli.bench_hardware_class("c3", "knapsack", hardware="cpu-d3-4vcpu-16gb") == \
+        "c3-cpu-d3-4vcpu-16gb"
     assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192-x4"
 
 
@@ -978,7 +979,7 @@ class _RefusingBench:
     def __init__(self, why):
         self._why = why
 
-    def select_gpu(self, challenge, chosen=None):
+    def select_hardware(self, challenge, chosen=None):
         return None
 
     def evaluate(self, request):
@@ -1020,6 +1021,9 @@ def test_execute_job_exports_the_c3_backend_it_actually_runs_on(tmp_path, monkey
     seen = {}
 
     class B(_RefusingBench):
+        def select_hardware(self, challenge, chosen=None):
+            return chosen or "cpu-d3-4vcpu-16gb"
+
         def evaluate(self, request):
             seen["backend"] = os.environ.get("TALOS_BACKEND")
             raise BenchCancelled("stop")  # nothing runs past the baseline
@@ -1462,6 +1466,9 @@ def test_execute_job_gives_the_c3_key_to_the_bench_and_the_sandbox(tmp_path, mon
     seen = {}
 
     class B(_RefusingBench):
+        def select_hardware(self, challenge, chosen=None):
+            return chosen or "cpu-d3-4vcpu-16gb"
+
         def evaluate(self, request):
             seen["env"] = os.environ.get("C3_API_KEY")
             raise BenchCancelled("stop")
@@ -1488,7 +1495,7 @@ def test_compile_uses_the_c3_key_from_the_config(tmp_path, monkeypatch):
     seen = {}
 
     class B:
-        def select_gpu(self, challenge, chosen=None):
+        def select_hardware(self, challenge, chosen=None):
             return None
 
         def evaluate(self, request):
@@ -1984,42 +1991,45 @@ def test_deploy_bench_deploys_the_app_as_a_package_module():
     assert (Path(kw["cwd"]) / "modal_app" / "talos_bench.py").is_file()
 
 
-# ── GPU fallback ──────────────────────────────────────────────────────
+# ── Hardware fallback ──────────────────────────────────────────────────────
 def hypergraph_info():
     return type("I", (), {"id": "c005", "name": "hypergraph", "is_gpu": True,
                           "tracks": ["n=1"], "max_fuel": 7})()
 
 
 class _ProbingBench(_RefusingBench):
-    """Records select_gpu calls; evaluate stops the run before any job."""
+    """Records select_hardware calls; evaluate stops the run before any job."""
 
     def __init__(self, choose="A100-80GB"):
         super().__init__("no job may be submitted")
         self.choose, self.selections, self.seen_env = choose, [], []
 
-    def select_gpu(self, challenge, chosen=None):
+    def select_hardware(self, challenge, chosen=None):
         self.selections.append((challenge, chosen))
         return chosen or self.choose
 
     def evaluate(self, request):
-        self.seen_env.append(os.environ.get("TALOS_GPU"))
+        self.seen_env.append(os.environ.get("TALOS_HARDWARE"))
         raise BenchCancelled("stop")
 
 
-def _gpu_run(tmp_path, monkeypatch, bench, backend="modal", extra=()):
+def _gpu_run(tmp_path, monkeypatch, bench, backend="modal", extra=(),
+             challenge="hypergraph"):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("TALOS_GPU", raising=False)
+    monkeypatch.delenv("TALOS_HARDWARE", raising=False)
     save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None,
                           backend=backend), None)
     monkeypatch.setattr(cli, "image_available", lambda ch, fetch=None: True)
     monkeypatch.setattr(cli, "make_provider", lambda *a, **k: object())
-    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: hypergraph_info())
-    monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("fake_base", "c005_a000", 1))
+    info = knapsack_info() if challenge == "knapsack" else hypergraph_info()
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: info)
+    monkeypatch.setattr("talos.mainnet.top_algorithm",
+                        lambda ch: ("fake_base", f"{info.id}_a000", 1))
     monkeypatch.setattr("talos.mainnet.fetch_template", lambda ch: "pub fn solve_challenge(")
     monkeypatch.setattr("talos.mainnet.fetch_algorithm_files",
                         lambda ch, name: {"mod.rs": "fn solve() {}\n"})
     monkeypatch.setattr(cli, "make_bench", lambda *a, **k: bench)
-    return cli.main(["run", "--challenge", "hypergraph", "--direction", "go",
+    return cli.main(["run", "--challenge", challenge, "--direction", "go",
                      "--budget-iterations", "1", "--yes", *extra])
 
 
@@ -2030,9 +2040,9 @@ def test_execute_job_freezes_the_probed_gpu_in_state_and_exports_it(tmp_path, mo
     real_event = JobStore.event
 
     def event(self, kind, **data):
-        if kind == "gpu_selected":  # what state.json says at the moment the choice is announced
-            on_disk["gpu"] = json.loads(
-                (self.run_dir / "state.json").read_text(encoding="utf-8")).get("gpu")
+        if kind == "hardware_selected":  # what state.json says when the choice is announced
+            on_disk["hardware"] = json.loads(
+                (self.run_dir / "state.json").read_text(encoding="utf-8")).get("hardware")
         real_event(self, kind, **data)
     monkeypatch.setattr(JobStore, "event", event)
     rc = _gpu_run(tmp_path, monkeypatch, b)
@@ -2042,7 +2052,7 @@ def test_execute_job_freezes_the_probed_gpu_in_state_and_exports_it(tmp_path, mo
     # mutation: not saving the choice at once leaves a crash before the baseline's own save
     # to probe again on resume (and maybe land elsewhere); not exporting it makes the
     # sandbox's `talos compile` probe for its own
-    assert st["gpu"] == "A100-80GB" and on_disk == {"gpu": "A100-80GB"}
+    assert st["hardware"] == "A100-80GB" and on_disk == {"hardware": "A100-80GB"}
     assert b.seen_env == ["A100-80GB"]
     # a resume hands the frozen choice back and does not probe
     b2 = _ProbingBench("H100")
@@ -2055,7 +2065,7 @@ def test_execute_job_pauses_when_no_gpu_is_available(tmp_path, monkeypatch, caps
     from talos.bench import BenchUnavailable
 
     class NoGpu(_ProbingBench):
-        def select_gpu(self, challenge, chosen=None):
+        def select_hardware(self, challenge, chosen=None):
             raise BenchUnavailable("no Modal capacity for any of L40S, A100-80GB, H100")
 
     rc = _gpu_run(tmp_path, monkeypatch, NoGpu())
@@ -2064,15 +2074,78 @@ def test_execute_job_pauses_when_no_gpu_is_available(tmp_path, monkeypatch, caps
     # mutation: letting BenchUnavailable fall into the blanket handler marks the job failed
     # (not resumable) and never says which GPUs were tried
     assert rc == 1 and st["status"] == "paused" and "L40S" in st["stop_reason"]
-    assert st["gpu"] is None
+    assert st["hardware"] is None
     assert "no Modal capacity" in capsys.readouterr().err
 
 
-def test_bench_hardware_class_uses_the_frozen_gpu():
-    # mutation: ignoring `gpu` keys every GPU baseline as an L40S one
-    assert cli.bench_hardware_class("modal", "hypergraph", gpu="H100") == "gpu-H100"
-    assert cli.bench_hardware_class("c3", "hypergraph", gpu="a100") == "c3-a100"
+def test_bench_hardware_class_uses_the_frozen_hardware():
+    # mutation: ignoring `hardware` keys every GPU baseline as an L40S one, and every C3 CPU
+    # baseline as a d3 one
+    assert cli.bench_hardware_class("modal", "hypergraph", hardware="H100") == "gpu-H100"
+    assert cli.bench_hardware_class("c3", "hypergraph", hardware="a100") == "c3-a100"
+    assert cli.bench_hardware_class("c3", "knapsack", hardware="cpu-e2-4vcpu-16gb") == \
+        "c3-cpu-e2-4vcpu-16gb"
     assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192-x4"
+    with pytest.raises(ValueError):
+        cli.bench_hardware_class("c3", "knapsack")
+
+
+def test_execute_job_freezes_a_c3_cpu_jobs_profile_and_hands_it_back_on_resume(tmp_path,
+                                                                             monkeypatch):
+    b = _ProbingBench("cpu-e2-4vcpu-16gb")
+    rc = _gpu_run(tmp_path, monkeypatch, b, backend="c3", challenge="knapsack")
+    assert rc == 1 and b.selections == [("knapsack", None)]
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert st["hardware"] == "cpu-e2-4vcpu-16gb" and b.seen_env == ["cpu-e2-4vcpu-16gb"]
+    b2 = _ProbingBench("cpu-d3-4vcpu-16gb")
+    rc = _gpu_run(tmp_path, monkeypatch, b2, backend="c3", challenge="knapsack",
+                  extra=["--resume", run_dir.name])
+    # mutation: probing again on resume can move the candidates to the other CPU
+    assert rc == 1 and b2.selections == [("knapsack", "cpu-e2-4vcpu-16gb")]
+
+
+def _forge_legacy_job(run_dir):
+    """The pre-choice shape of state.json: a measured baseline and no hardware field."""
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    del st["hardware"]
+    st["status"], st["baseline"] = "paused", {
+        "name": "fake_base", "adoption": 1, "artifact_id": "a", "files": {"mod.rs": ""},
+        "training": [], "holdout": []}
+    (run_dir / "state.json").write_text(json.dumps(st), encoding="utf-8")
+
+
+def test_a_c3_cpu_job_from_before_the_choice_is_frozen_to_d3_not_probed(tmp_path, monkeypatch):
+    _gpu_run(tmp_path, monkeypatch, _ProbingBench("cpu-e2-4vcpu-16gb"), backend="c3",
+             challenge="knapsack")
+    run_dir = next((tmp_path / "runs").iterdir())
+    _forge_legacy_job(run_dir)
+    b2 = _ProbingBench("cpu-e2-4vcpu-16gb")
+    _gpu_run(tmp_path, monkeypatch, b2, backend="c3", challenge="knapsack",
+             extra=["--resume", run_dir.name])
+    # mutation: probing here can land the candidates on e2 under a d3 baseline (keyed
+    # c3-cpu-d3-4vcpu-16gb, the only CPU class there was)
+    assert b2.selections == [("knapsack", "cpu-d3-4vcpu-16gb")]
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert st["hardware"] == "cpu-d3-4vcpu-16gb"
+
+
+def test_a_modal_cpu_job_from_before_the_choice_is_frozen_to_nothing(tmp_path, monkeypatch):
+    class NoChoice(_ProbingBench):
+        def select_hardware(self, challenge, chosen=None):
+            self.selections.append((challenge, chosen))
+            return chosen  # the real ModalBench: a CPU challenge has no options
+
+    _gpu_run(tmp_path, monkeypatch, NoChoice(), challenge="knapsack")
+    run_dir = next((tmp_path / "runs").iterdir())
+    _forge_legacy_job(run_dir)
+    b2 = NoChoice()
+    _gpu_run(tmp_path, monkeypatch, b2, challenge="knapsack", extra=["--resume", run_dir.name])
+    # mutation: freezing to "the first option" of an empty list is an IndexError on resume
+    assert b2.selections == [("knapsack", None)]
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert st["hardware"] is None
+    assert "hardware_selected" not in (run_dir / "timeline.jsonl").read_text(encoding="utf-8")
 
 
 def test_compile_uses_the_exported_gpu_or_probes_for_one(tmp_path, monkeypatch):
@@ -2088,12 +2161,12 @@ def test_compile_uses_the_exported_gpu_or_probes_for_one(tmp_path, monkeypatch):
 
     b = B("L40S")
     monkeypatch.setattr(cli, "make_bench", lambda *a, **k: b)
-    monkeypatch.setenv("TALOS_GPU", "A100-80GB")
+    monkeypatch.setenv("TALOS_HARDWARE", "A100-80GB")
     assert cli.main(["compile", "--challenge", "hypergraph", "--dir", "src",
                      "--backend", "modal"]) == 0
-    # mutation: ignoring TALOS_GPU compiles the sandbox's candidate on a GPU of its own
+    # mutation: ignoring TALOS_HARDWARE compiles the sandbox's candidate on a GPU of its own
     assert b.selections == [("hypergraph", "A100-80GB")]
-    monkeypatch.delenv("TALOS_GPU")
+    monkeypatch.delenv("TALOS_HARDWARE")
     assert cli.main(["compile", "--challenge", "hypergraph", "--dir", "src",
                      "--backend", "modal"]) == 0
     assert b.selections[-1] == ("hypergraph", None)
@@ -2106,7 +2179,7 @@ def test_a_job_from_before_the_gpu_choice_is_frozen_to_the_first_option_not_prob
     run_dir = next((tmp_path / "runs").iterdir())
     # forge the pre-change shape: a measured baseline and no gpu field at all
     st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
-    del st["gpu"]
+    del st["hardware"]
     st["status"], st["baseline"] = "paused", {
         "name": "fake_base", "adoption": 1, "artifact_id": "a", "files": {"mod.rs": ""},
         "training": [], "holdout": []}
@@ -2116,23 +2189,23 @@ def test_a_job_from_before_the_gpu_choice_is_frozen_to_the_first_option_not_prob
     # mutation: probing here can land the candidates on an H100 under an L40S baseline
     assert b2.selections == [("hypergraph", "L40S")]
     st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
-    assert st["gpu"] == "L40S"
+    assert st["hardware"] == "L40S"
 
 
 def test_a_fake_run_on_a_gpu_challenge_freezes_the_first_gpu_without_probing(tmp_path,
                                                                             monkeypatch):
-    # The review of PR #20 found this path crashing: FakeBench.select_gpu returned None for a
+    # The review of PR #20 found this path crashing: FakeBench.select_hardware returned None for a
     # GPU challenge, and hardware_class(spec, None) raises for one. No probe, no Modal: the
     # fake run keys its baseline under the first option, as a real run did before the choice.
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("TALOS_GPU", raising=False)
+    monkeypatch.delenv("TALOS_HARDWARE", raising=False)
     rc = cli.main(["run", "--challenge", "hypergraph", "--direction", "go",
                    "--budget-iterations", "1", "--yes", "--fake"])
     assert rc in (0, 1)  # won or exhausted, never a traceback
     run_dir = next((tmp_path / "runs").iterdir())
     st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
-    assert st["gpu"] == "L40S" and st["status"] in ("won", "exhausted")
-    assert os.environ.get("TALOS_GPU") == "L40S"
+    assert st["hardware"] == "L40S" and st["status"] in ("won", "exhausted")
+    assert os.environ.get("TALOS_HARDWARE") == "L40S"
 
 
 def test_the_gpu_probe_is_budget_checked_before_it_runs(tmp_path, monkeypatch, capsys):
@@ -2147,11 +2220,24 @@ def test_the_gpu_probe_is_budget_checked_before_it_runs(tmp_path, monkeypatch, c
     assert "compute_usd" in capsys.readouterr().err
 
 
+def test_the_cpu_probe_on_c3_is_budget_checked_too(tmp_path, monkeypatch, capsys):
+    # the C3 CPU probe bills like the GPU one; a zero compute cap must stop before it
+    b = _ProbingBench("cpu-e2-4vcpu-16gb")
+    rc = _gpu_run(tmp_path, monkeypatch, b, backend="c3", challenge="knapsack",
+                  extra=["--budget-compute-usd", "0"])
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    # mutation: keying the check on is_gpu lets `--budget-compute-usd 0` pay for a CPU probe
+    assert b.selections == [] and rc == 1
+    assert st["status"] == "exhausted" and st["stop_reason"] == "compute_usd"
+    assert "compute_usd" in capsys.readouterr().err
+
+
 def test_the_gpu_probe_is_charged_to_compute_spend(tmp_path, monkeypatch):
     class Billing(_ProbingBench):
-        def select_gpu(self, challenge, chosen=None):
+        def select_hardware(self, challenge, chosen=None):
             self.charged = 0.05
-            return super().select_gpu(challenge, chosen)
+            return super().select_hardware(challenge, chosen)
 
         def cost_usd_since(self, mark):
             return getattr(self, "charged", 0.0) - mark
