@@ -42,7 +42,11 @@ from talos.state import JobSpec, JobState, JobStore
 from talos.types import Usage
 
 BASELINE_CACHE = Path.home() / ".talos" / "baselines"
-MODAL_APP_FILE = Path(__file__).resolve().parent.parent / "modal_app" / "talos_bench.py"
+# Deployed as a module from the directory that holds the `modal_app` package, never by file
+# path: a file path makes Modal import the app as top-level `talos_bench`, the serialized
+# functions then refer to that name, and no container can load them.
+MODAL_APP_MODULE = "modal_app.talos_bench"
+MODAL_APP_ROOT = Path(__file__).resolve().parent.parent
 CLI_PROVIDERS = ("claude-cli", "codex-cli")
 UNMETERED = CLI_PROVIDERS + ("fake",)
 DEFAULT_COMPUTE_USD = 20.0
@@ -68,8 +72,8 @@ def deploy_bench(token_id: str | None, token_secret: str | None, run=subprocess.
                 capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             raise ConfigError(f"modal token set failed: {r.stderr[-500:]}")
-    r = run(base + ["deploy", str(MODAL_APP_FILE)], capture_output=True, text=True,
-            encoding="utf-8", errors="replace")
+    r = run(base + ["deploy", "-m", MODAL_APP_MODULE], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", cwd=str(MODAL_APP_ROOT))
     if r.returncode != 0:
         raise ConfigError(f"modal deploy failed: {(r.stderr or r.stdout)[-2000:]}")
 

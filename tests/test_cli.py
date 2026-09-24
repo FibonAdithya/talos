@@ -3,6 +3,7 @@ import os
 import stat
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -1953,3 +1954,21 @@ def test_compile_local_prepares_then_evaluates(tmp_path, monkeypatch, capsys):
     rc = cli.main(["compile", "--challenge", "knapsack", "--backend", "local"])
     assert rc == 0 and order == ["prepare", "evaluate"]
     assert (seen["local"].cpus, seen["local"].memory_gib) == (4, 4)
+
+
+def test_deploy_bench_deploys_the_app_as_a_package_module():
+    """The functions are serialized=True. Deployed by file path, Modal imports the file as the
+    top-level module `talos_bench`, the pickle refers to that name, and every container dies
+    with "the 'talos_bench' module is not available in the remote environment": the image
+    only carries the packages `modal_app` and `talos`."""
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append((list(cmd), kw))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    cli.deploy_bench(None, None, run=run)
+    (cmd, kw), = seen
+    # mutation: deploying modal_app/talos_bench.py by path deploys an app no container can load
+    assert cmd[-3:] == ["deploy", "-m", "modal_app.talos_bench"]
+    # mutation: without the cwd, `-m` cannot import modal_app from outside the checkout
+    assert (Path(kw["cwd"]) / "modal_app" / "talos_bench.py").is_file()
