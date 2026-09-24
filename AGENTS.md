@@ -119,8 +119,9 @@ progress.
    zero is a real cap.** `talos/budget.py::exhausted` uses `>=`. Two mechanisms
    apply it: `talos/loop.py::_BudgetedBench` wraps the baseline's compute calls,
    and an iteration's own calls go through `talos/loop.py::Loop._bench_evaluate`,
-   which checks the budget and then charges the spend inline. The GPU
-   capacity probe that runs before the baseline is a compute call too:
+   which checks the budget and then charges the spend inline. The
+   capacity probe that runs before the baseline (a GPU, or a C3 CPU profile)
+   is a compute call too:
    `talos/cli.py::freeze_hardware` checks the budget before it and charges what
    the bench estimated for it. A job with `--budget-compute-usd 0` must stop
    before the baseline compile, and before the probe. A guard written as

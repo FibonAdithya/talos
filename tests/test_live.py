@@ -116,7 +116,7 @@ def test_c3_gpu_probe(tmp_path):
     """Manual: the C3 GPU capacity probe, for real. Run:
     TALOS_LIVE_BACKEND=c3 .venv/bin/pytest -m live tests/test_live.py -k c3_gpu_probe -s
     Submits a two-minute `true` job per class until one leaves the queue (docs/compute-backends.md
-    #gpu-fallback); costs under £0.10 and takes from a minute to the capacity window per class."""
+    #hardware-fallback); costs under £0.10 and takes from a minute to the capacity window per class."""
     if os.environ.get("TALOS_LIVE_BACKEND") != "c3":
         pytest.skip("set TALOS_LIVE_BACKEND=c3")
     import time
