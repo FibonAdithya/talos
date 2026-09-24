@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import modal
 
 from talos import inside
 from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MODAL_GPUS, MONOREPO_REF, dev_image,
-                              gpu_slug)
+                              gpu_slug, modal_workers)
 from talos.inside import NONCE_TIMEOUT_S
 
 APP_NAME = "talos-bench"
@@ -85,9 +86,13 @@ def _compile_impl(name: str, files: dict[str, str]) -> dict:
                 "output": f"bench error: {type(e).__name__}: {e}"}
 
 
-def _score_impl(name: str, challenge_id: str, artifact_id: str, track: str, rand_hash: str,
-                nonce: int, fuel: int, timeout_s: int = NONCE_TIMEOUT_S,
-                hyperparameters: dict | None = None) -> dict:
+def _score_batch_impl(name: str, challenge_id: str, artifact_id: str, tasks: list[dict],
+                      workers: int, pool_factory=None, clock=time.monotonic) -> dict:
+    """Scores `tasks` (one dict each: track, rand_hash, nonce, fuel, timeout_s,
+    hyperparameters) on `workers` processes at once. The client sends at most `workers`
+    tasks per call, so the batch's wall time is bounded by its slowest nonce and fits the
+    function timeout. Returns the rows in task order and the container's own wall seconds,
+    which is what Modal bills for and what the client charges."""
     volume.reload()
     d = Path(ARTIFACTS) / name / artifact_id
     so, ptx = d / "algo.so", d / "algo.ptx"
@@ -95,19 +100,26 @@ def _score_impl(name: str, challenge_id: str, artifact_id: str, track: str, rand
         # Infrastructure, not an algorithm failure: say so plainly rather than letting
         # tig-runtime's exit code be classified as "panic".
         raise FileNotFoundError(f"artifact {artifact_id} missing on volume")
-    return inside.run_nonce(challenge_id, track, rand_hash, nonce, so, fuel,
-                            min(timeout_s, NONCE_TIMEOUT_S), ptx if ptx.exists() else None,
-                            workdir=MONOREPO, hyperparameters=hyperparameters)
+    t0 = clock()
+    order = {(t["track"], t["nonce"]): i for i, t in enumerate(tasks)}
+    todo = [(challenge_id, t["track"], t["rand_hash"], t["nonce"], str(so), t["fuel"],
+             min(t["timeout_s"], NONCE_TIMEOUT_S), str(ptx) if ptx.exists() else None,
+             str(MONOREPO), t["hyperparameters"]) for t in tasks]
+    rows = list(inside.run_nonces(todo, workers, pool_factory=pool_factory))
+    rows.sort(key=lambda r: order[(r["track"], r["nonce"])])
+    return {"rows": rows, "seconds": clock() - t0}
 
 
 def register(app, image=_image, probe_image=_probe_image) -> None:
     """Registers every function on `app`. CPU challenges get `compile_<name>` and
-    `score_nonce_<name>`. GPU challenges get one such pair per GPU in MODAL_GPUS, suffixed
+    `score_batch_<name>`. GPU challenges get one such pair per GPU in MODAL_GPUS, suffixed
     `_<gpu_slug>`, each pinned to a single GPU: a job is frozen to one of them at start
     (`talos/bench.py::ModalBench.select_hardware`), and the baseline and every candidate run on it.
     Modal's own `gpu=[...]` fallback list is deliberately not used, because it picks a GPU per
     container, which is a per-call fallback AGENTS.md invariant 1 forbids. One `probe_<slug>`
-    per GPU, on a stock image, is what select_hardware spawns to see whether that GPU has capacity."""
+    per GPU, on a stock image, is what select_hardware spawns to see whether that GPU has
+    capacity. A batch holds `talos/challenges.py::modal_workers` nonces scored at once, so the
+    score function's timeout still covers one nonce plus slack."""
     for name, spec in CHALLENGES.items():
         variants = [(f"_{gpu_slug(g)}", {"gpu": g}) for g in MODAL_GPUS] if spec.is_gpu \
             else [("", {"cpu": spec.cpu, "memory": spec.memory_mib})]
@@ -116,8 +128,8 @@ def register(app, image=_image, probe_image=_probe_image) -> None:
                       **resources)
             app.function(name=f"compile_{name}{suffix}", timeout=3600,
                          **kw)(_mk_compile(name))
-            app.function(name=f"score_nonce_{name}{suffix}", timeout=NONCE_TIMEOUT_S + 120,
-                         **kw)(_mk_score(name, spec.id))
+            app.function(name=f"score_batch_{name}{suffix}", timeout=NONCE_TIMEOUT_S + 120,
+                         **kw)(_mk_score_batch(name, spec.id, modal_workers(spec)))
     for gpu in MODAL_GPUS:
         app.function(name=f"probe_{gpu_slug(gpu)}", image=probe_image(), gpu=gpu, timeout=60,
                      serialized=True)(_mk_probe(gpu))
@@ -129,13 +141,10 @@ def _mk_compile(n):
     return compile_fn
 
 
-def _mk_score(n, cid):
-    def score_nonce(artifact_id: str, track: str, rand_hash: str, nonce: int, fuel: int,
-                    timeout_s: int = NONCE_TIMEOUT_S,
-                    hyperparameters: dict | None = None) -> dict:
-        return _score_impl(n, cid, artifact_id, track, rand_hash, nonce, fuel, timeout_s,
-                           hyperparameters)
-    return score_nonce
+def _mk_score_batch(n, cid, workers):
+    def score_batch(artifact_id: str, tasks: list[dict]) -> dict:
+        return _score_batch_impl(n, cid, artifact_id, tasks, workers)
+    return score_batch
 
 
 def _mk_probe(gpu):

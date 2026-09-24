@@ -22,6 +22,19 @@ def base(q=100):
     return [NonceResult("t", n, True, q, 1) for n in range(3)]
 
 
+def batch_rows(args, quality=100, runtime_ms=1, seconds=1.0):
+    """What a `score_batch` starmap returns: one {"rows", "seconds"} per (artifact_id, tasks)
+    argument, the rows in task order."""
+    return [{"rows": [{"track": t["track"], "nonce": t["nonce"], "ok": True, "quality": quality,
+                       "runtime_ms": runtime_ms, "error": None} for t in tasks],
+             "seconds": seconds} for (_a, tasks) in args]
+
+
+def batch_tasks(args):
+    """Every task dict across a starmap's batches, in call order."""
+    return [t for (_a, tasks) in args for t in tasks]
+
+
 def test_holdout_decision_forced_won_not_won():
     tr = base(110)
     # mutation: treating a None baseline as "never score held-out" makes the baseline
@@ -178,7 +191,7 @@ def _fake_modal(raiser):
 
 
 def test_missing_deployment_says_run_talos_setup(monkeypatch):
-    mod = _fake_modal(lambda nf: nf("app has no function score_nonce_knapsack"))
+    mod = _fake_modal(lambda nf: nf("app has no function score_batch_knapsack"))
     monkeypatch.setitem(sys.modules, "modal", mod)
     clock = FakeClock()
     sleeps = []
@@ -215,8 +228,7 @@ def test_lookup_is_cached_after_a_successful_hydrate(monkeypatch):
             return {"ok": True, "artifact_id": "art", "output": "ok"}
 
         def starmap(self, args):
-            return [{"track": t, "nonce": n, "ok": True, "quality": 1, "runtime_ms": 1,
-                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
+            return batch_rows(args, quality=1)
 
     def from_name(app_name, name):
         lookups.append(name)
@@ -231,7 +243,7 @@ def test_lookup_is_cached_after_a_successful_hydrate(monkeypatch):
     for _ in range(3):
         b.evaluate(req())
     # mutation: re-hydrating on every call adds a round trip per nonce batch
-    assert lookups == ["compile_knapsack", "score_nonce_knapsack"]
+    assert lookups == ["compile_knapsack", "score_batch_knapsack"]
 
 
 def test_modal_evaluate_skips_holdout_on_a_loss_and_charges_each_call(monkeypatch):
@@ -245,9 +257,8 @@ def test_modal_evaluate_skips_holdout_on_a_loss_and_charges_each_call(monkeypatc
             return {"ok": True, "artifact_id": "art", "output": "ok"}
 
         def starmap(self, args):
-            starmaps.append(len(args))
-            return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1000,
-                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
+            starmaps.append(len(batch_tasks(args)))
+            return batch_rows(args, runtime_ms=1000)
 
     mod = types.ModuleType("modal")
     mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
@@ -277,9 +288,8 @@ def test_modal_score_never_starmaps_an_empty_nonce_list(monkeypatch):
             return {"ok": True, "artifact_id": "art", "output": "ok"}
 
         def starmap(self, args):
-            starmaps.append(len(args))
-            return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1000,
-                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
+            starmaps.append(len(batch_tasks(args)))
+            return batch_rows(args, runtime_ms=1000)
 
     mod = types.ModuleType("modal")
     mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
@@ -347,9 +357,8 @@ def test_modal_starmap_carries_the_per_track_timeout(monkeypatch):
             return {"ok": True, "artifact_id": "art", "output": "ok"}
 
         def starmap(self, args):
-            timeouts.extend(a[5] for a in args)
-            return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1,
-                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
+            timeouts.extend(t["timeout_s"] for t in batch_tasks(args))
+            return batch_rows(args)
 
     mod = types.ModuleType("modal")
     mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
@@ -366,7 +375,7 @@ def test_modal_starmap_carries_the_per_track_timeout(monkeypatch):
 
 
 def test_a_stale_deploy_is_reported_at_once_not_retried_as_an_outage(monkeypatch):
-    # The PR that added timeout_s to score_nonce needs `talos setup` re-run on Modal. Without
+    # The PR that added timeout_s to the score function needs `talos setup` re-run on Modal. Without
     # this check a client talking to the old deploy retried the TypeError for the whole
     # 900 s window and then reported "Modal unreachable". mutation: treating the TypeError
     # like a transport error brings the 17 retries and the wrong diagnosis back
@@ -378,7 +387,7 @@ def test_a_stale_deploy_is_reported_at_once_not_retried_as_an_outage(monkeypatch
             return {"ok": True, "artifact_id": "art", "output": "ok"}
 
         def starmap(self, args):
-            raise TypeError("score_nonce() takes 5 positional arguments but 6 were given")
+            raise TypeError("score_batch() takes 2 positional arguments but 3 were given")
 
     mod = types.ModuleType("modal")
     mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
@@ -412,9 +421,8 @@ def test_modal_starmap_carries_each_tracks_hyperparameters(monkeypatch):
             return {"ok": True, "artifact_id": "art", "output": "ok"}
 
         def starmap(self, args):
-            seen.extend((a[1], a[6]) for a in args)
-            return [{"track": t, "nonce": n, "ok": True, "quality": 100, "runtime_ms": 1,
-                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
+            seen.extend((t["track"], t["hyperparameters"]) for t in batch_tasks(args))
+            return batch_rows(args)
 
     mod = types.ModuleType("modal")
     mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
@@ -437,6 +445,69 @@ def test_modal_starmap_carries_each_tracks_hyperparameters(monkeypatch):
     ModalBench().evaluate(r_ho)
     # mutation: passing None instead of request.hyperparameters to the holdout _score call
     assert seen == [("t", {"x": 1}), ("u", None)]
+
+
+def _batching_modal(monkeypatch, batches: list, seconds: float = 2.0):
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def spawn(self):
+            raise AssertionError("no probe expected")
+
+        def remote(self, files):
+            return {"ok": True, "artifact_id": "art", "output": "ok"}
+
+        def starmap(self, args):
+            batches.extend(args)
+            return batch_rows(args, runtime_ms=50, seconds=seconds)
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+
+
+def test_modal_scores_nonces_in_batches_of_the_containers_worker_count(monkeypatch):
+    from talos.challenges import CHALLENGES
+    batches = []
+    _batching_modal(monkeypatch, batches)
+    ten = [NonceSet("t", "ab" * 32, 0, 7), NonceSet("u", "ab" * 32, 0, 3)]
+    r = ModalBench().evaluate(req(training=ten, holdout=[], baseline=None))
+    cpu = CHALLENGES["knapsack"].cpu
+    # mutation: one nonce per call idles three of the container's four billed cores;
+    # a batch larger than the worker count queues nonces behind each other inside one
+    # container and can outlive the function timeout
+    assert [len(tasks) for (_a, tasks) in batches] == [cpu, cpu, 2]
+    assert all(a == "art" for (a, _tasks) in batches)
+    # mutation: chunking by track leaves the short track's batch under-filled
+    assert [(t["track"], t["nonce"]) for t in batch_tasks(batches)] == (
+        [("t", n) for n in range(7)] + [("u", n) for n in range(3)])
+    # the rows come back flattened, in the order the tasks went out
+    assert [(x.track, x.nonce) for x in r.training] == [(t["track"], t["nonce"])
+                                                         for t in batch_tasks(batches)]
+
+
+def test_modal_charges_each_batch_by_its_container_seconds(monkeypatch):
+    from talos.bench import _seconds_cost
+    batches = []
+    _batching_modal(monkeypatch, batches, seconds=2.0)
+    b = ModalBench(clock=FakeClock())  # a frozen clock: the compile call charges nothing
+    b.evaluate(req(training=TR, holdout=[], baseline=None))  # 3 nonces: one batch of 2.0 s
+    # mutation: charging each nonce's runtime_ms (3 x 0.05 s) undercounts the container by
+    # more than ten times here; the container bills its wall time, verifier included
+    assert b.cost_mark() == pytest.approx(_seconds_cost("knapsack", 2.0, None), rel=1e-9)
+    assert b.cost_mark() > _seconds_cost("knapsack", 3 * 0.05, None)
+
+
+def test_a_gpu_challenge_scores_one_nonce_per_batch(monkeypatch):
+    batches = []
+    _batching_modal(monkeypatch, batches)
+    b = ModalBench()
+    b.select_hardware("hypergraph", chosen="L40S")
+    b.evaluate(gpu_req())  # 3 training nonces
+    # mutation: packing a GPU batch like a CPU one serialises the nonces on the device
+    assert [len(tasks) for (_a, tasks) in batches] == [1, 1, 1]
 
 
 # ── GPU fallback ──────────────────────────────────────────────────────
@@ -471,8 +542,7 @@ def _fake_modal_gpu(monkeypatch, probes: dict, lookups: list, cancelled: list, c
             return {"ok": True, "artifact_id": "art", "output": f"built on {self.name}"}
 
         def starmap(self, args):
-            return [{"track": t, "nonce": n, "ok": True, "quality": 1, "runtime_ms": 1000,
-                     "error": None} for (_a, t, _h, n, _f, _to, _hp) in args]
+            return batch_rows(args, quality=1, runtime_ms=1000, seconds=1.0)
 
     def from_name(app_name, name):
         lookups.append(name)
@@ -506,8 +576,9 @@ def test_select_hardware_takes_the_first_gpu_whose_probe_starts_and_cancels_the_
     # the choice routes every later call to that GPU's function set
     r = b.evaluate(gpu_req())
     assert r.compile.output == "built on compile_hypergraph_a100_80gb"
-    assert "score_nonce_hypergraph_a100_80gb" in lookups
-    # ...and prices it as that GPU: the probe's 3 s plus 3 nonces x 1 s at the A100-80GB rate
+    assert "score_batch_hypergraph_a100_80gb" in lookups
+    # ...and prices it as that GPU: the probe's 3 s plus 3 one-nonce batches of 1 s each at
+    # the A100-80GB rate
     assert b.cost_mark() == pytest.approx(6 * GPU_USD_PER_SECOND["A100-80GB"], abs=1e-9)
 
 

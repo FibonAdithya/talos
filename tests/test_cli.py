@@ -928,7 +928,7 @@ def test_make_bench_picks_the_backend_and_hardware_class(tmp_path):
     # mutation: using the Modal hardware class for C3 lets a Modal baseline serve a C3 run
     assert cli.bench_hardware_class("c3", "knapsack", hardware="cpu-d3-4vcpu-16gb") == \
         "c3-cpu-d3-4vcpu-16gb"
-    assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192"
+    assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192-x4"
 
 
 def test_sigint_stops_the_bench_too(tmp_path, monkeypatch):
@@ -2085,7 +2085,7 @@ def test_bench_hardware_class_uses_the_frozen_hardware():
     assert cli.bench_hardware_class("c3", "hypergraph", hardware="a100") == "c3-a100"
     assert cli.bench_hardware_class("c3", "knapsack", hardware="cpu-e2-4vcpu-16gb") == \
         "c3-cpu-e2-4vcpu-16gb"
-    assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192"
+    assert cli.bench_hardware_class("modal", "knapsack") == "cpu4-mem8192-x4"
     with pytest.raises(ValueError):
         cli.bench_hardware_class("c3", "knapsack")
 

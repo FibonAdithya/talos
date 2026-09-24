@@ -53,8 +53,8 @@ def test_hardware_class_carries_the_chosen_hardware():
     assert c3_hardware_class(cpu, "cpu-d3-4vcpu-16gb") == "c3-cpu-d3-4vcpu-16gb"
     assert c3_hardware_class(cpu, "cpu-e2-4vcpu-16gb") == "c3-cpu-e2-4vcpu-16gb"
     # the Modal CPU class has nothing to choose, and passing something is ignored, not fatal
-    assert hardware_class(cpu) == "cpu4-mem8192"
-    assert hardware_class(cpu, "cpu-e2-4vcpu-16gb") == "cpu4-mem8192"
+    assert hardware_class(cpu) == "cpu4-mem8192-x4"
+    assert hardware_class(cpu, "cpu-e2-4vcpu-16gb") == "cpu4-mem8192-x4"
 
 
 def test_a_challenge_with_options_but_no_chosen_hardware_or_an_unknown_one_is_an_error():

@@ -228,3 +228,68 @@ def test_run_nonce_without_hyperparameters_passes_no_flag(tmp_path):
                      _capture_run(seen), tmp_path)
     # mutation: always passing the flag sends "null", which tig-runtime rejects as not an object
     assert all("--hyperparameters" not in cmd for cmd in seen)
+
+
+class FakePool:
+    """Stands in for `multiprocessing.Pool`: records the worker count and yields the rows back
+    to front, so a caller that needs nonce order has to sort."""
+    sizes: list[int] = []
+
+    def __init__(self, workers):
+        FakePool.sizes.append(workers)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def imap_unordered(self, fn, tasks):
+        return [fn(t) for t in reversed(list(tasks))]
+
+
+def _task(nonce, workdir, so="/lib/x.so", timeout_s=600, hp=None):
+    return ("c003", "t", "ab" * 32, nonce, so, 10, timeout_s, None, str(workdir), hp)
+
+
+def test_run_nonces_spreads_the_tasks_over_a_pool_of_the_given_workers(tmp_path, monkeypatch):
+    seen = []
+
+    def stub(task):
+        seen.append(task[3])
+        return {"track": task[1], "nonce": task[3], "ok": True, "quality": 1, "runtime_ms": 1,
+                "error": None}
+    monkeypatch.setattr(inside, "run_task", stub)
+    FakePool.sizes = []
+    rows = list(inside.run_nonces([_task(n, tmp_path) for n in range(6)], 4,
+                                  pool_factory=FakePool))
+    # mutation: a pool sized to the task count, or to os.cpu_count(), oversubscribes the
+    # container's CPU quota; a pool of 1 idles the other cores
+    assert FakePool.sizes == [4]
+    assert sorted(seen) == list(range(6)) and [r["nonce"] for r in rows] == list(range(5, -1, -1))
+
+
+def test_run_nonces_with_one_worker_runs_each_task_on_the_injected_runner(tmp_path):
+    seen = []
+    FakePool.sizes = []
+    rows = list(inside.run_nonces([_task(n, tmp_path, hp={"x": n}) for n in range(3)], 1,
+                                  run=_capture_run(seen), pool_factory=FakePool))
+    # mutation: building a pool for one worker forks a process per nonce for nothing
+    assert FakePool.sizes == []
+    runtimes = [cmd for cmd in seen if cmd[0] == "tig-runtime"]
+    assert [int(cmd[3]) for cmd in runtimes] == [0, 1, 2]
+    # mutation: the serial branch dropping a tuple field (here the hyperparameters) runs the
+    # nonce with different settings from the pool branch
+    assert [cmd[cmd.index("--hyperparameters") + 1] for cmd in runtimes] == [
+        '{"x":0}', '{"x":1}', '{"x":2}']
+    assert all(r["ok"] and r["quality"] == 1 for r in rows)
+
+
+def test_run_nonces_never_pools_an_injected_runner_without_an_injected_pool(tmp_path):
+    """`run_task` builds its own subprocess calls, so a real pool would ignore a test's fake
+    runner and exec a real tig-runtime. Workers above one only take the pool path with the
+    real subprocess or a pool the caller supplied."""
+    seen = []
+    rows = list(inside.run_nonces([_task(n, tmp_path) for n in range(2)], 4,
+                                  run=_capture_run(seen)))
+    assert len(rows) == 2 and len([c for c in seen if c[0] == "tig-runtime"]) == 2
