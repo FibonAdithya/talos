@@ -624,13 +624,20 @@ def test_select_hardware_probes_each_class_in_turn_until_one_leaves_the_queue(tm
                            CHALLENGES["hypergraph"].beat))
     assert _hw(t.dirs[-1]) == "a100"
     from talos.c3_bench import GBP_PER_HOUR, USD_PER_GBP
-    assert b.cost_mark() == pytest.approx(20 / 3600 * GBP_PER_HOUR["a100"] * USD_PER_GBP)
+    from talos.c3_jobdir import PROBE_WALLTIME_S
+    # mutation: an uncharged probe hides a billing job from the compute cap; the l40 probe
+    # never ran and charges nothing. The a100 probe is charged its whole walltime, then the
+    # real job its 20 s
+    assert b.cost_mark() == pytest.approx((PROBE_WALLTIME_S + 20) / 3600
+                                          * GBP_PER_HOUR["a100"] * USD_PER_GBP)
 
 
 def test_select_hardware_reports_all_classes_unavailable(tmp_path):
     t = ProbeTransport([["PENDING"], ["PENDING"], ["SCHEDULING"]])
+    b = tbench(tmp_path, t)
     with pytest.raises(BenchUnavailable) as ei:
-        tbench(tmp_path, t).select_hardware("hypergraph")
+        b.select_hardware("hypergraph")
+    assert b.cost_mark() == 0.0  # nothing ran
     assert [_hw(d) for d in t.dirs] == ["l40", "a100", "h100"]
     assert [c for c in t.calls if c[0] == "cancel"] == [("cancel", "job_1"), ("cancel", "job_2"),
                                                         ("cancel", "job_3")]
@@ -673,9 +680,12 @@ def test_select_hardware_probes_the_cpu_profiles_for_a_cpu_challenge(tmp_path):
     t.results = results_doc()
     b.evaluate(req())
     assert _hw(t.dirs[-1]) == "cpu-e2-4vcpu-16gb"
+    # ...priced as the e2 probe's whole walltime plus the job's 20 s; the d3 probe that never
+    # left the queue charges nothing
     from talos.c3_bench import GBP_PER_HOUR, USD_PER_GBP
-    assert b.cost_mark() == pytest.approx(20 / 3600 * GBP_PER_HOUR["cpu-e2-4vcpu-16gb"]
-                                          * USD_PER_GBP)
+    from talos.c3_jobdir import PROBE_WALLTIME_S
+    assert b.cost_mark() == pytest.approx((PROBE_WALLTIME_S + 20) / 3600
+                                          * GBP_PER_HOUR["cpu-e2-4vcpu-16gb"] * USD_PER_GBP)
 
 
 class RefusingProbeTransport(ProbeTransport):
@@ -750,3 +760,29 @@ def test_a_probe_never_touches_the_pending_record(tmp_path):
                 pending_timeout_s=1800)
     assert b.select_hardware("hypergraph") == "a100"
     assert pending.get() == keep
+
+
+def test_select_hardware_treats_a_deploy_refused_for_stock_as_no_capacity(tmp_path):
+    from talos.c3_bench import C3CommandError
+
+    class Refusing(ProbeTransport):
+        def deploy(self, job_dir):
+            if _hw(job_dir) == "l40":
+                self.dirs.append(Path(job_dir))
+                raise C3CommandError("c3 deploy failed: HTTP 409 GPU_OUT_OF_STOCK: the l40 "
+                                     "class does not currently have capacity")
+            return super().deploy(job_dir)
+
+    t = Refusing([["RUNNING"]])
+    # mutation: treating the refusal as an outage pauses the run on the first class instead
+    # of trying the next
+    assert tbench(tmp_path, t).select_hardware("hypergraph") == "a100"
+    assert [_hw(d) for d in t.dirs] == ["l40", "a100"]
+
+    class Broken(ProbeTransport):
+        def deploy(self, job_dir):
+            raise C3CommandError("c3 deploy failed: HTTP 401 unauthorised")
+
+    with pytest.raises(BenchUnavailable) as ei:  # any other refusal is still an outage
+        tbench(tmp_path, Broken([])).select_hardware("hypergraph")
+    assert "probe deploy failed" in str(ei.value)

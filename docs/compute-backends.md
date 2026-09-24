@@ -44,8 +44,8 @@ and `talos/cli.py::freeze_hardware` fixes the hardware before the baseline:
 
 | Backend | Probe | "No capacity" means | Cost of one probe |
 |---|---|---|---|
-| Modal | `probe_<gpu>` is spawned; the call must return within `ModalBench.probe_window_s` (120 s). A call still queued then is cancelled, or it would run and bill whenever that GPU freed up. | Every probe timed out. | A few seconds of the GPU on a slim image. ESTIMATE (unverified live). |
-| C3 | A two-minute job whose script is `true`, on `ubuntu:24.04`, written by `talos/c3_jobdir.py::write_probe_dir` to `runs/<job_id>/c3/probe-<option>/`, asking for CUDA only on a GPU class. It must leave the queue within the capacity window (`C3Bench.pending_timeout_s`, 30 min); once RUNNING it is cancelled. A job still queued at the window's end is cancelled and the next option tried. A deploy C3 refuses outright as out of stock (HTTP 409 `GPU_OUT_OF_STOCK`, which the CPU profile returned on 2026-09-23) moves to the next option at once; any other deploy failure pauses the run. | Every option stayed queued for the whole window or was refused, so up to 90 minutes for a GPU challenge and 60 for a CPU one before the run pauses. | Under a minute of the option, plus its queue time. ESTIMATE (unverified live). |
+| Modal | `probe_<gpu>` is spawned; the call must return within `ModalBench.probe_window_s` (120 s). A call still queued then is cancelled, or it would run and bill whenever that GPU freed up. | Every probe timed out. | The wait at the GPU's rate. MEASURED 2026-09-24: the L40S probe returned in 33 s from a cold start and was charged $0.018. |
+| C3 | A two-minute job whose script is `true`, on `ubuntu:24.04`, written by `talos/c3_jobdir.py::write_probe_dir` to `runs/<job_id>/c3/probe-<option>/`, asking for CUDA only on a GPU class. It must leave the queue within the capacity window (`C3Bench.pending_timeout_s`, 30 min); once RUNNING it is cancelled. A job still queued at the window's end is cancelled and the next option tried. A deploy C3 refuses outright as out of stock (HTTP 409 `GPU_OUT_OF_STOCK`, which the CPU profile returned on 2026-09-23) moves to the next option at once; any other deploy failure pauses the run. | Every option stayed queued for the whole window or was refused, so up to 90 minutes for a GPU challenge and 60 for a CPU one before the run pauses. | The probe's two-minute walltime at the option's rate, the most it can bill. MEASURED 2026-09-24 over MCP: the `l40` probe left the queue in 6 s, was cancelled, and was charged $0.067. |
 
 The choice is `hardware` in `state.json`, a `hardware_selected` event in the timeline, and
 `TALOS_HARDWARE` in the agentic sandbox's environment so `talos compile` there builds on the
@@ -57,13 +57,24 @@ pauses as it does for any other capacity shortage and resumes on the same option
 switches. When no option answers, the run is paused with the list tried, and
 `talos run --resume` tries again.
 
-The local backend has one hardware class and no probe. The Modal app must be redeployed
-(`talos setup`) after upgrading to a version with this table: the old deploy has no per-GPU
-functions, and a run against it stops with "Run `talos setup` to deploy".
+The probe is a compute call like any other: the budget is checked before it, so a job with
+`--budget-compute-usd 0` stops before probing, and its estimated cost goes on compute spend.
+Modal charges the wait for a successful probe at the GPU's rate (queue time included, so never
+below what the container billed); C3 charges the probe's whole two-minute walltime at the
+option's rate, the most it can bill. A probe that never started charges nothing.
 
-Neither probe has been run against a live account as of 2026-09-24. The C3 probe's
-`requires_accelerator: cuda` on a non-CUDA image is the one setting the live test should
-confirm first for a GPU class; `tests/test_live.py::test_c3_knapsack_job` runs the CPU probe.
+The local backend has one hardware class and no probe, and so does a CPU challenge on Modal.
+The Modal app must be redeployed (`talos setup`) after upgrading to a version with this table:
+the old deploy has no per-GPU functions, and a run against it stops with "Run `talos setup` to
+deploy".
+
+Both GPU probes were run against live accounts on 2026-09-24 (`tests/test_live.py`, the
+`c3_gpu_probe` and `modal_gpu_probe` tests): C3 accepted the `ubuntu:24.04` probe with
+`requires_accelerator: cuda`, and the redeployed Modal app scheduled the `probe_l40s` call.
+The C3 CPU probe ran live the same day at the start of `test_c3_knapsack_job`, over the `c3`
+CLI: it chose `cpu-d3-4vcpu-16gb` in about a minute, the probe job having finished before a
+poll saw it running. The out-of-stock deploy path has not been exercised live; its match is
+on the wording seen on 2026-09-23.
 
 ## C3 job directories
 

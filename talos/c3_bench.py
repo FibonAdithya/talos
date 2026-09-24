@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Callable
 
 from talos.bench import (BenchCancelled, BenchUnavailable, EvalRequest, EvalResult,
                          PendingJobStore, _redact)
-from talos.c3_jobdir import LocalSettings, request_hash, write_job_dir, write_probe_dir
+from talos.c3_jobdir import (PROBE_WALLTIME_S, LocalSettings, request_hash, write_job_dir,
+                             write_probe_dir)
 from talos.challenges import CHALLENGES, c3_hardware_options, c3_profile
 from talos.inside import NONCE_TIMEOUT_S
 from talos.types import CompileResult, NonceResult, NonceSet
@@ -40,15 +41,17 @@ class _JobFailed(RuntimeError):
     pass
 
 
+def _out_of_stock(e: Exception) -> bool:
+    """C3 can refuse a deploy outright instead of queueing it: HTTP 409 GPU_OUT_OF_STOCK,
+    "does not currently have ... capacity" (MEASURED 2026-09-23 on the CPU profile). For the
+    probe that is the answer, not an outage."""
+    text = str(e)
+    return "OUT_OF_STOCK" in text or "capacity" in text.lower()
+
+
 class _NoCapacity(BenchUnavailable):
     """A job still queued after the capacity window. A BenchUnavailable to every caller but the
     capacity probe, which moves on to the next option."""
-
-
-# C3 can also refuse a deploy outright when the class or profile has no stock (HTTP 409
-# GPU_OUT_OF_STOCK, seen on the CPU profile on 2026-09-23), rather than queue the job. The
-# probe treats that like a job that never left the queue.
-_OUT_OF_STOCK_RE = re.compile(r"OUT_OF_STOCK", re.IGNORECASE)
 
 
 _JOB_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
@@ -192,12 +195,9 @@ class C3Bench:
             job_dir = write_probe_dir(self.run_dir / self.subdir / f"probe-{cls}", cls)
             try:
                 job_id = _safe_job_id(self._t.deploy(job_dir))
-            except C3CommandError as e:
-                if _OUT_OF_STOCK_RE.search(str(e)):
-                    continue  # nothing was queued; the next option
-                raise BenchUnavailable(f"{self._label} probe deploy failed: "
-                                       f"{_redact(str(e))[:300]}") from None
-            except ValueError as e:
+            except (C3CommandError, ValueError) as e:
+                if _out_of_stock(e):
+                    continue  # C3 refused to queue it at all: no capacity, next option
                 raise BenchUnavailable(f"{self._label} probe deploy failed: "
                                        f"{_redact(str(e))[:300]}") from None
             try:
@@ -207,11 +207,18 @@ class C3Bench:
             if status in ACTIVE:
                 self._t.cancel(job_id)  # the probe did its job by starting
             if status == "RUNNING" or status in DONE:
+                # ESTIMATE: the probe's whole walltime, the most it can bill; a cancel that
+                # lands late costs no more than this
+                self._cost += PROBE_WALLTIME_S / 3600 * self._rate(cls)
                 self.hardware = cls
                 return cls
             # FAILED/CANCELLED before running: not proof of capacity; try the next class
         raise BenchUnavailable(f"no {self._label} capacity for any of {', '.join(options)} "
                                f"within {self.pending_timeout_s}s each; try again later")
+
+    def _rate(self, profile: str) -> float:
+        return (GBP_PER_HOUR[profile] * USD_PER_GBP if self.usd_per_hour is None
+                else self.usd_per_hour)
 
     # ── evaluate ───────────────────────────────────────────────────────
     def evaluate(self, request: EvalRequest) -> EvalResult:
@@ -263,9 +270,7 @@ class C3Bench:
             # ESTIMATE. Reattaching to a job already RUNNING bills only from the reattach,
             # undercounting whatever ran before this process started polling; reattaching to
             # a job that is already terminal bills nothing for it at all.
-            rate = (GBP_PER_HOUR[profile] * USD_PER_GBP if self.usd_per_hour is None
-                    else self.usd_per_hour)
-            self._cost += (t_end - t_run) / 3600 * rate
+            self._cost += (t_end - t_run) / 3600 * self._rate(profile)
         artifacts = job_dir / job_id / "artifacts"
         try:
             have_results = self._t.fetch(job_id, "results.json", artifacts / "results.json")

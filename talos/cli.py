@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+from typing import Callable
 import types
 import urllib.error
 import urllib.request
@@ -21,7 +22,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from talos import mainnet as mainnet_api
-from talos.budget import Budget, Spend
+from talos.budget import Budget, BudgetExhausted, Spend, exhausted
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
@@ -215,12 +216,17 @@ def bench_hardware_class(backend: str, challenge: str, local: LocalSettings | No
     return c3_hardware_class(spec, hardware) if backend == "c3" else hardware_class(spec, hardware)
 
 
-def freeze_hardware(bench, spec, state, store, backend: str, log=print) -> None:
+def freeze_hardware(bench, spec, state, store, backend: str, log=print,
+                    clock: Callable[[], float] = time.time) -> None:
     """Fixes the hardware a job runs on, once. The first run probes through the bench and saves
     the choice; a resume hands the saved choice back, so the candidates score on the hardware
     the baseline was measured on. Exported as TALOS_HARDWARE for the sandbox's `talos compile`.
     Where there is nothing to choose (a CPU challenge on Modal, the local backend, the fake
-    bench) the choice stays None."""
+    bench) the choice stays None.
+
+    The probe is a compute call (invariant 5): the budget is checked before it, and what the
+    bench charged for it goes on compute spend, as `talos/loop.py::_BudgetedBench` does for
+    the baseline."""
     cs = CHALLENGES[spec.challenge]
     if backend == "local":
         options = ()
@@ -235,10 +241,17 @@ def freeze_hardware(bench, spec, state, store, backend: str, log=print) -> None:
                     reason="job predates the hardware choice")
     if state.hardware is None:
         if options:
+            dim = exhausted(spec.budget, state.spend, clock())
+            if dim:
+                raise BudgetExhausted(dim)
             log(f"Probing capacity for {spec.challenge}...")
-        state.hardware = bench.select_hardware(spec.challenge)
-        if state.hardware is not None:
+        mark = bench.cost_mark()
+        try:
+            state.hardware = bench.select_hardware(spec.challenge)
+        finally:
+            state.spend.compute_usd += bench.cost_usd_since(mark)
             store.save(state)
+        if state.hardware is not None:
             store.event("hardware_selected", hardware=state.hardware)
             log(f"Hardware: {state.hardware}")
     else:
@@ -628,6 +641,11 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     except BenchCancelled as e:
         state.status, state.stop_reason = "cancelled", f"stopped; bench job cancelled: {e}"
         store.save(state)
+        return 1
+    except BudgetExhausted as e:
+        state.status, state.stop_reason = "exhausted", e.dimension
+        store.save(state)
+        print(f"budget exhausted before the hardware probe: {e.dimension}", file=sys.stderr)
         return 1
     hardware = bench_hardware_class(cfg.backend, spec.challenge, local=local, gpu_name=gpu_name,
                                     hardware=state.hardware)

@@ -175,12 +175,16 @@ class ModalBench:
                                f"{self.probe_window_s}s each; try again later")
 
     def _probe(self, gpu: str) -> bool:
+        t0 = self._clock()
         call = self._fn(f"probe_{gpu_slug(gpu)}").spawn()
         try:
             call.get(timeout=self.probe_window_s)
         except _timeout_types():
             call.cancel()
-            return False
+            return False  # never started: nothing to charge
+        # ESTIMATE: the whole wait at the GPU's rate. Queue time is in it, so this is never
+        # below what the container billed.
+        self._cost += GPU_USD_PER_SECOND[gpu] * (self._clock() - t0)
         return True
 
     def _name(self, kind: str, challenge: str) -> str:
@@ -305,7 +309,11 @@ class FakeBench:
         self.holdout_runs = 0
 
     def select_hardware(self, challenge: str, chosen: str | None = None) -> str | None:
-        return None  # in-process: no hardware to choose
+        """In-process, so nothing is probed; but a GPU challenge still gets a GPU (the first
+        option, or the frozen one), because the hardware class the fake run keys its baseline
+        under needs one just as a real run's does."""
+        options = hardware_options(CHALLENGES[challenge])
+        return (chosen or options[0]) if options else None
 
     def evaluate(self, request: EvalRequest) -> EvalResult:
         self.calls.append(request)
