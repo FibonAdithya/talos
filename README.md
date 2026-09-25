@@ -371,7 +371,7 @@ Before the job starts, Talos fetches the challenge's active tracks and fuel from
 draws the nonces, and prints a line such as:
 
 ```
-Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}; hyperparameters: 5/5 tracks from mainnet
+Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}, 8 nonces per track; hyperparameters: 5/5 tracks from mainnet
 ```
 
 The job id is the start time plus the challenge name.
@@ -448,19 +448,20 @@ Prompts for anything not given as a flag, unless `--yes` is passed.
 | `--direction TEXT` | What to explore, in free text. It becomes the first entry in the job's `tacit.md`. |
 | `--direction-file PATH` | The same, read from a file. Pass one of `--direction` or `--direction-file`, not both. |
 | `--track NAME` | Optimise one active track of the challenge instead of all of them (`all` is the default; the prompt lists the tracks). Training scores that track only. When a candidate wins on training, the confirmation scores that track's held-out nonces plus every other track's training nonces, and no other track may get worse. The LLM still sees and may edit every file. |
+| `--nonces N` | Nonces per track in each of the training and held-out sets (8 is the default; the prompt asks). Every nonce is scored for the baseline on both sets and for every candidate on training, then again on held-out when it wins on training, so the count sets the cost of every evaluation. On hypergraph an L40 spends about 10 minutes per nonce-per-track on the baseline's two sets at the current fuel (measured 2026-09-25); 32 made that baseline 11 hours against the 6-hour C3 job limit. A resume keeps the sets the job was drawn with. |
 | `--hyperparameters mainnet\|none` | `mainnet` (the default) runs the baseline and every candidate with the per-track hyperparameters of the baseline algorithm's best-quality mainnet benchmark at the job's fuel, fixed at job start. A track with no such benchmark runs without any. `none` runs every nonce without hyperparameters. The package lists the values and the benchmark they came from. |
 | `--mode single-shot\|agentic` | Overrides the configured mode for this job. `agentic` needs a CLI provider and uses roughly 5 to 20 times the tokens of `single-shot`. |
 | `--budget-usd N` | LLM spend cap in USD. |
 | `--budget-hours N` | Wall-clock cap in hours. |
 | `--budget-iterations N` | Iteration cap. |
 | `--budget-compute-usd N` | Estimated compute spend cap in USD. |
-| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track or hyperparameters. |
+| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track, hyperparameters or nonces. |
 | `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20 (not asked and not set on the `local` backend, where it is always zero). |
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
 providers, default 20; iterations for CLI providers, default 50), a wall-clock budget
 (default 4 hours), a compute budget (default $20), the mode (CLI providers only), the
-track, and the hyperparameters (`mainnet` or `none`).
+track, the hyperparameters (`mainnet` or `none`), and the nonces per track (default 8).
 
 Talos refuses to start, before spending anything, when: there is no API key for the
 provider; the model has no entry in the price table and the only budget is `--budget-usd`
