@@ -17,8 +17,10 @@ from talos.inside import NONCE_TIMEOUT_S
 
 BUILD_ALLOWANCE_S = 1200
 # The local job's build allowance. MEASURED 2026-09-23: a candidate build took 14m44s on 16
-# cores (the dev image re-instruments every dependency on each build), and fewer cores take
-# longer; 20 minutes would time out every job on a smaller machine.
+# cores when the crate still held every shipped algorithm (under 3 minutes for knapsack since
+# the crate is pruned to the candidate, MEASURED 2026-09-25, and the dev image still
+# re-instruments every dependency on each build); fewer cores take longer, and 20 minutes
+# would time out a job on a smaller machine, so the hour stays.
 LOCAL_BUILD_ALLOWANCE_S = 3600
 LOCAL_APP = "/app"  # where the local job container mounts the challenge's monorepo volume
 LOCAL_LOCK = f"{LOCAL_APP}/.talos-lock"  # held by every container that writes the volume

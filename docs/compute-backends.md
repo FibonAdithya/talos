@@ -215,16 +215,30 @@ so the transport stores the job's limit as a container label and kills the conta
 is exceeded, reporting `TIMED_OUT` exactly as C3 would. A stopped container is kept until the
 next deploy of the same run, because its artifacts are read from it; exited containers of
 earlier iterations are removed then. The local build allowance in the time limit is one hour
-(`talos/c3_jobdir.py::LOCAL_BUILD_ALLOWANCE_S`), against 20 minutes on C3, because the
-candidate build takes about 15 minutes on 16 cores and longer on fewer.
+(`talos/c3_jobdir.py::LOCAL_BUILD_ALLOWANCE_S`), against 20 minutes on C3, because a
+candidate build took about 15 minutes on 16 cores before the crate was pruned to the
+candidate (about 3 minutes since; see [Local timings](#local-timings)) and longer on fewer.
+The allowance is kept for the smaller machines.
 
 The hardware class is `local-<host>-cpu<N>-mem<M>` (or `local-<host>-gpu-<name>-cpu<N>-mem<M>`), so a local
 baseline never matches a Modal or C3 one, and a changed CPU or memory setting is a re-measure.
 
 ### Local timings
 
-MEASURED 2026-09-23 on a 16-core, 30 GB machine (`tests/test_live.py::test_local_knapsack_job`,
-knapsack, two training and two held-out nonces):
+MEASURED 2026-09-25 on a 16-core, 30 GB machine (`tests/test_live.py::test_local_knapsack_job`,
+knapsack, two training and two held-out nonces), with the crate pruned to the candidate
+(see [below](#the-crate-is-pruned-to-the-candidate)):
+
+| Step | Time |
+|---|---|
+| Live run, fresh volumes: `prepare` (image present; create volumes, clone, warm-up build) | 90 s (`prepare_s: 90`) |
+| Same run: one job, build plus 4 nonces (1.3 to 1.4 s per nonce) | 2m57s (`job_s: 177`; `1 passed` in 4m33s) |
+
+The same test for job_scheduling is in the pruning section below: `prepare_s: 103`,
+`job_s: 990`, with nonces of 150 to 165 s each.
+
+Before the crate was pruned, MEASURED 2026-09-23 on the same machine, same test, when the
+build compiled the 13 shipped knapsack algorithms beside the candidate:
 
 | Step | Time |
 |---|---|
@@ -235,9 +249,12 @@ knapsack, two training and two held-out nonces):
 | Live run 2: one job, build plus 4 nonces (1.3 to 1.7 s per nonce) | 14m4s (`job_s: 844`; `1 passed` in 14m7s) |
 | Live run 3, the shipped copy-out transport: prepare with markers present / one job | 1 s / 14m59s (`job_s: 899`; `1 passed` in 15m3s) |
 
-The job's build is no faster than the warm-up build: the instrumentation pass, not the Rust
-compile, is the cost. Caching the instrumented objects per IR file would remove it and is
-out of scope here.
+Those 2026-09-23 runs showed the job's build no faster than the warm-up build, which was
+read at the time as the instrumentation pass being the cost. The 2026-09-25 runs disprove
+that: with the crate pruned to the candidate the same job fell from 844 s to 177 s, so the
+compile of the shipped algorithms was most of it. The instrumentation pass still runs over
+every dependency's IR on every build; caching the instrumented objects per IR file would
+remove that and is out of scope here.
 
 ### The crate is pruned to the candidate
 
