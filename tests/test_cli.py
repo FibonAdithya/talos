@@ -132,7 +132,7 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     monkeypatch.setattr(cli, "execute_job",
                         lambda spec, store, cfg, resume: seen.update(spec=spec, cfg=cfg) or 0)
     prompts = []
-    answers = iter(["knapsack", "go", "abc", "3", "4", "5", "agentic", "", ""])
+    answers = iter(["knapsack", "go", "abc", "3", "4", "5", "agentic", "", "", ""])
 
     def ask(prompt, default=None, secret=False):
         prompts.append(prompt)
@@ -145,9 +145,10 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     assert "$" not in prompts[0] and "estimated" not in prompts[0]
     assert "knapsack" in prompts[0] and "knapsack (GPU" not in prompts[0]
     assert prompts.count("Iteration budget") == 2  # the typo was re-asked, not fatal
-    assert prompts[-3] == "Mode (single-shot or agentic)"
-    assert prompts[-2] == "Track to optimise (all, or one of: n=1)"
-    assert prompts[-1] == "Hyperparameters (mainnet or none)"
+    assert prompts[-4] == "Mode (single-shot or agentic)"
+    assert prompts[-3] == "Track to optimise (all, or one of: n=1)"
+    assert prompts[-2] == "Hyperparameters (mainnet or none)"
+    assert prompts[-1] == "Nonces per track"
     assert seen["spec"].track is None
     assert "agentic mode uses roughly 5-20x the tokens of single-shot" in captured.out
     assert seen["spec"].budget.iterations == 3 and seen["spec"].budget.hours == 4.0
@@ -280,8 +281,9 @@ def test_fake_run_end_to_end_wins_and_packages(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert "Status: won" in out
     assert "Best delta vs baseline: +1.000%" in out
-    # one summary line per iteration: the outcome, then best, spend and time left
-    assert "#1 new best | best +1.000% | llm $0.02 | compute ≈$1.28 | ∞ left" in out
+    # one summary line per iteration: the outcome, then best, spend and time left. Compute is
+    # FakeBench's $0.01 per nonce over 32 nonces: baseline 8 + 8, candidate 8 + 8.
+    assert "#1 new best | best +1.000% | llm $0.02 | compute ≈$0.32 | ∞ left" in out
     assert "[status]" not in out and "iteration_done" not in out and "job=" not in out
     # mutation: stamping the printed prefix with state.iteration labels iteration 1's events #0
     assert "#1 trying: " in out and "#0 trying" not in out
@@ -1169,6 +1171,103 @@ def test_resume_with_a_different_track_is_refused(tmp_path, monkeypatch, capsys)
     assert "started with track" in capsys.readouterr().err
 
 
+def test_run_nonces_flag_sizes_both_nonce_sets(tmp_path, monkeypatch):
+    # mutation: the flag not reaching draw_nonce_sets, or reaching only one of the two sets,
+    # leaves a set at the default
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = {}
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--yes", "--nonces", "5"])
+    assert rc == 0
+    assert [s.count for s in seen["spec"].training] == [5]
+    assert [s.count for s in seen["spec"].holdout] == [5]
+
+
+def test_run_defaults_to_eight_nonces_per_track(tmp_path, monkeypatch):
+    # mutation: leaving the draw at 32 makes a GPU baseline ten hours of L40 at hypergraph rates
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = {}
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--yes"])
+    assert rc == 0
+    assert [s.count for s in seen["spec"].training] == [8]
+    assert [s.count for s in seen["spec"].holdout] == [8]
+
+
+@pytest.mark.parametrize("bad", ["0", "1000001"])
+def test_run_rejects_a_nonce_count_out_of_range(tmp_path, monkeypatch, capsys, bad):
+    # mutation: dropping the lower bound draws an empty set; dropping the upper bound lets the
+    # training range overlap the held-out range that starts at HOLDOUT_START
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: pytest.fail("must not start a job"))
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--yes", "--nonces", bad])
+    assert rc == 2
+    assert bad in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_resume_with_a_different_nonce_count_is_refused(tmp_path, monkeypatch, capsys):
+    # mutation: letting --nonces through on resume would silently keep the stored sets while
+    # the summary claims another size; the same value, or no flag, must still resume
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch, ["--nonces", "4"]) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    resumed = []
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: resumed.append(resume) or 0)
+    assert cli.main(["run", "--resume", run_dir.name, "--nonces", "5"]) == 2
+    assert "started with 4 nonces" in capsys.readouterr().err
+    assert resumed == []
+    assert cli.main(["run", "--resume", run_dir.name, "--nonces", "4"]) == 0
+    assert resumed == [True]
+
+
+def test_run_summary_names_the_nonce_count(tmp_path, monkeypatch, capsys):
+    # mutation: a summary without the count hides what a run was sized to
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    monkeypatch.setattr(cli, "execute_job", lambda spec, store, cfg, resume: 0)
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--yes", "--nonces", "3"])
+    assert rc == 0
+    assert "3 nonces per track" in capsys.readouterr().out
+
+
+def test_run_wizard_asks_for_nonces_only_when_the_flag_is_absent(tmp_path, monkeypatch):
+    # mutation: a wizard that never asks fixes every interactive run at the default; one that
+    # asks despite the flag re-answers a question already settled
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = {}
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+    ask, prompts = _recording(["", "", "", "6"])  # compute budget, track, hyperparameters
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3"], ask=ask)
+    assert rc == 0 and [s.count for s in seen["spec"].training] == [6]
+    assert prompts[-1] == ("Nonces per track", "8")
+    ask, prompts = _recording(["", "", ""])
+    rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "3", "--nonces", "2"], ask=ask)
+    assert rc == 0 and [s.count for s in seen["spec"].training] == [2]
+    assert not any(p.startswith("Nonces") for p, _ in prompts)
+
+
 def test_fake_run_with_a_track_wins_and_packages_per_track(tmp_path, monkeypatch, capsys):
     # mutation: the whole focused path; the fake challenge has one track, so there is no guard
     monkeypatch.chdir(tmp_path)
@@ -1314,7 +1413,7 @@ def test_wizard_hyperparameters_answer_none_and_a_bad_answer(tmp_path, monkeypat
     monkeypatch.setattr(cli, "execute_job",
                         lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
     wizard = ["knapsack", "go", "3", "4", "5", "single-shot", ""]
-    assert cli.main(["run"], ask=scripted(wizard + ["none"])) == 0
+    assert cli.main(["run"], ask=scripted(wizard + ["none", ""])) == 0  # "" = default nonces
     # mutation: ignoring the wizard answer applies mainnet values the user declined
     assert seen["spec"].hyperparameters is None and seen["spec"].baseline_algorithm is None
     # mutation: accepting any answer starts a job whose choice nobody made
@@ -1844,9 +1943,10 @@ def test_run_local_skips_the_compute_budget_question_and_leaves_the_cap_unset(tm
         return real(spec, store, cfg, resume)
     monkeypatch.setattr(cli, "execute_job", spy)
     # prompts: direction, iteration budget, hours, [compute: skipped, an extra prompt would
-    # raise "unexpected prompt"], mode, track, hyperparameters (blank = the default for each)
+    # raise "unexpected prompt"], mode, track, hyperparameters, nonces (blank = the default
+    # for each)
     rc = cli.main(["run", "--challenge", "knapsack"],
-                  ask=scripted(["go", "1", "1", "", "", ""]))
+                  ask=scripted(["go", "1", "1", "", "", "", ""]))
     assert rc == 1 and seen["compute"] is None
     # --yes must not apply DEFAULT_COMPUTE_USD either
     rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",

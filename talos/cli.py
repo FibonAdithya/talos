@@ -35,7 +35,7 @@ from talos.local_transport import (DockerInfo, DockerTransport, docker_info, has
                                    prepare)
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
 from talos.masked_input import ask_secret
-from talos.nonces import draw_nonce_sets, new_rand_hash
+from talos.nonces import HOLDOUT_START, NONCES_PER_TRACK, draw_nonce_sets, new_rand_hash
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
 from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
@@ -747,6 +747,11 @@ def cmd_run(args, ask) -> int:
             print(f"job {spec.job_id} fixed its hyperparameters at start; start a new job to "
                   f"change them", file=sys.stderr)
             return 2
+        stored = spec.training[0].count if spec.training else None
+        if args.nonces is not None and args.nonces != stored:
+            print(f"job {spec.job_id} was started with {stored} nonces per track; start a new "
+                  f"job to change nonces", file=sys.stderr)
+            return 2
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
         if _codex_refused(cfg):
             return 2
@@ -863,8 +868,26 @@ def cmd_run(args, ask) -> int:
         except MainnetError as e:
             print(f"mainnet unreachable: {e}", file=sys.stderr)
             return 1
+    nonces = args.nonces
+    if nonces is None:
+        if args.yes:
+            nonces = NONCES_PER_TRACK
+        else:
+            answer = ask("Nonces per track", str(NONCES_PER_TRACK)).strip()
+            try:
+                nonces = int(answer) if answer else NONCES_PER_TRACK
+            except ValueError:
+                print(f"not a number: {answer!r}", file=sys.stderr)
+                return 2
+    if not 1 <= nonces <= HOLDOUT_START:
+        # the training set starts at nonce 0 and the held-out set at HOLDOUT_START: a count past
+        # that makes the two overlap, and a count of 0 draws nothing to score
+        print(f"nonces per track must be between 1 and {HOLDOUT_START}, not {nonces}",
+              file=sys.stderr)
+        return 2
     rand_hash = new_rand_hash()
-    training, holdout = draw_nonce_sets(info.tracks, rand_hash)
+    training, holdout = draw_nonce_sets(info.tracks, rand_hash, training_count=nonces,
+                                        holdout_count=nonces)
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
     job_id, n = stamp, 1
     while (root / "runs" / job_id / "job.json").exists():  # two runs in the same second
@@ -889,7 +912,8 @@ def cmd_run(args, ask) -> int:
     else:
         used = sum(1 for v in hyperparameters.values() if v is not None)
         hp_line = f"hyperparameters: {used}/{len(info.tracks)} tracks from mainnet"
-    print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}; {hp_line}")
+    print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}, "
+          f"{nonces} nonces per track; {hp_line}")
     return execute_job(spec, store, cfg, resume=False)
 
 
@@ -975,6 +999,9 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--direction")
     r.add_argument("--direction-file")
     r.add_argument("--track", help="one active track to optimise, or all (the default)")
+    r.add_argument("--nonces", type=int,
+                   help=f"nonces per track in each of the training and held-out sets "
+                        f"(default {NONCES_PER_TRACK})")
     r.add_argument("--hyperparameters", choices=["mainnet", "none"],
                    help="per-track hyperparameters from the baseline algorithm's best mainnet "
                         "benchmark (mainnet, the default) or none")
