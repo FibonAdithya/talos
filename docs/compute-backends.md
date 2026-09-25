@@ -171,8 +171,9 @@ step performed:
 3. Create the app volume.
 4. Clone the monorepo tarball at the pin into `/app` (marker `/app/.talos-ready`).
 5. Warm-up build: `build_algorithm` of the first algorithm the pinned monorepo ships for the
-   challenge, with networking on, so the registry and the dependency compile are populated by
-   code that is not LLM-authored (marker `/app/.talos-warm`).
+   challenge, alone in its crate (see [The crate is pruned to the candidate](#the-crate-is-pruned-to-the-candidate)),
+   with networking on, so the registry and the dependency compile are populated by code that
+   is not LLM-authored (marker `/app/.talos-warm`).
 6. For a GPU challenge, read the GPU name with `nvidia-smi` for the hardware class.
 
 Both volumes are shared by every job of the challenge on this machine, and the runner stages
@@ -237,6 +238,36 @@ knapsack, two training and two held-out nonces):
 The job's build is no faster than the warm-up build: the instrumentation pass, not the Rust
 compile, is the cost. Caching the instrumented objects per IR file would remove it and is
 out of scope here.
+
+### The crate is pruned to the candidate
+
+`build_algorithm` compiles every module the challenge crate's `mod.rs` lists, on one codegen
+unit (`build_so` passes `-C codegen-units=1 -C opt-level=3`), so the crate's size sets the
+build time and memory whatever the candidate is, and core count does not help. The knapsack
+crate at the pin is 13 algorithms and 2.1 MB of Rust. The job_scheduling crate is 13
+algorithms and 15.0 MB, four of them 2.4 to 3.2 MB each.
+
+MEASURED 2026-09-25 on the 16-core, 30 GB machine, `build_algorithm ember_stromboli` in the
+job_scheduling dev image with no memory cap:
+
+| Crate at build time | Result |
+|---|---|
+| The pinned crate plus the candidate (14 algorithms, 345k lines) | stopped after 133 min still inside LLVM optimisation, rustc at 23.4 GB and the host swapping; one thread busy throughout |
+| The candidate alone | `.so` in 629 s, rustc peak 3.4 GB |
+
+Through Talos itself (MEASURED 2026-09-25, `TALOS_LIVE_CHALLENGE=job_scheduling` with
+`tests/test_live.py::test_local_knapsack_job`, same machine, job memory limit 8 GiB): `prepare`
+from fresh volumes, clone and pruned warm-up included, 103 s; one job building
+ember_stromboli plus 4 nonces, 990 s, of which the nonces took 150 to 165 s each.
+
+The same build on C3's 16 GB CPU profile was killed on 2026-09-23 once rustc passed the
+limit. `talos/inside.py::stage_algorithm` therefore rewrites the crate's `mod.rs` to list
+the candidate alone, keeping the pinned file beside it as `mod.rs.talos-pristine`, and
+`unstage_algorithm` puts the pinned file back byte for byte. TIG's own CI builds an
+algorithm from its branch, whose `mod.rs` lists only that algorithm, so the pruned crate is
+the closer match to the mainnet build. The crate layout is part of every artifact id and
+baseline key (`inside.CRATE_LAYOUT`), so artifacts and baselines from before the pruning are
+re-measured once rather than compared against it.
 
 ### Local GPU support (unverified)
 

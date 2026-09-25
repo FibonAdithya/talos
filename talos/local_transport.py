@@ -18,6 +18,7 @@ from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LOCAL_APP, LOCAL_LOCK
 from talos.challenges import CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, dev_image
 from talos.executables import argv0
+from talos.inside import PRISTINE_MOD_RS, PRUNED_MARKER
 
 APP = LOCAL_APP
 WORK = "/work"
@@ -262,14 +263,31 @@ def clone_script() -> str:
             f"touch {APP}/{READY_MARKER}\n")
 
 
+def prune_lines(challenge: str) -> str:
+    """Bash that makes `$name` the challenge crate's only module for the build that follows and
+    puts the pinned mod.rs back when the script exits, however it exits. The same layout, marker
+    and pristine file as `inside.stage_algorithm`, so a warm-up and a job that die on each
+    other's leftovers still find the pinned file: the copy is skipped when the pristine file
+    exists or mod.rs already carries the marker."""
+    crate = f"tig-algorithms/src/{challenge}"
+    return (f"mod={crate}/mod.rs\n"
+            f"pristine={crate}/{PRISTINE_MOD_RS}\n"
+            f'[ -e "$pristine" ] || grep -qF "{PRUNED_MARKER}" "$mod" || cp "$mod" "$pristine"\n'
+            "trap 'if [ -e \"$pristine\" ]; then mv -f \"$pristine\" \"$mod\"; fi' EXIT\n"
+            f"printf '%s\\npub mod %s;\\n' \"{PRUNED_MARKER}\" \"$name\" > \"$mod\"\n")
+
+
 def warm_script(challenge: str) -> str:
-    """Builds the first algorithm the pinned monorepo ships for the challenge, so the registry
-    volume is populated with networking on, once, by code that is not LLM-authored."""
+    """Builds the first algorithm the pinned monorepo ships for the challenge, alone in its
+    crate, so the registry volume is populated with networking on, once, by code that is not
+    LLM-authored. Alone, because the crate's size sets the build cost: job_scheduling's full
+    crate ran past 2 h and 23 GB of rustc (MEASURED 2026-09-25, docs/compute-backends.md)."""
     return ("set -euo pipefail\n" + lock_lines()
             + f"cd {APP}\n"
             f"name=$(ls -d tig-algorithms/src/{challenge}/*/ | grep -v talos_cand | head -1 "
             "| xargs basename)\n"
-            "build_algorithm \"$name\"\n"
+            + prune_lines(challenge)
+            + "build_algorithm \"$name\"\n"
             f"touch {APP}/{WARM_MARKER}\n")
 
 

@@ -16,6 +16,14 @@ from collections.abc import Iterator
 from pathlib import Path
 
 ALGO_NAME = "talos_cand"
+# The challenge crate is compiled with the candidate as its only module (see stage_algorithm);
+# part of every artifact id and baseline key, so a .so or a baseline measured beside the
+# shipped algorithms is never mistaken for one measured in the pruned crate. Bump on any
+# change to what the crate contains at build time.
+CRATE_LAYOUT = "pruned-1"
+PRISTINE_MOD_RS = "mod.rs.talos-pristine"
+PRUNED_MARKER = ("// talos: crate pruned to the candidate; the pinned mod.rs is beside this "
+                  "file as " + PRISTINE_MOD_RS)
 _QUALITY_RE = re.compile(r"quality:\s*(-?\d+)")
 # Exit codes, from tig-runtime/src/main.rs at MONOREPO_REF.
 RUNTIME_ERROR_RC = 84  # compute_solution returned Err: the algorithm gave up / no solution
@@ -52,13 +60,27 @@ def stage_algorithm(monorepo: Path, challenge: str, files: dict[str, str], name:
         p = target / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8", newline="\n")
+    _prune_crate(root, name)
+
+
+def _prune_crate(root: Path, name: str) -> None:
+    """Make `name` the challenge crate's only module, keeping the pinned mod.rs beside it.
+
+    The build compiles every module the crate lists, on one codegen unit (build_so passes
+    `-C codegen-units=1`), so the crate's size sets the build cost whatever the candidate is:
+    job_scheduling's 14 shipped algorithms are 345k lines and the full crate ran past 2 h and
+    23 GB of rustc before it was stopped, against 629 s and 3.4 GB for the candidate alone
+    (MEASURED 2026-09-25). TIG's own CI builds an algorithm from its branch, whose mod.rs
+    lists only that algorithm, so the pruned crate is the closer match to mainnet, not the
+    further one. The pinned file is kept byte for byte so unstage can put it back; it is not
+    re-saved when mod.rs already carries the marker, because a job that died before
+    unstaging (the local backend's /app volume outlives it) leaves the pruned file in place."""
     mod_rs = root / "mod.rs"
-    line = f"pub mod {name};"
-    existing = mod_rs.read_text(encoding="utf-8")
-    if line not in existing.splitlines():
-        if not existing.endswith("\n"):
-            existing += "\n"
-        mod_rs.write_text(existing + line + "\n", encoding="utf-8", newline="\n")
+    pristine = root / PRISTINE_MOD_RS
+    current = mod_rs.read_bytes()
+    if not pristine.exists() and not current.startswith(PRUNED_MARKER.encode()):
+        pristine.write_bytes(current)
+    mod_rs.write_text(f"{PRUNED_MARKER}\npub mod {name};\n", encoding="utf-8", newline="\n")
 
 
 def unstage_algorithm(monorepo: Path, challenge: str, name: str) -> None:
@@ -66,6 +88,12 @@ def unstage_algorithm(monorepo: Path, challenge: str, name: str) -> None:
     root = _algo_root(monorepo, challenge)
     shutil.rmtree(root / name, ignore_errors=True)
     mod_rs = root / "mod.rs"
+    pristine = root / PRISTINE_MOD_RS
+    if pristine.exists():
+        mod_rs.write_bytes(pristine.read_bytes())
+        pristine.unlink()
+        return
+    # A crate that was never pruned (or whose pristine copy is gone): drop the line alone.
     line = f"pub mod {name};"
     kept = [ln for ln in mod_rs.read_text(encoding="utf-8").splitlines() if ln != line]
     mod_rs.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
@@ -203,12 +231,15 @@ def run_nonces(tasks: list[NonceTask], workers: int, run=subprocess.run,
 
 
 def content_hash(files: dict[str, str], monorepo_ref: str, dev_image_tag: str) -> str:
-    """Artifact cache key. The monorepo pin and the dev image tag are part of it: the same
-    sources built against a different monorepo are a different .so."""
+    """Artifact cache key. The monorepo pin, the dev image tag and the crate layout are part
+    of it: the same sources built against a different monorepo, or beside a different set of
+    modules, are a different .so."""
     h = hashlib.sha256()
     h.update(monorepo_ref.encode())
     h.update(b"\0")
     h.update(dev_image_tag.encode())
+    h.update(b"\0")
+    h.update(CRATE_LAYOUT.encode())
     h.update(b"\0")
     for k in sorted(files):
         h.update(k.encode())
