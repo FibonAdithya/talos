@@ -371,7 +371,7 @@ Before the job starts, Talos fetches the challenge's active tracks and fuel from
 draws the nonces, and prints a line such as:
 
 ```
-Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}; hyperparameters: 5/5 tracks from mainnet
+Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}, 8 nonces per track; hyperparameters: 5/5 tracks from mainnet
 ```
 
 The job id is the start time plus the challenge name.
@@ -455,13 +455,13 @@ Prompts for anything not given as a flag, unless `--yes` is passed.
 | `--budget-hours N` | Wall-clock cap in hours. |
 | `--budget-iterations N` | Iteration cap. |
 | `--budget-compute-usd N` | Estimated compute spend cap in USD. |
-| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track or hyperparameters. |
+| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track, hyperparameters or nonces. |
 | `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20 (not asked and not set on the `local` backend, where it is always zero). |
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
 providers, default 20; iterations for CLI providers, default 50), a wall-clock budget
 (default 4 hours), a compute budget (default $20), the mode (CLI providers only), the
-track, and the hyperparameters (`mainnet` or `none`).
+track, the hyperparameters (`mainnet` or `none`), and the nonces per track (default 8).
 
 Talos refuses to start, before spending anything, when: there is no API key for the
 provider; the model has no entry in the price table and the only budget is `--budget-usd`
