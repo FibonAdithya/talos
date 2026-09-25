@@ -171,8 +171,9 @@ step performed:
 3. Create the app volume.
 4. Clone the monorepo tarball at the pin into `/app` (marker `/app/.talos-ready`).
 5. Warm-up build: `build_algorithm` of the first algorithm the pinned monorepo ships for the
-   challenge, with networking on, so the registry and the dependency compile are populated by
-   code that is not LLM-authored (marker `/app/.talos-warm`).
+   challenge, alone in its crate (see [The crate is pruned to the candidate](#the-crate-is-pruned-to-the-candidate)),
+   with networking on, so the registry and the dependency compile are populated by code that
+   is not LLM-authored (marker `/app/.talos-warm`).
 6. For a GPU challenge, read the GPU name with `nvidia-smi` for the hardware class.
 
 Both volumes are shared by every job of the challenge on this machine, and the runner stages
@@ -214,16 +215,30 @@ so the transport stores the job's limit as a container label and kills the conta
 is exceeded, reporting `TIMED_OUT` exactly as C3 would. A stopped container is kept until the
 next deploy of the same run, because its artifacts are read from it; exited containers of
 earlier iterations are removed then. The local build allowance in the time limit is one hour
-(`talos/c3_jobdir.py::LOCAL_BUILD_ALLOWANCE_S`), against 20 minutes on C3, because the
-candidate build takes about 15 minutes on 16 cores and longer on fewer.
+(`talos/c3_jobdir.py::LOCAL_BUILD_ALLOWANCE_S`), against 20 minutes on C3, because a
+candidate build took about 15 minutes on 16 cores before the crate was pruned to the
+candidate (about 3 minutes since; see [Local timings](#local-timings)) and longer on fewer.
+The allowance is kept for the smaller machines.
 
 The hardware class is `local-<host>-cpu<N>-mem<M>` (or `local-<host>-gpu-<name>-cpu<N>-mem<M>`), so a local
 baseline never matches a Modal or C3 one, and a changed CPU or memory setting is a re-measure.
 
 ### Local timings
 
-MEASURED 2026-09-23 on a 16-core, 30 GB machine (`tests/test_live.py::test_local_knapsack_job`,
-knapsack, two training and two held-out nonces):
+MEASURED 2026-09-25 on a 16-core, 30 GB machine (`tests/test_live.py::test_local_knapsack_job`,
+knapsack, two training and two held-out nonces), with the crate pruned to the candidate
+(see [below](#the-crate-is-pruned-to-the-candidate)):
+
+| Step | Time |
+|---|---|
+| Live run, fresh volumes: `prepare` (image present; create volumes, clone, warm-up build) | 90 s (`prepare_s: 90`) |
+| Same run: one job, build plus 4 nonces (1.3 to 1.4 s per nonce) | 2m57s (`job_s: 177`; `1 passed` in 4m33s) |
+
+The same test for job_scheduling is in the pruning section below: `prepare_s: 103`,
+`job_s: 990`, with nonces of 150 to 165 s each.
+
+Before the crate was pruned, MEASURED 2026-09-23 on the same machine, same test, when the
+build compiled the 13 shipped knapsack algorithms beside the candidate:
 
 | Step | Time |
 |---|---|
@@ -234,9 +249,42 @@ knapsack, two training and two held-out nonces):
 | Live run 2: one job, build plus 4 nonces (1.3 to 1.7 s per nonce) | 14m4s (`job_s: 844`; `1 passed` in 14m7s) |
 | Live run 3, the shipped copy-out transport: prepare with markers present / one job | 1 s / 14m59s (`job_s: 899`; `1 passed` in 15m3s) |
 
-The job's build is no faster than the warm-up build: the instrumentation pass, not the Rust
-compile, is the cost. Caching the instrumented objects per IR file would remove it and is
-out of scope here.
+Those 2026-09-23 runs showed the job's build no faster than the warm-up build, which was
+read at the time as the instrumentation pass being the cost. The 2026-09-25 runs disprove
+that: with the crate pruned to the candidate the same job fell from 844 s to 177 s, so the
+compile of the shipped algorithms was most of it. The instrumentation pass still runs over
+every dependency's IR on every build; caching the instrumented objects per IR file would
+remove that and is out of scope here.
+
+### The crate is pruned to the candidate
+
+`build_algorithm` compiles every module the challenge crate's `mod.rs` lists, on one codegen
+unit (`build_so` passes `-C codegen-units=1 -C opt-level=3`), so the crate's size sets the
+build time and memory whatever the candidate is, and core count does not help. The knapsack
+crate at the pin is 13 algorithms and 2.1 MB of Rust. The job_scheduling crate is 13
+algorithms and 15.0 MB, four of them 2.4 to 3.2 MB each.
+
+MEASURED 2026-09-25 on the 16-core, 30 GB machine, `build_algorithm ember_stromboli` in the
+job_scheduling dev image with no memory cap:
+
+| Crate at build time | Result |
+|---|---|
+| The pinned crate plus the candidate (14 algorithms, 345k lines) | stopped after 133 min still inside LLVM optimisation, rustc at 23.4 GB and the host swapping; one thread busy throughout |
+| The candidate alone | `.so` in 629 s, rustc peak 3.4 GB |
+
+Through Talos itself (MEASURED 2026-09-25, `TALOS_LIVE_CHALLENGE=job_scheduling` with
+`tests/test_live.py::test_local_knapsack_job`, same machine, job memory limit 8 GiB): `prepare`
+from fresh volumes, clone and pruned warm-up included, 103 s; one job building
+ember_stromboli plus 4 nonces, 990 s, of which the nonces took 150 to 165 s each.
+
+The same build on C3's 16 GB CPU profile was killed on 2026-09-23 once rustc passed the
+limit. `talos/inside.py::stage_algorithm` therefore rewrites the crate's `mod.rs` to list
+the candidate alone, keeping the pinned file beside it as `mod.rs.talos-pristine`, and
+`unstage_algorithm` puts the pinned file back byte for byte. TIG's own CI builds an
+algorithm from its branch, whose `mod.rs` lists only that algorithm, so the pruned crate is
+the closer match to the mainnet build. The crate layout is part of every artifact id and
+baseline key (`inside.CRATE_LAYOUT`), so artifacts and baselines from before the pruning are
+re-measured once rather than compared against it.
 
 ### Local GPU support (unverified)
 

@@ -1,4 +1,7 @@
 import json
+import os
+import shutil
+import subprocess
 import types
 from datetime import datetime, timedelta, timezone
 
@@ -394,3 +397,68 @@ def test_prepare_scripts_take_the_app_volume_lock():
     for script in (clone_script(), warm_script("knapsack")):
         assert "flock" in script and f"{APP}/.talos-lock" in script, script
         assert script.index("flock") < script.index("touch")
+
+
+
+def test_warm_script_prunes_the_crate_before_building():
+    # mutation: a warm-up that builds the shipped algorithm in the full crate hits the same
+    # 2 h, 23 GB wall on job_scheduling as an unpruned job (MEASURED 2026-09-25), before the
+    # first job can run
+    from talos.inside import PRISTINE_MOD_RS, PRUNED_MARKER
+    from talos.local_transport import prune_lines
+    script = warm_script("job_scheduling")
+    assert prune_lines("job_scheduling") in script
+    assert script.index(PRUNED_MARKER) < script.index("build_algorithm")
+    assert "tig-algorithms/src/job_scheduling/" + PRISTINE_MOD_RS in script
+
+
+# The prune lines run in the Linux container, never on the host. Windows runners find a
+# `bash` (the WSL launcher, or Git Bash, which cannot follow the stub's Windows path) that
+# exits 1 with nothing on stderr.
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None,
+                    reason="the prune lines are the container's bash")
+def test_prune_lines_build_only_the_named_module_then_restore_the_pinned_mod_rs(tmp_path):
+    # Runs the bash for real, with build_algorithm stubbed to record what it was handed.
+    # mutation: a trap that does not put the pinned file back leaves the crate pruned for the
+    # jobs, whose stage then saves the pruned file as pristine
+    from talos.inside import PRISTINE_MOD_RS
+    from talos.local_transport import prune_lines
+    pinned = "// c003_a001\npub mod knapsplatt;\npub use knapsplatt as c003_a001;\npub mod other;\n"
+    crate = tmp_path / "tig-algorithms" / "src" / "knapsack"
+    crate.mkdir(parents=True)
+    (crate / "mod.rs").write_text(pinned)
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    seen = tmp_path / "seen.rs"
+    (stub / "build_algorithm").write_text(f"#!/bin/bash\ncp tig-algorithms/src/knapsack/mod.rs {seen}\n")
+    (stub / "build_algorithm").chmod(0o755)
+    script = ("set -euo pipefail\nname=knapsplatt\n" + prune_lines("knapsack")
+              + 'build_algorithm "$name"\n')
+    env = dict(os.environ, PATH=f"{stub}{os.pathsep}{os.environ['PATH']}")
+    r = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    items = [ln for ln in seen.read_text().splitlines() if ln and not ln.startswith("//")]
+    assert items == ["pub mod knapsplatt;"]
+    assert (crate / "mod.rs").read_text() == pinned
+    assert not (crate / PRISTINE_MOD_RS).exists()
+
+
+# The prune lines run in the Linux container, never on the host. Windows runners find a
+# `bash` (the WSL launcher, or Git Bash, which cannot follow the stub's Windows path) that
+# exits 1 with nothing on stderr.
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None,
+                    reason="the prune lines are the container's bash")
+def test_prune_lines_keep_an_existing_pristine_copy(tmp_path):
+    # A job that died before unstaging leaves the pruned mod.rs and the pristine copy behind.
+    # mutation: an unconditional cp captures the pruned file, and the restore installs it
+    from talos.inside import PRISTINE_MOD_RS, PRUNED_MARKER
+    from talos.local_transport import prune_lines
+    pinned = "// c003_a001\npub mod knapsplatt;\n"
+    crate = tmp_path / "tig-algorithms" / "src" / "knapsack"
+    crate.mkdir(parents=True)
+    (crate / "mod.rs").write_text(f"{PRUNED_MARKER}\npub mod talos_cand;\n")
+    (crate / PRISTINE_MOD_RS).write_text(pinned)
+    script = "set -euo pipefail\nname=knapsplatt\n" + prune_lines("knapsack") + "true\n"
+    r = subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert (crate / "mod.rs").read_text() == pinned

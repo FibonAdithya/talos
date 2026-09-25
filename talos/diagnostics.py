@@ -1,7 +1,9 @@
 """Read rustc's build output for what concerns the candidate. The monorepo build compiles every
-algorithm in the challenge crate, so the output is dominated by warnings from algorithms Talos
-does not touch; a fix prompt fed that spam has edited those algorithms' paths. Pure functions,
-no I/O; copied into the C3 job directory alongside inside.py."""
+module the challenge crate lists; before staging pruned the crate to the candidate the output
+was dominated by warnings from algorithms Talos does not touch, and a fix prompt fed that spam
+has edited those algorithms' paths. The filter stays: tig-challenges and the standard library
+are still in the build. Pure functions, no I/O; copied into the C3 job directory alongside
+inside.py."""
 from __future__ import annotations
 
 import re

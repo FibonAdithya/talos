@@ -6,6 +6,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from talos import inside
 from talos import mainnet as _mainnet
 from talos.bench import EvalRequest
 from talos.challenges import MONOREPO_REF
@@ -32,7 +33,7 @@ def cache_key(challenge: str, monorepo_ref: str, name: str, training: list[Nonce
               hyperparameters: dict[str, dict | None] | None = None) -> str:
     h = hashlib.sha256()
     payload = {"challenge": challenge, "ref": monorepo_ref, "name": name, "fuel": fuel,
-               "hw": hardware_class,
+               "hw": hardware_class, "layout": inside.CRATE_LAYOUT,
                "training": [(n.track, n.rand_hash, n.start, n.count) for n in training],
                "holdout": [(n.track, n.rand_hash, n.start, n.count) for n in holdout]}
     effective = effective_hyperparameters(hyperparameters)

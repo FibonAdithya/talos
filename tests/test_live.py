@@ -74,9 +74,10 @@ def test_c3_knapsack_job(tmp_path):
 def test_local_knapsack_job(tmp_path):
     """Manual: one real local Docker job. Run:
     TALOS_LIVE_BACKEND=local .venv/bin/pytest -m live tests/test_live.py -k local -s
-    Needs Docker. Costs time, not money: the first run pulls a 13 GB image and does one warm-up
-    build (MEASURED 2026-09-23: 12 minutes on 16 cores); the job is one candidate build (about
-    as long: the image re-instruments every dependency on each build) plus 4 nonces."""
+    Needs Docker. Costs time, not money: the first run pulls a 13 GB image, clones the pin and
+    does one warm-up build (MEASURED 2026-09-25: 90 s on 16 cores, image already pulled); the
+    job is one candidate build plus 4 nonces (MEASURED 2026-09-25: 177 s for knapsack, 990 s
+    for job_scheduling, whose nonces take 150 to 165 s each)."""
     if os.environ.get("TALOS_LIVE_BACKEND") != "local":
         pytest.skip("set TALOS_LIVE_BACKEND=local")
     import time

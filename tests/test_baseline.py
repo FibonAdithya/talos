@@ -136,11 +136,13 @@ def test_baseline_forces_the_holdout_run(tmp_path):
     assert fb.calls[0].baseline_training is None and len(rec.holdout) == 2
 
 
-def test_cache_key_without_hyperparameters_is_unchanged_from_before_they_existed():
-    # Value computed at 267f6fc with the pre-change cache_key. Existing cached baselines stay hits.
+def test_cache_key_without_hyperparameters_omits_them_from_the_payload():
+    # Value computed with CRATE_LAYOUT "pruned-1" in the payload. Baselines cached before the
+    # crate layout entered the key (776fde051d7068800fc50361 for these inputs) are deliberate
+    # misses: they were measured beside every shipped algorithm.
     # mutation: always putting "hyperparameters": None in the hashed payload changes this key
     key = cache_key("knapsack", "ref", "algo", TR, HO, 5, "cpu4-mem8192")
-    assert key == "776fde051d7068800fc50361"
+    assert key == "10f760b979fa855a984c6498"
 
 
 def test_cache_key_follows_what_the_hyperparameters_change_at_runtime():
@@ -241,3 +243,13 @@ def test_local_workers_use_every_cpu_but_one_gpu():
     # mutation: 8 workers on one GPU serialise on the device and time the job out
     assert local_workers(CHALLENGES["knapsack"], 8) == 8
     assert local_workers(CHALLENGES["hypergraph"], 8) == 1
+
+
+def test_cache_key_covers_the_crate_layout(monkeypatch):
+    # A baseline measured with the candidate built beside every shipped algorithm is not the
+    # baseline of the pruned crate. mutation: leaving the layout out of the key keeps every
+    # pre-pruning baseline a cache hit
+    from talos import inside
+    before = cache_key("knapsack", "ref", "algo", TR, HO, 5, "cpu4-mem8192")
+    monkeypatch.setattr(inside, "CRATE_LAYOUT", "other-layout")
+    assert cache_key("knapsack", "ref", "algo", TR, HO, 5, "cpu4-mem8192") != before

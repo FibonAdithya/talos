@@ -306,3 +306,67 @@ def test_artifact_paths_follow_the_container_architecture(tmp_path):
     so, _ = inside.artifact_paths(tmp_path, "knapsack", "talos_cand", machine="x86_64")
     assert so == lib / "amd64" / "talos_cand.so"
     assert ptx is None
+
+
+# The pinned mod.rs of a challenge crate: one `pub mod` and one algorithm-id alias per shipped
+# algorithm. Talos builds the candidate alone, the way TIG's own CI builds an algorithm from
+# its branch, whose mod.rs lists only that algorithm.
+PINNED_MOD_RS = ("// c003_a001\npub mod knapsplatt;\npub use knapsplatt as c003_a001;\n"
+                 "// c003_a002\npub mod knap_supreme;\npub use knap_supreme as c003_a002;\n")
+
+
+def make_pinned_monorepo(tmp_path: Path) -> Path:
+    mono = make_monorepo(tmp_path)
+    (mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs").write_text(PINNED_MOD_RS)
+    return mono
+
+
+def crate_items(mono: Path) -> list[str]:
+    text = (mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs").read_text()
+    return [ln for ln in text.splitlines() if ln and not ln.startswith("//")]
+
+
+def test_stage_prunes_the_crate_to_the_candidate(tmp_path):
+    # mutation: a stage that appends its line keeps every shipped algorithm in the build; for
+    # job_scheduling that is 14 algorithms, 345k lines, over 2 h and 23 GB of rustc on one
+    # codegen unit (MEASURED 2026-09-25), against 629 s and 3.4 GB for the candidate alone
+    mono = make_pinned_monorepo(tmp_path)
+    inside.stage_algorithm(mono, "knapsack", {"mod.rs": "fn x(){}"}, "talos_cand")
+    assert crate_items(mono) == ["pub mod talos_cand;"]
+    pristine = mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs.talos-pristine"
+    assert pristine.read_text() == PINNED_MOD_RS
+
+
+def test_unstage_restores_the_pinned_mod_rs_byte_for_byte(tmp_path):
+    # mutation: an unstage that only removes its own line leaves the crate pruned for good,
+    # aliases included, so the warm-up and every later job see a checkout that is not the pin
+    mono = make_pinned_monorepo(tmp_path)
+    inside.stage_algorithm(mono, "knapsack", {"mod.rs": "fn x(){}"}, "talos_cand")
+    inside.unstage_algorithm(mono, "knapsack", "talos_cand")
+    mod_rs = mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs"
+    assert mod_rs.read_text() == PINNED_MOD_RS
+    assert not (mod_rs.parent / "mod.rs.talos-pristine").exists()
+
+
+def test_restage_after_a_crashed_job_keeps_the_pristine_copy(tmp_path):
+    # The local backend's /app volume outlives a job that died before unstaging.
+    # mutation: saving the pristine copy unconditionally captures the pruned file, and the next
+    # unstage "restores" a crate with the shipped algorithms gone
+    mono = make_pinned_monorepo(tmp_path)
+    inside.stage_algorithm(mono, "knapsack", {"mod.rs": "fn x(){}"}, "talos_cand")
+    inside.stage_algorithm(mono, "knapsack", {"mod.rs": "fn y(){}"}, "talos_cand")
+    pristine = mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs.talos-pristine"
+    assert pristine.read_text() == PINNED_MOD_RS
+    assert crate_items(mono) == ["pub mod talos_cand;"]
+    assert (mono / "tig-algorithms" / "src" / "knapsack" / "talos_cand" / "mod.rs").read_text() == "fn y(){}"
+    inside.unstage_algorithm(mono, "knapsack", "talos_cand")
+    assert (mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs").read_text() == PINNED_MOD_RS
+
+
+def test_content_hash_covers_the_crate_layout(monkeypatch):
+    # A .so built in the pruned crate is not the .so built beside 13 other algorithms.
+    # mutation: leaving CRATE_LAYOUT out of the hash keeps every pre-pruning artifact a cache hit
+    files = {"mod.rs": "fn x(){}"}
+    before = inside.content_hash(files, "ref", "tag")
+    monkeypatch.setattr(inside, "CRATE_LAYOUT", "other-layout")
+    assert inside.content_hash(files, "ref", "tag") != before
