@@ -412,7 +412,11 @@ def test_warm_script_prunes_the_crate_before_building():
     assert "tig-algorithms/src/job_scheduling/" + PRISTINE_MOD_RS in script
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="the prune lines are bash")
+# The prune lines run in the Linux container, never on the host. Windows runners find a
+# `bash` (the WSL launcher, or Git Bash, which cannot follow the stub's Windows path) that
+# exits 1 with nothing on stderr.
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None,
+                    reason="the prune lines are the container's bash")
 def test_prune_lines_build_only_the_named_module_then_restore_the_pinned_mod_rs(tmp_path):
     # Runs the bash for real, with build_algorithm stubbed to record what it was handed.
     # mutation: a trap that does not put the pinned file back leaves the crate pruned for the
@@ -439,7 +443,11 @@ def test_prune_lines_build_only_the_named_module_then_restore_the_pinned_mod_rs(
     assert not (crate / PRISTINE_MOD_RS).exists()
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="the prune lines are bash")
+# The prune lines run in the Linux container, never on the host. Windows runners find a
+# `bash` (the WSL launcher, or Git Bash, which cannot follow the stub's Windows path) that
+# exits 1 with nothing on stderr.
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None,
+                    reason="the prune lines are the container's bash")
 def test_prune_lines_keep_an_existing_pristine_copy(tmp_path):
     # A job that died before unstaging leaves the pruned mod.rs and the pristine copy behind.
     # mutation: an unconditional cp captures the pruned file, and the restore installs it
