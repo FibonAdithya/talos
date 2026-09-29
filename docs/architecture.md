@@ -71,8 +71,8 @@ and only an improving one is scored on the metered runtime.
 
 **Calibration.** A native run has no fuel limit, so a per-track time budget stands in for it.
 `talos/loop.py::Loop.calibrate` finds one after the baseline, on every start and resume. The
-record is keyed by challenge, hardware class, both pins, the baseline's code and its
-hyperparameters (`talos/calibration.py::calibration_key`); nonce sets are not in the key, so
+record is keyed by challenge, hardware class, both pins, the baseline's code, the native
+runner's digest and the baseline's hyperparameters (`talos/calibration.py::calibration_key`); nonce sets are not in the key, so
 one record serves later jobs on the same baseline and is cached in `~/.talos/calibration/`.
 With no record, Talos scores the baseline's training nonces natively with no budget and
 reads the metered fuel from the baseline's stored rows (or, for a baseline cached before fuel

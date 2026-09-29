@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from statistics import median
 
-from talos import inside
+from talos import inside, native_runner
 from talos.baseline import effective_hyperparameters
 from talos.challenges import DEV_IMAGE_TAG, MONOREPO_REF
 from talos.state import _atomic_write
@@ -28,12 +28,14 @@ BUDGET_FLOOR_US = 1_000_000
 
 def calibration_key(challenge: str, hardware_class: str, baseline_files: dict[str, str],
                     hyperparameters: dict | None) -> str:
-    """The baseline enters by its metered artifact hash, which covers its files and both pins.
+    """The baseline enters by its metered artifact hash, which covers its files and both pins;
+    the native runner by its digest, since a new template or build profile times differently.
     The nonce sets do not enter: a ratio of time to fuel carries over between nonce draws,
     and the rand hash must never reach a file outside the job."""
     payload = {"challenge": challenge, "hw": hardware_class, "ref": MONOREPO_REF,
                "image": DEV_IMAGE_TAG,
                "baseline": inside.content_hash(baseline_files, MONOREPO_REF, DEV_IMAGE_TAG),
+               "runner": native_runner.runner_digest(),
                "hp": effective_hyperparameters(hyperparameters)}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:24]
 

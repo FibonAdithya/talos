@@ -118,9 +118,8 @@ def build(monorepo: Path, challenge: str, name: str, run=subprocess.run) -> tupl
     return r.returncode == 0, out[-BUILD_OUTPUT_CAP:]
 
 
-# Profile overrides for the native build: the workspace's release profile (lto = true,
-# codegen-units = 1) is what makes TIG's build slow, and the native binary is never submitted.
-NATIVE_ENV = {"CARGO_PROFILE_RELEASE_LTO": "false", "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"}
+# Defined beside the runner templates, since it is part of native_runner.runner_digest.
+NATIVE_ENV = native_runner.NATIVE_ENV
 NATIVE_PTX_SUFFIX = ".native.ptx"
 
 
@@ -362,7 +361,9 @@ def content_hash(files: dict[str, str], monorepo_ref: str, dev_image_tag: str,
     """Artifact cache key. The monorepo pin, the dev image tag and the crate layout are part
     of it: the same sources built against a different monorepo, or beside a different set of
     modules, are a different .so. A native build is a different artifact from a metered one;
-    the mode enters the hash only when it is not "metered", so every metered id is unchanged."""
+    the mode enters the hash only when it is not "metered", so every metered id is unchanged.
+    A native id also carries the runner digest: a changed template, toolchain or build
+    profile is a different binary."""
     h = hashlib.sha256()
     h.update(monorepo_ref.encode())
     h.update(b"\0")
@@ -370,7 +371,10 @@ def content_hash(files: dict[str, str], monorepo_ref: str, dev_image_tag: str,
     h.update(b"\0")
     h.update(CRATE_LAYOUT.encode())
     h.update(b"\0")
-    if mode != "metered":
+    if mode == "native":
+        h.update(f"mode=native:{native_runner.runner_digest()}".encode())
+        h.update(b"\0")
+    elif mode != "metered":
         h.update(f"mode={mode}".encode())
         h.update(b"\0")
     for k in sorted(files):

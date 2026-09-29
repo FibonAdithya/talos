@@ -83,6 +83,16 @@ def test_the_key_depends_on_the_pins(monkeypatch):
     assert calibration.calibration_key("knapsack", "hw", {"mod.rs": "a"}, None) != base
 
 
+def test_the_key_changes_with_the_native_runner(monkeypatch):
+    # The ratio is native solve time over metered fuel; a new runner (template, toolchain,
+    # build profile) times differently.
+    # mutation: leaving the runner digest out of the payload reuses a stale ratio
+    from talos import native_runner
+    base = calibration.calibration_key("knapsack", "hw", {"mod.rs": "a"}, None)
+    monkeypatch.setattr(native_runner, "_CPU_RUN", native_runner._CPU_RUN + " ")
+    assert calibration.calibration_key("knapsack", "hw", {"mod.rs": "a"}, None) != base
+
+
 def test_save_then_load_round_trips(tmp_path):
     rec = calibration.new_record({"a": 15.0})
     calibration.save(tmp_path, "knapsack", "k1", rec)

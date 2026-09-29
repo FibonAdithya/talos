@@ -94,7 +94,8 @@ progress.
    only after `talos/loop.py::Loop._validate_and_finish` scores it on TIG's metered runtime,
    on the same nonces, fuel and hardware as the baseline, and held-out confirmation runs only
    on those metered results. The calibration key (`talos/calibration.py::calibration_key`)
-   carries the hardware class, both pins, the baseline's code and its hyperparameters.
+   carries the hardware class, both pins, the baseline's code, the native runner's digest
+   (`talos/native_runner.py::runner_digest`) and the baseline's hyperparameters.
 2. **The job's `rand_hash` lives in `job.json` and nowhere the agent can
    read.** It seeds every nonce; an LLM that sees it can tune to the exact
    nonces it is scored on. It is stripped from the spec the prompts see
@@ -117,7 +118,9 @@ progress.
    is unchanged from before the map existed.
    The calibration key carries both pins too (`talos/calibration.py::calibration_key`).
    The native runner's toolchain is `talos/native_runner.py::TOOLCHAIN`, the one `build_so`
-   uses at the pin, and must move with `MONOREPO_REF`.
+   uses at the pin, and must move with `MONOREPO_REF`. A native artifact id also carries
+   `talos/native_runner.py::runner_digest` (templates, toolchain, build profile), so a
+   runner change never reuses a binary cached on the Modal volume.
 4. **An edit outside the algorithm files fails the whole iteration; its
    in-scope blocks are never applied either.** `talos/edits.py::apply_edit_response`
    reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration

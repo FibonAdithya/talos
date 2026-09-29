@@ -389,6 +389,29 @@ def test_metered_content_hash_is_unchanged_and_native_differs():
     assert inside.content_hash(files, "r", "t", "native") != h.hexdigest()[:32]
 
 
+@pytest.mark.parametrize("attr", ["CARGO_TOML", "_COMMON", "_CPU_RUN", "_GPU_RUN", "_CUDARC",
+                                  "TOOLCHAIN"])
+def test_native_content_hash_covers_the_runner_and_metered_does_not(monkeypatch, attr):
+    # The Modal volume outlives a deploy and _compile_impl serves any artifact it finds, so a
+    # runner change has to change the native id.
+    # mutation: hashing only `mode=native` keeps serving a binary built from the old runner
+    from talos import native_runner
+    files = {"mod.rs": "fn x(){}"}
+    native, metered = (inside.content_hash(files, "r", "t", "native"),
+                       inside.content_hash(files, "r", "t"))
+    monkeypatch.setattr(native_runner, attr, getattr(native_runner, attr) + " ")
+    assert inside.content_hash(files, "r", "t", "native") != native
+    assert inside.content_hash(files, "r", "t") == metered
+
+
+def test_native_content_hash_covers_the_native_build_env(monkeypatch):
+    # mutation: a profile override change (lto, codegen-units) keeps the old binary
+    files = {"mod.rs": "fn x(){}"}
+    native = inside.content_hash(files, "r", "t", "native")
+    monkeypatch.setitem(inside.NATIVE_ENV, "CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1")
+    assert inside.content_hash(files, "r", "t", "native") != native
+
+
 def test_run_nonce_records_the_fuel_tig_runtime_wrote(tmp_path):
     def run(cmd, **kw):
         if cmd[0] == "tig-runtime":

@@ -10,11 +10,15 @@ solution written when the algorithm saved none. Two deliberate differences: no f
 rather than tig-runtime's fuel-check stream, which synchronises after every kernel launch."""
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 PACKAGE = "talos-native"
 # The toolchain build_so uses at MONOREPO_REF, so native and metered builds share rustc/LLVM.
 TOOLCHAIN = "+nightly-2025-02-10"
+# Profile overrides for the native build: the workspace's release profile (lto = true,
+# codegen-units = 1) is what makes TIG's build slow, and the native binary is never submitted.
+NATIVE_ENV = {"CARGO_PROFILE_RELEASE_LTO": "false", "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"}
 
 _CUDARC = ('cudarc = { git = "https://github.com/tig-foundation/cudarc.git", '
            'branch = "runtime-fuel/cudnn-cublas", features = '
@@ -206,6 +210,20 @@ fn run(args: Args) -> Result<()> {
     result
 }
 """
+
+
+def runner_digest() -> str:
+    """Everything that shapes the native binary besides the algorithm and the pins: the
+    templates, the toolchain and the build profile. Part of the native artifact id and the
+    calibration key, because the Modal volume keeps a built binary across deploys and would
+    otherwise keep serving one built from an older runner. Computed on each call, not once
+    at import, so a test that patches a template sees the new digest."""
+    h = hashlib.sha256()
+    for part in (CARGO_TOML, _COMMON, _CPU_RUN, _GPU_RUN, _CUDARC, TOOLCHAIN,
+                 *(f"{k}={v}" for k, v in sorted(NATIVE_ENV.items()))):
+        h.update(part.encode())
+        h.update(b"\0")
+    return h.hexdigest()[:12]
 
 
 def _fill(text: str, challenge: str, algorithm: str) -> str:
