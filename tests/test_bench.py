@@ -629,3 +629,39 @@ def test_a_gpu_call_before_select_hardware_is_refused_loudly(monkeypatch):
     with pytest.raises(ValueError):  # mutation: defaulting to the first GPU hides the bug
         ModalBench().evaluate(gpu_req())
     assert lookups == []
+
+
+def test_metered_modal_calls_are_unchanged_and_native_ones_add_mode(monkeypatch):
+    remotes, starmaps = [], []
+
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def remote(self, *args, **kwargs):
+            remotes.append((args, kwargs))
+            return {"ok": True, "artifact_id": "art", "output": "ok"}
+
+        def starmap(self, args):
+            starmaps.append(list(args))
+            return [{"rows": [{"track": t["track"], "nonce": t["nonce"], "ok": True,
+                               "quality": 100, "runtime_ms": 1, "error": None}
+                              for t in a[1]], "seconds": 1.0} for a in args]
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    b = ModalBench()
+    b.evaluate(req(holdout=[]))
+    # mutation: always passing mode= breaks every metered job against an app deployed before
+    # this change, which does not take the argument
+    assert remotes[0] == (({"mod.rs": "x"},), {})
+    assert all(len(a) == 2 for a in starmaps[0])
+    b.evaluate(EvalRequest(challenge="knapsack", files={"mod.rs": "x"}, training=TR,
+                           holdout=[], fuel=1, baseline_training=None, rule=BeatRule(),
+                           mode="native", fuel_budgets_us={"t": 900}))
+    assert remotes[1] == (({"mod.rs": "x"},), {"mode": "native"})
+    assert all(len(a) == 3 and a[2] == "native" for a in starmaps[1])
+    # mutation: the budget left off the task runs every native nonce unbounded
+    assert {t["budget_us"] for a in starmaps[1] for t in a[1]} == {900}

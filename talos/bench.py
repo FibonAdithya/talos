@@ -250,16 +250,20 @@ class ModalBench:
                 self._sleep(delay)
                 delay = min(delay * 2, 60)
 
-    def _compile(self, challenge: str, files: dict[str, str]) -> CompileResult:
+    def _compile(self, challenge: str, files: dict[str, str],
+                 mode: str = "metered") -> CompileResult:
         t0 = self._clock()
         name = self._name("compile", challenge)  # outside the retry: a missing GPU is a bug
-        out = self._with_retry(lambda: self._fn(name).remote(files))
+        # A metered call sends no mode, so an app deployed before native scoring still accepts it.
+        kw = {} if mode == "metered" else {"mode": mode}
+        out = self._with_retry(lambda: self._fn(name).remote(files, **kw))
         self._cost += _seconds_cost(challenge, self._clock() - t0, self.gpu)
         return CompileResult(ok=out["ok"], artifact_id=out.get("artifact_id"), output=out["output"])
 
     def _score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
               fuel: int, timeouts: dict[str, int] | None,
-              hyperparameters: dict[str, dict | None] | None) -> list[NonceResult]:
+              hyperparameters: dict[str, dict | None] | None, mode: str = "metered",
+              budgets: dict[str, int] | None = None) -> list[NonceResult]:
         """One `score_batch` call per `modal_workers` nonces, across tracks: a container scores
         its batch on every core at once, and a batch never holds more nonces than the
         container has workers, so its wall time is one nonce's, not a queue's."""
@@ -267,12 +271,17 @@ class ModalBench:
                   "timeout_s": timeout_for(timeouts, ns.track),
                   "hyperparameters": hyperparameters_for(hyperparameters, ns.track)}
                  for ns in nonce_sets for n in ns.nonces()]
+        native = mode != "metered"
+        if native:
+            for t in tasks:
+                t["budget_us"] = (budgets or {}).get(t["track"])
         if not tasks:
             # A holdout count of 0 still yields one NonceSet per track, each with no nonces.
             # modal 1.5.5 never returns from starmap([]), so the client would hang here.
             return []
         size = modal_workers(CHALLENGES[challenge])
-        args = [(artifact_id, tasks[i:i + size]) for i in range(0, len(tasks), size)]
+        tail = (mode,) if native else ()
+        args = [(artifact_id, tasks[i:i + size], *tail) for i in range(0, len(tasks), size)]
         name = self._name("score_batch", challenge)
         batches = self._with_retry(lambda: list(self._fn(name).starmap(args)))
         # The container's wall seconds are what Modal bills: verifier time and the batch's
@@ -281,19 +290,21 @@ class ModalBench:
         return [NonceResult.from_dict(r) for b in batches for r in b["rows"]]
 
     def evaluate(self, request: EvalRequest) -> EvalResult:
-        c = self._compile(request.challenge, request.files)
+        c = self._compile(request.challenge, request.files, request.mode)
         if not c.ok:
             return EvalResult(c, [], None, "not_compiled")
         if dead_code(request, c.output):
             return EvalResult(c, [], None, "dead_code")
         tr = (self._score(request.challenge, c.artifact_id, request.training, request.fuel,
-                          request.timeouts, request.hyperparameters)
+                          request.timeouts, request.hyperparameters, request.mode,
+                          request.fuel_budgets_us)
               if request.training else [])
         go, reason = holdout_decision(request.baseline_training, tr, request.rule)
         ho = None
         if go:
             ho = (self._score(request.challenge, c.artifact_id, request.holdout, request.fuel,
-                              request.timeouts, request.hyperparameters)
+                              request.timeouts, request.hyperparameters, request.mode,
+                              request.fuel_budgets_us)
                   if request.holdout else [])
         return EvalResult(c, tr, ho, reason)
 

@@ -2,6 +2,8 @@
 nothing. These tests exercise the pure helpers around the Modal objects."""
 import types
 
+import pytest
+
 from modal_app import talos_bench
 
 
@@ -106,7 +108,7 @@ def test_score_batch_runs_the_tasks_through_a_pool_and_returns_them_in_nonce_ord
     so = tmp_path / "artifacts" / "knapsack" / "art1" / "algo.so"
     # mutation: dropping a tuple field runs the nonce with the wrong fuel, timeout or map
     assert {t[3]: t for t in seen}[2] == ("c003", "t", "ab" * 32, 2, str(so), 5, 60, None,
-                                          str(tmp_path / "mono"), {"x": 2})
+                                          str(tmp_path / "mono"), {"x": 2}, "metered", None)
 
 
 def test_score_batch_caps_each_timeout_at_the_flat_nonce_timeout(monkeypatch, tmp_path):
@@ -214,3 +216,51 @@ def test_register_deploys_one_function_set_per_gpu_and_a_probe_per_gpu():
         assert fn() == gpu
     expected = (2 * len(cpu_names) + 2 * len(gpu_names) * len(MODAL_GPUS) + len(MODAL_GPUS))
     assert len(names) == expected
+
+
+def test_native_compile_stores_the_runner_under_its_own_hash(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+
+    def build_native(mono, name, algo, run=None):
+        binary, _ = talos_bench.inside.native_artifact_paths(mono, name, algo)
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(b"\x7fELF")
+        return True, "Compiling talos-native"
+    monkeypatch.setattr(talos_bench.inside, "build_native", build_native)
+    monkeypatch.setattr(talos_bench.inside, "build",
+                        lambda *a, **k: pytest.fail("metered build in native mode"))
+    out = talos_bench._compile_impl("knapsack", {"mod.rs": "fn x(){}"}, mode="native")
+    assert out["ok"] and out["artifact_id"] == talos_bench.content_hash({"mod.rs": "fn x(){}"},
+                                                                        mode="native")
+    # mutation: storing the runner under the metered id serves it to a metered score call
+    assert out["artifact_id"] != talos_bench.content_hash({"mod.rs": "fn x(){}"})
+    dest = tmp_path / "artifacts" / "knapsack" / out["artifact_id"]
+    assert (dest / "talos-native").exists() and not (dest / "algo.so").exists()
+    again = talos_bench._compile_impl("knapsack", {"mod.rs": "fn x(){}"}, mode="native")
+    assert again["output"] == "cached"
+
+
+def test_native_score_batch_runs_the_runner_with_each_tasks_budget(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    art = tmp_path / "artifacts" / "knapsack" / "nat1"
+    art.mkdir(parents=True)
+    (art / "talos-native").write_bytes(b"\x7fELF")
+    seen = []
+    monkeypatch.setattr(talos_bench.inside, "run_task", lambda t, run=None: seen.append(t) or {
+        "track": t[1], "nonce": t[3], "ok": True, "quality": 1, "runtime_ms": 1, "error": None})
+    task = {**_batch_task(0), "budget_us": 2_000_000}
+    talos_bench._score_batch_impl("knapsack", "c003", "nat1", [task], workers=1,
+                                  mode="native", pool_factory=FakePool)
+    assert seen[0] == ("c003", "t", "ab" * 32, 0, str(art / "talos-native"), 5, 60, None,
+                       str(tmp_path / "mono"), None, "native", 2_000_000)
+
+
+def test_native_score_batch_reports_a_missing_runner_as_infrastructure(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    art = tmp_path / "artifacts" / "knapsack" / "nat1"
+    art.mkdir(parents=True)
+    # mutation: native mode looking for algo.so finds this one and runs it as the runner
+    (art / "algo.so").write_bytes(b"\x7fELF")
+    with pytest.raises(FileNotFoundError):
+        talos_bench._score_batch_impl("knapsack", "c003", "nat1", [_batch_task(0)], workers=1,
+                                      mode="native")
