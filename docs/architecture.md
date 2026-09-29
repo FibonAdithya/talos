@@ -127,7 +127,11 @@ running. A calibration interrupted between its metered and native calls keeps th
 rows in `pending_job["calibration_metered"]`, so the resume goes straight to the native call.
 The scoring mode itself is frozen in `job.json`, and `--resume` refuses a different one.
 
-**What was measured.** All MEASURED, on 2026-09-29, from the design spec's claims table
+**What was measured.** All MEASURED on 2026-09-29, before the pin moved to dev image 0.0.8:
+every number below comes from dev image 0.0.7 at monorepo `84a5787`. The files the runner
+mirrors (`tig-runtime`, the entry point template, `build_so`, `build_ptx`, `framework.cu`,
+the crate manifests) are byte-identical at the current pin; the challenge sources changed.
+The hypergraph rows are from the design spec's claims table
 (`docs/ai/specs/2026-09-29-native-research-scoring-design.md`, section 10):
 
 | Measurement (hypergraph) | Value | Source |
@@ -138,8 +142,8 @@ The scoring mode itself is frozen in `job.json`, and `--resume` refuses a differ
 | Quality across 4 runs, all tracks | identical | same job, and the baseline `results.json` of run 20260929-073341-hypergraph |
 | Submission to script start on C3 | 28 s | same job's C3 log |
 
-Local knapsack, native against metered (MEASURED 2026-09-29, this machine's Docker, mainnet
-top `knap_exact16`, track `n_items=1000,budget=10`, `max_fuel` 5,000,000,000,000, 3 training
+Local knapsack, native against metered (MEASURED 2026-09-29, dev image 0.0.7, local Docker,
+mainnet top `knap_exact16`, track `n_items=1000,budget=10`, `max_fuel` 5,000,000,000,000, 3 training
 nonces): the quality is equal on all 3 nonces (qualities 233007, 309510, 232131); one evaluate with
 the build took 260.8 s metered and 60.6 s native; a nonce's runtime was 881 to 960 ms metered
 and 657 to 703 ms native. The CPU runner template compiled on the first attempt, offline.
