@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -249,7 +250,8 @@ class FakePool:
 
 
 def _task(nonce, workdir, so="/lib/x.so", timeout_s=600, hp=None):
-    return ("c003", "t", "ab" * 32, nonce, so, 10, timeout_s, None, str(workdir), hp)
+    return ("c003", "t", "ab" * 32, nonce, so, 10, timeout_s, None, str(workdir), hp,
+            "metered", None)
 
 
 def test_run_nonces_spreads_the_tasks_over_a_pool_of_the_given_workers(tmp_path, monkeypatch):
@@ -370,3 +372,236 @@ def test_content_hash_covers_the_crate_layout(monkeypatch):
     before = inside.content_hash(files, "ref", "tag")
     monkeypatch.setattr(inside, "CRATE_LAYOUT", "other-layout")
     assert inside.content_hash(files, "ref", "tag") != before
+
+
+def test_metered_content_hash_is_unchanged_and_native_differs():
+    files = {"mod.rs": "fn x(){}"}
+    # recomputed independently from the pre-change definition, not by calling the function
+    h = hashlib.sha256()
+    for part in ("r", "t", inside.CRATE_LAYOUT, "mod.rs", "fn x(){}"):
+        h.update(part.encode())
+        h.update(b"\0")
+    # mutation: hashing the mode for metered too changes every cached artifact id and every
+    # C3 request_hash, so a resumed job orphans its still-billing job
+    assert inside.content_hash(files, "r", "t") == h.hexdigest()[:32]
+    assert inside.content_hash(files, "r", "t", "metered") == h.hexdigest()[:32]
+    # mutation: a native artifact served for a metered request
+    assert inside.content_hash(files, "r", "t", "native") != h.hexdigest()[:32]
+
+
+def test_run_nonce_records_the_fuel_tig_runtime_wrote(tmp_path):
+    def run(cmd, **kw):
+        if cmd[0] == "tig-runtime":
+            (Path(cmd[cmd.index("--output") + 1]) / f"{cmd[3]}.json").write_text(
+                '{"nonce": 7, "runtime_signature": 1, "fuel_consumed": 12345, '
+                '"solution": "e30=", "cpu_arch": "AMD64"}')
+            return Result(0)
+        return Result(0, "quality: 5\n")
+    row = inside.run_nonce("c003", "n=1", "ab" * 32, 7, Path("/x.so"), 10, 600, None, run,
+                           tmp_path)
+    # mutation: leaving fuel_consumed None starves calibration of data
+    assert row["fuel_consumed"] == 12345 and row["ok"]
+    assert row["limit_hit"] is False
+
+
+def test_run_nonce_fuel_is_none_when_the_runtime_wrote_nothing(tmp_path):
+    def run(cmd, **kw):
+        return Result(87 if cmd[0] == "tig-runtime" else 1)
+    row = inside.run_nonce("c003", "n=1", "ab" * 32, 7, Path("/x.so"), 10, 600, None, run,
+                           tmp_path)
+    assert row["fuel_consumed"] is None and row["error"] == "out_of_fuel"
+    assert row["limit_hit"] is True
+
+
+def test_run_nonce_marks_a_verified_out_of_fuel_run_as_limit_hit(tmp_path):
+    def run(cmd, **kw):
+        if cmd[0] == "tig-runtime":
+            (Path(cmd[cmd.index("--output") + 1]) / f"{cmd[3]}.json").write_text(
+                '{"nonce": 7, "fuel_consumed": 9, "solution": "e30="}')
+            return Result(87)
+        return Result(0, "quality: 5\n")
+    row = inside.run_nonce("c003", "n=1", "ab" * 32, 7, Path("/x.so"), 10, 600, None, run,
+                           tmp_path)
+    # ok, as tig-runtime counts it, so `error` is None and cannot say the fuel ran out
+    # mutation: limit_hit taken from `error == "out_of_fuel"` is False here, and validation
+    # then calls a fuel-truncated metered run "nondeterministic"
+    assert row["ok"] and row["error"] is None and row["limit_hit"] is True
+
+
+def _native_run(seen, rc=0, write=True, quality=4242):
+    def run(cmd, **kw):
+        seen.append(cmd)
+        if cmd[0].endswith("talos-native"):
+            if write:
+                Path(cmd[4]).write_text('{"nonce": 7, "solution": "e30=", "solve_us": 31000}')
+            return Result(rc)
+        return Result(0, f"quality: {quality}\n") if write else Result(1)
+    return run
+
+
+def test_run_nonce_native_builds_the_runner_and_verifier_commands(tmp_path):
+    seen = []
+    row = inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"),
+                                  1_500_000, 600, None, _native_run(seen), tmp_path,
+                                  hyperparameters={"a": 1})
+    nat, ver = seen
+    settings = json.loads(nat[1])
+    assert settings["challenge_id"] == "c003" and settings["track_id"] == "n=1"
+    assert nat[0] == str(Path("/b/talos-native")) and nat[2:4] == ["ab" * 32, "7"]
+    # the runner takes an output FILE (not tig-runtime's folder) and the verifier reads it
+    assert Path(nat[4]).name == "7.json" and ver[4] == nat[4]
+    # mutation: the fuel limit passed to the runner instead of the time budget
+    assert nat[nat.index("--budget-us") + 1] == "1500000" and "--fuel" not in nat
+    assert nat[nat.index("--hyperparameters") + 1] == '{"a":1}'
+    assert ver[:4] == ["tig-verifier", nat[1], "ab" * 32, "7"] and len(ver) == 5
+    assert row["ok"] and row["quality"] == 4242 and row["solve_us"] == 31000
+    assert row["fuel_consumed"] is None and row["limit_hit"] is False
+
+
+def test_run_nonce_native_without_a_budget_passes_no_flag(tmp_path):
+    seen = []
+    inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"), None, 600,
+                            None, _native_run(seen), tmp_path)
+    # mutation: `--budget-us None` makes the runner's parse fail every calibration nonce
+    assert "--budget-us" not in seen[0] and "--hyperparameters" not in seen[0]
+
+
+def test_run_nonce_native_gpu_passes_the_ptx_to_both_and_the_gpu_to_the_verifier(tmp_path):
+    seen = []
+    inside.run_nonce_native("c005", "k=1", "ab" * 32, 3, Path("/b/talos-native"), None, 600,
+                            Path("/a.native.ptx"), _native_run(seen), tmp_path)
+    nat, ver = seen
+    assert nat[nat.index("--ptx") + 1] == str(Path("/a.native.ptx")) and "--gpu" not in nat
+    assert ver[ver.index("--ptx") + 1] == str(Path("/a.native.ptx"))
+    assert ver[ver.index("--gpu") + 1] == "0"
+
+
+def test_a_budget_exit_with_a_saved_solution_counts_like_metered_out_of_fuel(tmp_path):
+    row = inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"),
+                                  1000, 600, None, _native_run([], rc=87), tmp_path)
+    # mutation: reporting every budget exit as an error is stricter than tig-runtime
+    assert row["ok"] and row["error"] is None
+    # mutation: limit_hit dropped makes validation compare this truncated quality with the
+    # metered one and demote a valid candidate as "nondeterministic"
+    assert row["limit_hit"] is True
+
+
+def test_a_budget_exit_with_nothing_saved_is_out_of_fuel(tmp_path):
+    row = inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"),
+                                  1000, 600, None, _native_run([], rc=87, write=False),
+                                  tmp_path)
+    # mutation: a budget exit classified as panic or success
+    assert not row["ok"] and row["error"] == "out_of_fuel"
+
+
+def test_the_outer_timeout_on_a_native_nonce_is_timeout(tmp_path):
+    def run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    row = inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"),
+                                  1000, 5, None, run, tmp_path)
+    assert not row["ok"] and row["error"] == "timeout"
+
+
+def test_run_task_dispatches_on_the_mode(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(inside, "run_nonce", lambda *a, **k: calls.append(("metered", a)) or {})
+    monkeypatch.setattr(inside, "run_nonce_native",
+                        lambda *a, **k: calls.append(("native", a)) or {})
+    base = ("c003", "t", "ab" * 32, 1, "/x", 10, 60, None, str(tmp_path), None)
+    inside.run_task(base + ("metered", None))
+    inside.run_task(base + ("native", 777))
+    # mutation: ignoring the mode runs every native task through tig-runtime
+    assert [c[0] for c in calls] == ["metered", "native"]
+    assert calls[0][1][5] == 10          # metered gets the fuel
+    assert calls[1][1][5] == 777         # native gets the budget in the same slot
+
+
+GPU_WORKSPACE = "[workspace]\nmembers = [\n    \"tig-algorithms\",\n]\n"
+
+
+def _gpu_monorepo(tmp_path):
+    mono = tmp_path / "mono"
+    (mono / "tig-binary" / "src").mkdir(parents=True)
+    (mono / "tig-binary" / "src" / "framework.cu").write_text("// framework\n")
+    (mono / "tig-challenges" / "src" / "hypergraph").mkdir(parents=True)
+    (mono / "tig-challenges" / "src" / "hypergraph" / "kernels.cu").write_text("// challenge\n")
+    algo = mono / "tig-algorithms" / "src" / "hypergraph" / "talos_cand"
+    algo.mkdir(parents=True)
+    (algo / "kernels.cu").write_text("// algorithm\n")
+    (mono / "Cargo.toml").write_text(GPU_WORKSPACE)
+    return mono
+
+
+def test_build_native_ptx_concatenates_like_build_ptx_and_skips_fuel_injection(tmp_path):
+    mono = _gpu_monorepo(tmp_path)
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd)
+        seen.append(Path(cmd[2]).read_text())  # the temp .cu, read before it is deleted
+        Path(cmd[cmd.index("-o") + 1]).write_text("// ptx\n")
+        return Result(0, "", "")
+    ok, _ = inside.build_native_ptx(mono, "hypergraph", "talos_cand", run)
+    cmd, code = seen
+    assert ok
+    # mutation: a different order or missing file compiles a different PTX than TIG's
+    assert code.index("// framework") < code.index("// challenge") < code.index("// algorithm")
+    # the flags build_ptx passes at MONOREPO_REF
+    assert cmd[0] == "nvcc" and cmd[1] == "-ptx"
+    assert cmd[cmd.index("-arch") + 1] == "compute_70" and cmd[cmd.index("-code") + 1] == "sm_70"
+    assert "--use_fast_math" in cmd and "-dopt=on" in cmd
+    dest = Path(cmd[cmd.index("-o") + 1])
+    # mutation: writing over the metered <name>.ptx lets a native PTX reach tig-runtime
+    assert dest.name == "talos_cand.native.ptx"
+
+
+def test_build_native_runs_cargo_with_the_pinned_toolchain_and_fast_profile(tmp_path):
+    mono = _gpu_monorepo(tmp_path)
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append((cmd, kw))
+        if cmd[0] == "nvcc":
+            Path(cmd[cmd.index("-o") + 1]).write_text("// ptx\n")
+        return Result(0, "Compiling talos-native\n", "")
+    ok, out = inside.build_native(mono, "hypergraph", "talos_cand", run)
+    assert ok and "Compiling talos-native" in out
+    (nvcc, _), (cargo, kw) = seen
+    assert nvcc[0] == "nvcc"  # GPU: the PTX first, the runner loads it at run time
+    assert cargo == ["cargo", "+nightly-2025-02-10", "build", "--release", "-p", "talos-native"]
+    assert kw["cwd"] == mono
+    # mutation: the workspace profile (lto = true, codegen-units = 1) makes the native build
+    # as slow as the metered one it replaces
+    assert kw["env"]["CARGO_PROFILE_RELEASE_LTO"] == "false"
+    assert kw["env"]["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] == "16"
+    assert (mono / "talos-native" / "src" / "main.rs").exists()
+
+
+def test_build_native_stops_at_a_failed_ptx_build(tmp_path):
+    mono = _gpu_monorepo(tmp_path)
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd[0])
+        return Result(1, "", "kernels.cu(3): error: identifier undefined")
+    ok, out = inside.build_native(mono, "hypergraph", "talos_cand", run)
+    # mutation: carrying on to cargo reports the Rust build and hides the CUDA error
+    assert not ok and seen == ["nvcc"] and "identifier undefined" in out
+
+
+def test_build_native_cpu_builds_no_ptx(tmp_path):
+    mono = make_monorepo(tmp_path)
+    (mono / "Cargo.toml").write_text(GPU_WORKSPACE)
+    seen = []
+    inside.build_native(mono, "knapsack", "talos_cand",
+                        lambda cmd, **kw: seen.append(cmd[0]) or Result(0))
+    assert seen == ["cargo"]
+
+
+def test_native_artifact_paths(tmp_path):
+    binary, ptx = inside.native_artifact_paths(tmp_path, "hypergraph", "talos_cand")
+    assert binary == tmp_path / "target" / "release" / "talos-native" and ptx is None
+    p = tmp_path / "tig-algorithms" / "lib" / "hypergraph" / "ptx" / "talos_cand.native.ptx"
+    p.parent.mkdir(parents=True)
+    p.write_text("x")
+    assert inside.native_artifact_paths(tmp_path, "hypergraph", "talos_cand")[1] == p

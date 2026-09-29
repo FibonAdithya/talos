@@ -4,9 +4,11 @@ where `build_algorithm`, `tig-runtime` and `tig-verifier` are on PATH and the mo
 checkout is the working directory."""
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import multiprocessing
+import os
 import re
 import platform
 import subprocess
@@ -14,6 +16,9 @@ import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
+
+from talos import native_runner
+from talos.challenges import CHALLENGES
 
 ALGO_NAME = "talos_cand"
 # The challenge crate is compiled with the candidate as its only module (see stage_algorithm);
@@ -113,6 +118,68 @@ def build(monorepo: Path, challenge: str, name: str, run=subprocess.run) -> tupl
     return r.returncode == 0, out[-BUILD_OUTPUT_CAP:]
 
 
+# Profile overrides for the native build: the workspace's release profile (lto = true,
+# codegen-units = 1) is what makes TIG's build slow, and the native binary is never submitted.
+NATIVE_ENV = {"CARGO_PROFILE_RELEASE_LTO": "false", "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"}
+NATIVE_PTX_SUFFIX = ".native.ptx"
+
+
+def _native_ptx(monorepo: Path, challenge: str, name: str) -> Path:
+    return monorepo / "tig-algorithms" / "lib" / challenge / "ptx" / f"{name}{NATIVE_PTX_SUFFIX}"
+
+
+def build_native_ptx(monorepo: Path, challenge: str, name: str,
+                     run=subprocess.run) -> tuple[bool, str]:
+    """tig-binary/scripts/build_ptx at MONOREPO_REF without inject_fuel_and_runtime_sig: the
+    same files in the same order (framework, the challenge's .cu by the same recursive glob,
+    the algorithm's), the same nvcc flags, written beside the metered PTX, never over it."""
+    framework = monorepo / "tig-binary" / "src" / "framework.cu"
+    challenge_cus = glob.glob(str(monorepo / "tig-challenges" / "src" / challenge / "**" / "*.cu"),
+                              recursive=True)
+    algo_cus = glob.glob(str(_algo_root(monorepo, challenge) / name / "*.cu"))
+    if not algo_cus:
+        return False, f"no .cu files in the {name} algorithm; a GPU algorithm needs its kernels"
+    code = framework.read_text(encoding="utf-8") + "\n"
+    for p in challenge_cus:
+        code += Path(p).read_text(encoding="utf-8") + "\n"
+    for p in algo_cus:
+        code += Path(p).read_text(encoding="utf-8") + "\n\n"
+    dest = _native_ptx(monorepo, challenge, name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as td:
+        cu = Path(td) / "temp.cu"
+        cu.write_text(code, encoding="utf-8", newline="\n")
+        r = run(["nvcc", "-ptx", str(cu), "-o", str(dest), "-arch", "compute_70",
+                 "-code", "sm_70", "--use_fast_math", "-dopt=on"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return r.returncode == 0, (r.stdout or "") + (r.stderr or "")
+
+
+def build_native(monorepo: Path, challenge: str, name: str,
+                 run=subprocess.run) -> tuple[bool, str]:
+    """Stage the talos-native runner, build the unmetered PTX for a GPU challenge, then
+    `cargo build` the runner. The algorithm must already be staged (stage_algorithm)."""
+    is_gpu = CHALLENGES[challenge].is_gpu
+    native_runner.stage(monorepo, challenge, name, is_gpu)
+    out = ""
+    if is_gpu:
+        ok, ptx_out = build_native_ptx(monorepo, challenge, name, run)
+        out += ptx_out
+        if not ok:
+            return False, out[-BUILD_OUTPUT_CAP:]
+    r = run(["cargo", native_runner.TOOLCHAIN, "build", "--release", "-p", native_runner.PACKAGE],
+            cwd=monorepo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env={**os.environ, **NATIVE_ENV})
+    out += (r.stdout or "") + (r.stderr or "")
+    return r.returncode == 0, out[-BUILD_OUTPUT_CAP:]
+
+
+def native_artifact_paths(monorepo: Path, challenge: str, name: str) -> tuple[Path, Path | None]:
+    binary = monorepo / "target" / "release" / native_runner.PACKAGE
+    ptx = _native_ptx(monorepo, challenge, name)
+    return binary, (ptx if ptx.exists() else None)
+
+
 # The TIG build writes lib/<challenge>/<arch>/ using Docker's architecture names,
 # not uname's: amd64 on x86_64 hosts, arm64 on aarch64 hosts.
 _ARCH_DIR = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
@@ -147,6 +214,62 @@ def classify(runtime_rc: int, verifier_rc: int, quality: int | None,
     return False, "invalid"
 
 
+def _settings(challenge_id: str, track: str) -> str:
+    return json.dumps({"algorithm_id": "", "challenge_id": challenge_id, "track_id": track,
+                       "block_id": "", "player_id": ""}, separators=(",", ":"))
+
+
+def _hp_args(hyperparameters: dict | None) -> list[str]:
+    return ([] if hyperparameters is None else
+            ["--hyperparameters", json.dumps(hyperparameters, separators=(",", ":"))])
+
+
+def _run_and_verify(cmd: list[str], out_file: Path, settings: str, rand_hash: str, nonce: int,
+                    gpu_args: list[str], timeout_s: int, run, clock) -> dict:
+    """Runs the solver (`cmd`), then tig-verifier on what it saved. Returns the classified row
+    fields plus the saved JSON document (None when nothing was saved)."""
+    t0 = clock()
+    timed_out = False
+    try:
+        r1 = run(cmd, capture_output=True, text=True, timeout=timeout_s,
+                 encoding="utf-8", errors="replace")
+        rt_rc = r1.returncode
+    except subprocess.TimeoutExpired:
+        timed_out, rt_rc = True, -1
+    elapsed = clock() - t0
+    quality = None
+    ver_rc = 1
+    doc = None
+    if not timed_out and out_file.exists():
+        try:
+            doc = json.loads(out_file.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            doc = None
+        # The verifier gets only the time the runtime left. Giving it a fresh timeout_s put
+        # the worst case at 2 x timeout_s, past the Modal function timeout, which kills the
+        # container and turns a slow nonce into an infrastructure error instead of a result.
+        # A verifier timeout must not raise either: TimeoutExpired's str carries the whole
+        # argv, rand_hash included, and it would surface in a client-side error message.
+        try:
+            r2 = run(["tig-verifier", settings, rand_hash, str(nonce), str(out_file)] + gpu_args,
+                     capture_output=True, text=True,
+                     timeout=max(1, int(timeout_s - elapsed)),
+                     encoding="utf-8", errors="replace")
+            ver_rc = r2.returncode
+            m = _QUALITY_RE.search(r2.stdout or "")
+            quality = int(m.group(1)) if m else None
+        except subprocess.TimeoutExpired:
+            timed_out = True
+    ok, err = classify(rt_rc, ver_rc, quality, timed_out)
+    return {"ok": ok, "quality": quality if ok else None, "runtime_ms": int(elapsed * 1000),
+            "error": err, "doc": doc if isinstance(doc, dict) else None,
+            "limit_hit": rt_rc == OUT_OF_FUEL_RC}
+
+
+def _int_or_none(v) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
 def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Path, fuel: int,
               timeout_s: int, ptx: Path | None, run=subprocess.run,
               workdir: Path | None = None, clock=time.monotonic,
@@ -156,60 +279,64 @@ def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Pat
     [--ptx P --gpu 0]` writes DIR/<nonce>.json, then
     `tig-verifier SETTINGS RAND_HASH NONCE DIR/<nonce>.json [--ptx P --gpu 0]`
     prints `quality: N` and exits 0 on a valid solution. `{}` is passed as `{}`: the algorithm
-    receives Some(empty map), not None."""
-    settings = json.dumps({"algorithm_id": "", "challenge_id": challenge_id, "track_id": track,
-                           "block_id": "", "player_id": ""}, separators=(",", ":"))
+    receives Some(empty map), not None. The row carries the fuel_consumed tig-runtime wrote at
+    the last save, which calibration pairs with the native solve time."""
+    settings = _settings(challenge_id, track)
     gpu_args = ["--ptx", str(ptx), "--gpu", "0"] if ptx else []
     with tempfile.TemporaryDirectory(dir=workdir) as td:
         out_file = Path(td) / f"{nonce}.json"
-        hp_args = ([] if hyperparameters is None else
-                   ["--hyperparameters",
-                    json.dumps(hyperparameters, separators=(",", ":"))])
         cmd = ["tig-runtime", settings, rand_hash, str(nonce), str(so),
-               "--fuel", str(fuel), "--output", td] + hp_args + gpu_args
-        t0 = clock()
-        timed_out = False
-        try:
-            r1 = run(cmd, capture_output=True, text=True, timeout=timeout_s,
-                     encoding="utf-8", errors="replace")
-            rt_rc = r1.returncode
-        except subprocess.TimeoutExpired:
-            timed_out, rt_rc = True, -1
-        elapsed = clock() - t0
-        runtime_ms = int(elapsed * 1000)
-        quality = None
-        ver_rc = 1
-        if not timed_out and out_file.exists():
-            # The verifier gets only the time the runtime left. Giving it a fresh timeout_s put
-            # the worst case at 2 x timeout_s, past the Modal function timeout, which kills the
-            # container and turns a slow nonce into an infrastructure error instead of a result.
-            # A verifier timeout must not raise either: TimeoutExpired's str carries the whole
-            # argv, rand_hash included, and it would surface in a client-side error message.
-            try:
-                r2 = run(["tig-verifier", settings, rand_hash, str(nonce), str(out_file)] + gpu_args,
-                         capture_output=True, text=True,
-                         timeout=max(1, int(timeout_s - elapsed)),
-                         encoding="utf-8", errors="replace")
-                ver_rc = r2.returncode
-                m = _QUALITY_RE.search(r2.stdout or "")
-                quality = int(m.group(1)) if m else None
-            except subprocess.TimeoutExpired:
-                timed_out = True
-    ok, err = classify(rt_rc, ver_rc, quality, timed_out)
-    return {"track": track, "nonce": nonce, "ok": ok, "quality": quality if ok else None,
-            "runtime_ms": runtime_ms, "error": err}
+               "--fuel", str(fuel), "--output", td] + _hp_args(hyperparameters) + gpu_args
+        v = _run_and_verify(cmd, out_file, settings, rand_hash, nonce, gpu_args, timeout_s,
+                            run, clock)
+    fuel_consumed = _int_or_none((v["doc"] or {}).get("fuel_consumed"))
+    return {"track": track, "nonce": nonce, "ok": v["ok"], "quality": v["quality"],
+            "runtime_ms": v["runtime_ms"], "error": v["error"], "fuel_consumed": fuel_consumed,
+            "limit_hit": v["limit_hit"]}
+
+
+def run_nonce_native(challenge_id: str, track: str, rand_hash: str, nonce: int, binary: Path,
+                     budget_us: int | None, timeout_s: int, ptx: Path | None,
+                     run=subprocess.run, workdir: Path | None = None, clock=time.monotonic,
+                     hyperparameters: dict | None = None) -> dict:
+    """`talos-native SETTINGS RAND_HASH NONCE OUT_FILE [--budget-us B] [--hyperparameters JSON]
+    [--ptx P]`, then tig-verifier exactly as run_nonce calls it. The runner exits 87 when its
+    solve has run for budget_us, so a budget exit is classified as a metered out-of-fuel exit
+    is: a saved solution that verifies still counts. `timeout_s` is the outer cap and reports
+    `timeout`, as on the metered path."""
+    settings = _settings(challenge_id, track)
+    gpu_args = ["--ptx", str(ptx), "--gpu", "0"] if ptx else []
+    with tempfile.TemporaryDirectory(dir=workdir) as td:
+        out_file = Path(td) / f"{nonce}.json"
+        cmd = [str(binary), settings, rand_hash, str(nonce), str(out_file)]
+        if budget_us is not None:
+            cmd += ["--budget-us", str(budget_us)]
+        cmd += _hp_args(hyperparameters) + (["--ptx", str(ptx)] if ptx else [])
+        v = _run_and_verify(cmd, out_file, settings, rand_hash, nonce, gpu_args, timeout_s,
+                            run, clock)
+    solve_us = _int_or_none((v["doc"] or {}).get("solve_us"))
+    return {"track": track, "nonce": nonce, "ok": v["ok"], "quality": v["quality"],
+            "runtime_ms": v["runtime_ms"], "error": v["error"], "fuel_consumed": None,
+            "solve_us": solve_us,
+            "limit_hit": v["limit_hit"]}
 
 
 NONCE_TIMEOUT_S = 600
 
 # One scoring task, as a positional tuple so it pickles into a worker process unchanged:
-# (challenge_id, track, rand_hash, nonce, so, fuel, timeout_s, ptx, workdir, hyperparameters),
-# with `so`, `ptx` and `workdir` as strings.
+# (challenge_id, track, rand_hash, nonce, so, fuel, timeout_s, ptx, workdir, hyperparameters,
+#  mode, budget_us), with `so`, `ptx` and `workdir` as strings. For mode "native", `so` is the
+# talos-native binary and `fuel` is unused; budget_us is the track's solve budget or None.
 NonceTask = tuple
 
 
 def run_task(task: NonceTask, run=subprocess.run) -> dict:
-    challenge_id, track, rand_hash, nonce, so, fuel, timeout_s, ptx, workdir, hp = task
+    (challenge_id, track, rand_hash, nonce, so, fuel, timeout_s, ptx, workdir, hp, mode,
+     budget_us) = task
+    if mode == "native":
+        return run_nonce_native(challenge_id, track, rand_hash, nonce, Path(so), budget_us,
+                                timeout_s, Path(ptx) if ptx else None, run=run,
+                                workdir=Path(workdir), hyperparameters=hp)
     return run_nonce(challenge_id, track, rand_hash, nonce, Path(so), fuel, timeout_s,
                      Path(ptx) if ptx else None, run=run, workdir=Path(workdir),
                      hyperparameters=hp)
@@ -230,10 +357,12 @@ def run_nonces(tasks: list[NonceTask], workers: int, run=subprocess.run,
             yield run_task(t, run=run)
 
 
-def content_hash(files: dict[str, str], monorepo_ref: str, dev_image_tag: str) -> str:
+def content_hash(files: dict[str, str], monorepo_ref: str, dev_image_tag: str,
+                 mode: str = "metered") -> str:
     """Artifact cache key. The monorepo pin, the dev image tag and the crate layout are part
     of it: the same sources built against a different monorepo, or beside a different set of
-    modules, are a different .so."""
+    modules, are a different .so. A native build is a different artifact from a metered one;
+    the mode enters the hash only when it is not "metered", so every metered id is unchanged."""
     h = hashlib.sha256()
     h.update(monorepo_ref.encode())
     h.update(b"\0")
@@ -241,6 +370,9 @@ def content_hash(files: dict[str, str], monorepo_ref: str, dev_image_tag: str) -
     h.update(b"\0")
     h.update(CRATE_LAYOUT.encode())
     h.update(b"\0")
+    if mode != "metered":
+        h.update(f"mode={mode}".encode())
+        h.update(b"\0")
     for k in sorted(files):
         h.update(k.encode())
         h.update(b"\0")
