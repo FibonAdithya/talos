@@ -363,7 +363,8 @@ class Loop:
                              track=self.spec.track,
                              guard_tracks=([t for t in self.spec.tracks if t != self.spec.track]
                                            if self.spec.track else []),
-                             hyperparameters=self.spec.hyperparameters)
+                             hyperparameters=self.spec.hyperparameters,
+                             scoring=self._scoring())
 
     # ── single-shot propose + edit ────────────────────────────────────
 

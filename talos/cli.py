@@ -45,6 +45,7 @@ from talos.state import JobSpec, JobState, JobStore
 from talos.types import Usage
 
 BASELINE_CACHE = Path.home() / ".talos" / "baselines"
+CALIBRATION_CACHE = Path.home() / ".talos" / "calibration"
 # Deployed as a module from the directory that holds the `modal_app` package, never by file
 # path: a file path makes Modal import the app as top-level `talos_bench`, the serialized
 # functions then refer to that name, and no container can load them.
@@ -478,6 +479,7 @@ OUTCOME_TEXT = {
     "failed:compile": "no candidate: did not compile",
     "failed:dead_code": "no candidate: new code never called",
     "failed:runtime": "rejected: error rate over the ceiling",
+    "failed:validation": "rejected: failed metered validation",
 }
 
 
@@ -531,6 +533,17 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
         text = f"lesson: {data['lesson']}"
     elif kind == "confirming":
         text = "confirming on held-out nonces"
+    elif kind == "validating":
+        text = "validating on TIG's metered runtime"
+    elif kind == "validated":
+        text = f"validated: {data['mean_rel_delta']:+.3%} vs baseline on the metered runtime"
+    elif kind == "demoted":
+        text = f"demoted by metered validation: {data['reason']}"
+    elif kind == "calibrated":
+        text = "native budgets: " + ", ".join(f"{t} {us / 1e6:.1f}s"
+                                              for t, us in sorted(data["budgets_us"].items()))
+    elif kind == "calibration_fallback":
+        text = f"native scoring unavailable, scoring metered: {data['reason']}"
     elif kind == "won":
         text = f"won: {_holdout_text(data)}"
     elif kind == "false_positive":
@@ -597,6 +610,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         from talos.providers.fake import FakeProvider
         provider, bench = FakeProvider(_fake_script), FakeBench(_fake_scores)
         cache_dir, mainnet = store.run_dir / "baseline_cache", FAKE_MAINNET
+        calibration_dir = store.run_dir / "calibration_cache"
     else:
         provider = make_provider(cfg.provider, cfg.model, api_key=resolve_api_key(cfg),
                                  api_base=cfg.api_base)
@@ -605,6 +619,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
             # `talos compile` in the agentic sandbox has no secrets.json to read the key from.
             os.environ["C3_API_KEY"] = c3_api_key
         cache_dir, mainnet = BASELINE_CACHE, None
+        calibration_dir = CALIBRATION_CACHE
         # Before the baseline, not after: C3 pulls the image at job start, so a missing tag
         # costs a whole job (and its queue wait) to report a pull failure.
         if cfg.backend == "c3" and not image_available(spec.challenge):
@@ -686,6 +701,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         else:
             from talos.mainnet import fetch_template
             loop.template_rs = fetch_template(spec.challenge)
+        loop.calibrate(calibration_dir, hardware)
         final = loop.run()
     except BenchCancelled as e:
         # Only measure_baseline can raise it here: run() records its own cancelled outcome.
@@ -759,6 +775,10 @@ def cmd_run(args, ask) -> int:
         if args.nonces is not None and args.nonces != stored:
             print(f"job {spec.job_id} was started with {stored} nonces per track; start a new "
                   f"job to change nonces", file=sys.stderr)
+            return 2
+        if args.scoring is not None and args.scoring != spec.scoring:
+            print(f"job {spec.job_id} was started with {spec.scoring} scoring; start a new job "
+                  f"to change scoring", file=sys.stderr)
             return 2
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
         if _codex_refused(cfg):
@@ -908,7 +928,8 @@ def cmd_run(args, ask) -> int:
                    tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
                    created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
                    track=track, baseline_algorithm=algorithm, hyperparameters=hyperparameters,
-                   hyperparameters_source=hp_source, dev_image_tag=DEV_IMAGE_TAG)
+                   hyperparameters_source=hp_source, dev_image_tag=DEV_IMAGE_TAG,
+                   scoring=args.scoring or "metered")
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
     (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n",
@@ -923,7 +944,7 @@ def cmd_run(args, ask) -> int:
         used = sum(1 for v in hyperparameters.values() if v is not None)
         hp_line = f"hyperparameters: {used}/{len(info.tracks)} tracks from mainnet"
     print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}, "
-          f"{nonces} nonces per track; {hp_line}")
+          f"{nonces} nonces per track, scoring {spec.scoring}; {hp_line}")
     return execute_job(spec, store, cfg, resume=False)
 
 
@@ -986,7 +1007,8 @@ def cmd_compile(args, ask) -> int:
         print(str(e), file=sys.stderr)
         return 1
     r = bench.evaluate(EvalRequest(args.challenge, files, [], [], 0, None,
-                                   CHALLENGES[args.challenge].beat)).compile
+                                   CHALLENGES[args.challenge].beat,
+                                   mode="native" if args.native else "metered")).compile
     print(r.output[-4000:])
     return 0 if r.ok else 1
 
@@ -1060,6 +1082,9 @@ def main(argv=None, ask=default_ask) -> int:
                    help="per-track hyperparameters from the baseline algorithm's best mainnet "
                         "benchmark (mainnet, the default) or none")
     r.add_argument("--mode", choices=["single-shot", "agentic"])
+    r.add_argument("--scoring", choices=["metered", "native"],
+                   help="research scoring: metered (TIG's runtime, the default) or native "
+                        "(fast, validated on metered)")
     r.add_argument("--budget-usd", type=float)
     r.add_argument("--budget-hours", type=float)
     r.add_argument("--budget-iterations", type=int)
@@ -1071,6 +1096,9 @@ def main(argv=None, ask=default_ask) -> int:
     c.add_argument("--challenge", required=True)
     c.add_argument("--dir", default="algorithm")
     c.add_argument("--backend", choices=list(BACKENDS))
+    c.add_argument("--native", action="store_true",
+                   help="build the unmetered talos-native runner, as a --scoring native job "
+                        "scores it")
     sub.add_parser("status")
     updates = sub.add_parser("check-updates", help="check GHCR for newer TIG dev images")
     updates.add_argument("--challenge", choices=list(CHALLENGES),

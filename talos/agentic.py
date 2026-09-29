@@ -85,7 +85,7 @@ fixed fuel budget {scope}). Your current best is {ctx.best_delta:+.3%} vs baseli
 
 {focus}{hp}Rules:
 - Edit ONLY files under `algorithm/`. Do not create new files. Do not touch anything else.
-- You may run `talos compile --challenge {ctx.challenge} --dir algorithm` to check the build.
+- You may run `talos compile --challenge {ctx.challenge} --dir algorithm{' --native' if ctx.scoring == 'native' else ''}` to check the build.
   Nothing else may be executed. There is no network.
 - Make ONE focused change per iteration that implements a single hypothesis.
 - Before you stop, EDIT the existing file `.talos/hypothesis.json` (it starts as `{{}}`) so it
