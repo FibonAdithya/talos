@@ -30,9 +30,12 @@ def _score(payload: dict, sets: list[dict], so: Path, ptx: Path | None, monorepo
     # talos.bench is not shipped to the container, so the per-track lookup is inlined here: a
     # track mapped to None, or absent, runs without the flag; {} is passed as {}.
     hyperparameters = payload.get("hyperparameters") or {}
+    mode = payload.get("mode", "metered")
+    budgets = payload.get("fuel_budgets_us") or {}
     tasks = [(payload["challenge_id"], ns["track"], ns["rand_hash"], n, str(so), payload["fuel"],
               timeouts.get(ns["track"], payload["nonce_timeout_s"]),
-              str(ptx) if ptx else None, str(monorepo), hyperparameters.get(ns["track"]))
+              str(ptx) if ptx else None, str(monorepo), hyperparameters.get(ns["track"]),
+              mode, budgets.get(ns["track"]))
              for ns in sets for n in range(ns["start"], ns["start"] + ns["count"])]
     workers = int(payload.get("workers", 1))
     for r in inside.run_nonces(tasks, workers, run=run, pool_factory=pool_factory):
@@ -56,6 +59,7 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
                  "started": {"training": False, "holdout": False}}
     results = art / "results.json"
 
+    mode = payload.get("mode", "metered")
     log(f"[0s] challenge={challenge} files={sorted(payload['files'])} "
         f"workers={payload['workers']}")
     try:
@@ -63,8 +67,11 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
         # candidate; its files must not be compiled into this one. On C3 the dir never exists.
         inside.unstage_algorithm(monorepo, challenge, inside.ALGO_NAME)
         inside.stage_algorithm(monorepo, challenge, payload["files"], inside.ALGO_NAME)
-        log(f"[{int(clock() - t0)}s] build start")
-        ok, build_out = inside.build(monorepo, challenge, inside.ALGO_NAME, run=run)
+        log(f"[{int(clock() - t0)}s] build start ({mode})")
+        if mode == "native":
+            ok, build_out = inside.build_native(monorepo, challenge, inside.ALGO_NAME, run=run)
+        else:
+            ok, build_out = inside.build(monorepo, challenge, inside.ALGO_NAME, run=run)
     except Exception as e:
         # An application-level failure (e.g. a malformed relative path from an LLM-authored
         # file map) is a result, not a crash: raising here would exit non-zero and lose every
@@ -76,18 +83,23 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
         log(f"[{int(clock() - t0)}s] staging/build raised: {e}")
         return 0
     (art / "build.log").write_text(build_out, encoding="utf-8", newline="\n")
-    so, ptx = inside.artifact_paths(monorepo, challenge, inside.ALGO_NAME)
+    if mode == "native":
+        so, ptx = inside.native_artifact_paths(monorepo, challenge, inside.ALGO_NAME)
+    else:
+        so, ptx = inside.artifact_paths(monorepo, challenge, inside.ALGO_NAME)
     log(f"[{int(clock() - t0)}s] build ok={ok} so={so.exists()}")
     if not ok or not so.exists():
+        what = "runner" if mode == "native" else ".so"
         out["compile"] = {"ok": False, "artifact_id": None,
                           "output": build_out
-                          + ("" if so.exists() else f"\nbuild produced no .so at {so}")}
+                          + ("" if so.exists() else f"\nbuild produced no {what} at {so}")}
         _atomic(results, out)
         return 0  # a compile error is a result, not a job failure
     out["compile"] = {"ok": True, "output": relevant(build_out)[-20000:],
                       "artifact_id": inside.content_hash(payload["files"],
                                                          payload["monorepo_ref"],
-                                                         payload["dev_image_tag"])}
+                                                         payload["dev_image_tag"],
+                                                         mode)}
     prior = payload.get("prior_functions")
     dead = dead_new_functions(build_out, prior) if prior is not None else []
     if dead:

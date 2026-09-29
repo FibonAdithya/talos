@@ -30,7 +30,8 @@ TIME_CAP_S = 6 * 3600
 # walltime short enough that one the client never cancelled bills for minutes, not hours.
 PROBE_IMAGE = "ubuntu:24.04"
 PROBE_WALLTIME_S = 120
-JOB_MODULES = ("__init__", "inside", "scoring", "types", "challenges", "diagnostics", "c3_job")
+JOB_MODULES = ("__init__", "inside", "scoring", "types", "challenges", "diagnostics",
+               "native_runner", "c3_job")
 _PKG = Path(__file__).resolve().parent
 
 
@@ -144,8 +145,11 @@ def local_job_sh_text() -> str:
     the volume's lock: /app is shared by every job of the challenge on this machine (two runs,
     or a `talos compile` beside a run), and the runner stages the candidate into that checkout,
     so two jobs at once must take turns or one is built from the other's files. A waiting job's
-    time limit still counts from its start."""
-    return ("#!/bin/bash\nset -euo pipefail\ncd \"$C3_JOB_WORKDIR\"\n"
+    time limit still counts from its start. Cargo runs offline: the job container has no
+    network, and offline turns a network wait into an immediate error."""
+    return ("#!/bin/bash\nset -euo pipefail\n"
+            "export CARGO_NET_OFFLINE=true\n"
+            "cd \"$C3_JOB_WORKDIR\"\n"
             f"exec flock {LOCAL_LOCK} python3 -m talos.c3_job\n")
 
 
@@ -176,6 +180,10 @@ def payload(request: EvalRequest, workers: int | None = None) -> dict:
         # a resumed job would otherwise see a hash mismatch and submit a second, orphaning the
         # first (still-billing) one. `c3_job` reads it with `payload.get("hyperparameters") or {}`.
         p["hyperparameters"] = request.hyperparameters
+    if request.mode != "metered":
+        # Only for native, so every metered request hashes exactly as before (see above).
+        p["mode"] = request.mode
+        p["fuel_budgets_us"] = request.fuel_budgets_us
     return p
 
 
