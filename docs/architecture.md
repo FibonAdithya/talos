@@ -77,7 +77,7 @@ one record serves later jobs on the same baseline and is cached in `~/.talos/cal
 With no record, Talos scores the baseline's training nonces natively with no budget and
 reads the metered fuel from the baseline's stored rows (or, for a baseline cached before fuel
 was recorded, from one metered call). For each track the ratio is the median of native
-`solve_us` over metered `fuel_consumed` (`talos/calibration.py::track_ratios`). The budget is
+`solve_us` over metered `fuel_consumed` (`talos/calibration.py::track_ratios`). Both numbers are taken at the algorithm's last `save_solution` call, so an algorithm that keeps improving its solution until the limit gives a ratio for the time of its last save. The budget is
 ratio x the job's fuel x a margin, never below one second
 (`talos/calibration.py::budgets_us`). The starting margin is 0.8, a validation that finds a
 metered out-of-fuel nonce the native run finished counts a miss for its track, and every third
@@ -112,8 +112,10 @@ own PTX beside the metered one, without `inject_fuel_and_runtime_sig`
 file. The metered PTX is instrumented for fuel and is loaded by `tig-runtime`, which the
 native runner does not use.
 
-**Fallback and resume.** When the baseline fails the native build, no track gets a ratio, or
-a needed track has none, the job records `scoring: metered`, emits `calibration_fallback`
+**Fallback and resume.** The job falls back when the baseline fails the metered build during
+calibration (a call made only when its stored rows carry no fuel;
+`talos/loop.py::Loop._measure_calibration`), when it fails the native build, when no track gets
+a ratio, or when a needed track has none. Then the job records `scoring: metered`, emits `calibration_fallback`
 with the reason and runs metered for the rest of its life. A resume keeps the job's own
 budgets: `Loop.calibrate` does not re-derive them once set, because another job may have
 tightened the record since and a changed budget changes the request of a C3 job still
@@ -134,7 +136,7 @@ The scoring mode itself is frozen in `job.json`, and `--resume` refuses a differ
 
 Local knapsack, native against metered (MEASURED 2026-09-29, this machine's Docker, mainnet
 top `knap_exact16`, track `n_items=1000,budget=10`, `max_fuel` 5,000,000,000,000, 3 training
-nonces): the quality is equal on all 3 nonces (233007, 309510, 232131); one evaluate with
+nonces): the quality is equal on all 3 nonces (qualities 233007, 309510, 232131); one evaluate with
 the build took 260.8 s metered and 60.6 s native; a nonce's runtime was 881 to 960 ms metered
 and 657 to 703 ms native. The CPU runner template compiled on the first attempt, offline.
 The GPU template has not been compiled yet; the first compile is the live parity test
