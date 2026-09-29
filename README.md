@@ -487,6 +487,7 @@ Prompts for anything not given as a flag, unless `--yes` is passed.
 | `--nonces N` | Nonces per track in each of the training and held-out sets (8 is the default; the prompt asks). Every nonce is scored for the baseline on both sets and for every candidate on training, then again on held-out when it wins on training, so the count sets the cost of every evaluation. On hypergraph an L40 spends about 10 minutes per nonce-per-track on the baseline's two sets at the current fuel (measured 2026-09-25); 32 made that baseline 11 hours against the 6-hour C3 job limit. A resume keeps the sets the job was drawn with. |
 | `--hyperparameters mainnet\|none` | `mainnet` (the default) runs the baseline and every candidate with the per-track hyperparameters of the baseline algorithm's best-quality mainnet benchmark at the job's fuel, fixed at job start. A track with no such benchmark runs without any. `none` runs every nonce without hyperparameters. The package lists the values and the benchmark they came from. |
 | `--mode single-shot\|agentic` | Overrides the configured mode for this job. `agentic` needs a CLI provider and uses roughly 5 to 20 times the tokens of `single-shot`. |
+| `--scoring metered\|native` | `metered` (the default) scores every candidate with TIG's own `tig-runtime` under the job's fuel limit. `native` scores research candidates with an unmetered runner under a per-track time budget calibrated from the baseline, which is faster; a candidate that improves natively is then scored again on the metered runtime and only becomes the best if it holds up there ([how it works](docs/architecture.md#native-research-scoring)). The default stays `metered` until the live parity checks pass. A job keeps its scoring on resume; `--resume` with a different `--scoring` is refused. The calibration is cached in `~/.talos/calibration/`, one file per challenge and baseline. If it cannot be made, the job scores metered and says so in the timeline. |
 | `--budget-usd N` | LLM spend cap in USD. |
 | `--budget-hours N` | Wall-clock cap in hours. |
 | `--budget-iterations N` | Iteration cap. |
@@ -518,6 +519,10 @@ talos compile --challenge knapsack --dir algorithm
 | `--challenge NAME` | Required. |
 | `--dir PATH` | Directory whose `.rs` and `.cu` files are compiled (default `algorithm`). |
 | `--backend modal\|c3\|local` | Backend to use. Without it: `TALOS_BACKEND`, then `talos.config.json`, then `modal`. |
+| `--native` | Build the unmetered `talos-native` runner instead of TIG's metered build. This is the build a `--scoring native` job scores with, and its agent is told to pass this flag. Without it the build is TIG's metered one, the default until the live parity checks pass. |
+
+A candidate that compiles with `--native` can still fail TIG's metered build. A native job's
+validation catches that and demotes the candidate as `native_metered_build_mismatch`.
 
 Prints the last 4000 characters of compiler output. Exit code 0 if the build succeeded, 1 if
 it failed, 2 if the directory has no `.rs`/`.cu` files. Agentic mode uses this command to
@@ -582,8 +587,8 @@ Each job gets a directory under `runs/`:
 | Path | Contents |
 |---|---|
 | `runs/<job_id>/job.json` | The job's fixed inputs: challenge, direction, provider, model, mode, budget, nonces, fuel, track, baseline algorithm, hyperparameters. Written once. |
-| `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log. |
-| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. |
+| `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log. A `--scoring native` job also records its scoring, its per-track time budgets and a `validations` list: one entry per candidate that improved natively, with its iteration, its outcome (`validated` or `demoted`) and the reason it was demoted. |
+| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. |
 | `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
 | `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
 | `runs/<job_id>/iterations/<n>/` | Each candidate's files and its hypothesis. |

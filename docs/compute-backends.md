@@ -53,6 +53,20 @@ algorithm ran as two batches of 4, each container reporting 1.9 s and 1.8 s of w
 against 4.7 s and 4.4 s of summed per-nonce runtime, so four nonces did share a container at
 once; the client's estimate for the 8 nonces was $0.0004.
 
+Every backend runs a nonce as one 12-field task tuple, defined above
+`talos/inside.py::run_task`: challenge id, track, rand hash, nonce, the artifact path (`so`),
+fuel, the per-nonce timeout, the PTX path, the work directory, the hyperparameters, the mode
+and the native time budget in microseconds. `run_task` dispatches on the mode: `metered`
+calls `run_nonce` (`tig-runtime` under the fuel), `native` calls
+`talos/inside.py::run_nonce_native` (the `talos-native` runner under the budget, then
+`tig-verifier`). In native mode `so` is the runner binary.
+
+On Modal, an artifact is stored under `/artifacts/<challenge>/<artifact id>/`. A native build's
+hash includes its mode, and it is stored there as `talos-native` beside `algo.ptx`, never over
+the metered `algo.so`. A Modal app deployed before native scoring keeps working for metered
+jobs and refuses a native one as a stale deploy (`talos/bench.py::_stale_deploy`); run
+`talos setup` to redeploy.
+
 ## Hardware fallback
 
 A job runs on the first option in a preference list that has capacity when the job starts,
@@ -191,6 +205,11 @@ step performed:
    is not LLM-authored (marker `/app/.talos-warm`).
 6. For a GPU challenge, read the GPU name with `nvidia-smi` for the hardware class.
 
+The warm-up also runs `cargo fetch`, so the crates the `talos-native` runner needs are in the
+cargo volume and its build works with networking off. Its marker is `.talos-warm-2`
+(`talos/local_transport.py::WARM_MARKER`); a volume warmed before the fetch was added has
+only `.talos-warm`, and is warmed again on the next run.
+
 Both volumes are shared by every job of the challenge on this machine, and the runner stages
 the candidate into the checkout on `/app` (`talos/c3_job.py::main`), so jobs take turns: the
 local job script (`talos/c3_jobdir.py::local_job_sh_text`) runs the runner under
@@ -219,6 +238,7 @@ Every flag is in `talos/local_transport.py::run_args`; loosening them is a human
 | (no `--user`) | The job runs as root inside the container: the image keeps cargo and rustup under `/root`, mode 700, so a non-root user cannot build. With every capability dropped, no network, and no writable host mount, what root can reach is the container's own filesystem and the two volumes. Files under `runs/` are written by Talos itself, so they belong to the user. |
 | `--cpus N --memory Mg` | From `talos setup`, which defaults them to what `docker info` reports and refuses more: Docker rejects a container with more CPUs than the daemon has (MEASURED 2026-09-24, Docker 29.1.3: "range of CPUs is from 0.01 to 16.00"), and accepts one with more memory than the daemon has (MEASURED: `--memory 999g` on a 30 GiB daemon), which would leave the limit meaning nothing. On Docker Desktop both figures are the VM's (Settings > Resources), not the machine's. Part of the hardware class. |
 | `--network none` | The checkout and the registry are on the volumes; the job never needs the network. |
+| `CARGO_NET_OFFLINE=true` (in the job script, `talos/c3_jobdir.py::local_job_sh_text`) | Cargo fails at once instead of retrying a network it cannot reach. The native build's crates come from the `cargo fetch` warm-up. MEASURED 2026-09-29 on knapsack: the CPU runner compiled offline on the first attempt. |
 | `--cap-drop ALL --security-opt no-new-privileges --pids-limit 4096` | Nothing in the build or the runtime needs a capability; a fork bomb fails the container, not the machine. |
 | `--gpus all` | GPU challenges only. |
 
