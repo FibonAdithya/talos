@@ -2446,7 +2446,7 @@ def test_resume_refuses_a_different_scoring_mode(tmp_path, monkeypatch, capsys):
     fake_run(monkeypatch)
     job_id = next((tmp_path / "runs").glob("*/job.json")).parent.name
     run_dir = tmp_path / "runs" / job_id
-    (run_dir / "state.json").write_text("{}")
+    (run_dir / "state.json").write_text("{}", encoding="utf-8")
     rc = cli.main(["run", "--resume", job_id, "--scoring", "native"])
     assert rc == 2
     # mutation: dropping the resume check lets a metered job continue as native

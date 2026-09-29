@@ -72,12 +72,16 @@ and only an improving one is scored on the metered runtime.
 **Calibration.** A native run has no fuel limit, so a per-track time budget stands in for it.
 `talos/loop.py::Loop.calibrate` finds one after the baseline, on every start and resume. The
 record is keyed by challenge, hardware class, both pins, the baseline's code, the native
-runner's digest and the baseline's hyperparameters (`talos/calibration.py::calibration_key`); nonce sets are not in the key, so
+runner's digest and the baseline's hyperparameters
+(`talos/calibration.py::calibration_key`); nonce sets are not in the key, so
 one record serves later jobs on the same baseline and is cached in `~/.talos/calibration/`.
 With no record, Talos scores the baseline's training nonces natively with no budget and
 reads the metered fuel from the baseline's stored rows (or, for a baseline cached before fuel
 was recorded, from one metered call). For each track the ratio is the median of native
-`solve_us` over metered `fuel_consumed` (`talos/calibration.py::track_ratios`). Both numbers are taken at the algorithm's last `save_solution` call, so an algorithm that keeps improving its solution until the limit gives a ratio for the time of its last save. A nonce enters the median only when both runs are ok, neither hit its limit and both reached the same quality, since otherwise the two saves are different ones (a metered run cut off by fuel saved earlier than the unbudgeted native run). The budget is
+`solve_us` over metered `fuel_consumed` (`talos/calibration.py::track_ratios`). Both numbers are taken at the algorithm's last `save_solution` call, so an algorithm that keeps improving its solution until the limit gives a ratio for the time of its last save.
+A nonce enters the median only when both runs are ok, neither hit its limit and both
+reached the same quality, since otherwise the two saves are different ones (a metered run
+cut off by fuel saved earlier than the unbudgeted native run). The budget is
 ratio x the job's fuel x a margin, never below one second
 (`talos/calibration.py::budgets_us`). The starting margin is 0.8, a validation that finds a
 metered out-of-fuel nonce the native run finished counts a miss for its track, and every third

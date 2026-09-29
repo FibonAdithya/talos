@@ -704,7 +704,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
         loop.calibrate(calibration_dir, hardware)
         final = loop.run()
     except BenchCancelled as e:
-        # Only measure_baseline can raise it here: run() records its own cancelled outcome.
+        # measure_baseline or calibrate raised it: run() records its own cancelled outcome.
         # Without this the blanket handler below would call a stopped run a failed one.
         state.status, state.stop_reason = "cancelled", f"stopped; bench job cancelled: {e}"
         store.save(state)
