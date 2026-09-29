@@ -148,6 +148,12 @@ cache keys and local volumes; existing runs with different or unrecorded pins mu
 restarted as new jobs. Redeploy Modal with `talos setup` and run the backend's live smoke
 test after upgrading.
 
+`talos check-updates` compares the configured tag with the newest published stable numeric
+tag for each challenge, using GHCR metadata without pulling image layers. New real jobs
+make the same advisory check for their challenge. It never changes either pin or redeploys
+anything; newer tags still need a source compatibility review. Failed automatic lookups
+do not stop jobs, and the manual command explicitly reports an unknown update status.
+
 ## Local backend
 
 The local backend is the C3 bench with a Docker transport. One evaluate call is one detached

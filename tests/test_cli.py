@@ -18,9 +18,10 @@ from talos.types import CompileResult
 
 
 @pytest.fixture(autouse=True)
-def _no_mainnet_hyperparameters(monkeypatch):
-    """`talos run` reads the top algorithm and its hyperparameters before the job exists. No test
-    here may reach mainnet for them; a test that cares overrides these."""
+def _no_external_metadata(monkeypatch):
+    """Keep the mainnet baseline lookup and advisory GHCR check offline. Tests that exercise
+    these integrations override the corresponding stub."""
+    monkeypatch.setattr(cli, "recommend_image_update", lambda challenge: None)
     monkeypatch.setattr("talos.mainnet.top_algorithm", lambda ch: ("fake_base", "c003_a000", 1))
     monkeypatch.setattr("talos.mainnet.top_hyperparameters",
                         lambda algorithm_id, tracks, fuel:
@@ -334,6 +335,33 @@ def test_resume_restarts_a_cancelled_job(tmp_path, monkeypatch, capsys):
     events = [json.loads(ln)["kind"]
               for ln in (run_dir / "timeline.jsonl").read_text().splitlines()]
     assert "resumed" in events
+
+
+def test_update_advisory_runs_only_for_new_real_jobs(tmp_path, monkeypatch):
+    from talos.budget import Spend
+    from talos.state import JobState
+
+    monkeypatch.chdir(tmp_path)
+    save(tmp_path, Config(provider="claude-cli", model="m", mode="single-shot", api_base=None),
+         None)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = []
+    monkeypatch.setattr(cli, "recommend_image_update", seen.append)
+
+    def execute(spec, store, cfg, resume):
+        if not resume:
+            store.save(JobState.fresh(Spend(started_at=0.0)))
+        return 0
+
+    monkeypatch.setattr(cli, "execute_job", execute)
+    args = ["run", "--challenge", "knapsack", "--direction", "go", "--budget-iterations", "1",
+            "--yes"]
+    assert cli.main(args) == 0
+    assert seen == ["knapsack"]
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert cli.main(["run", "--resume", run_dir.name]) == 0
+    assert cli.main(args + ["--fake"]) == 0
+    assert seen == ["knapsack"]
 
 
 @pytest.mark.parametrize("changed", [

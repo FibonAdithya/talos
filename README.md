@@ -437,12 +437,42 @@ candidate has not beaten the baseline on held-out nonces, and the package README
 | `talos run` | Starts or resumes a research job and writes its package when it stops. |
 | `talos compile` | Compiles a directory of algorithm files on the configured backend and prints the compiler output. Scores nothing. |
 | `talos status` | Lists every job under `runs/` with its status, iteration and spend. |
+| `talos check-updates` | Checks GHCR for newer published TIG dev image versions and prints upgrade guidance. |
 
 ### `talos setup`
 
 No flags. See [Setup, step 5](#5-run-talos-setup) for every prompt and what is written.
 Exit code 0 on success, 1 when a credential or backend check fails, 2 for an unknown
 backend or provider.
+
+### `talos check-updates`
+
+```bash
+talos check-updates                       # all eight challenges
+talos check-updates --challenge knapsack  # one challenge
+```
+
+Shows the configured image version and the newest published stable `X.Y.Z` tag for each
+challenge. It reads only registry metadata: Docker, sudo, project configuration and
+compute credentials are not needed. Aliases, prereleases and architecture-specific tags
+are excluded. A newer tag is an upgrade candidate; source compatibility still needs review.
+Exit code 0 means every lookup succeeded (including when updates are available), 1 means
+at least one lookup failed and its update status is unknown, and 2 means invalid arguments.
+
+Each new real job also checks its challenge and prints a recommendation if a newer image
+is available. Each check has a five-second request budget; a failed automatic check is
+silently skipped. Resumes, compile calls and fake runs do not make this advisory check.
+
+To apply an upgrade:
+
+1. Review the upstream release and its matching source revision. Check that the proposed
+   image tag exists for all eight challenges and the architectures you use.
+2. Update `DEV_IMAGE_TAG` and, when needed, `MONOREPO_REF` in `talos/challenges.py` together.
+3. Run `make check`. For Modal, redeploy with `talos setup` before running the backend's
+   [live smoke test](#live-smoke-test). C3 and local Docker use the new pin on their next job;
+   run their smoke test too when that is your backend.
+4. Start new jobs. Existing measurements are tied to the old pins; the upgrade automatically
+   gets fresh cache keys and local build volumes.
 
 ### `talos run`
 

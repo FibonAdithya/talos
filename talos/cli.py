@@ -21,6 +21,7 @@ import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
+from talos import image_updates
 from talos import mainnet as mainnet_api
 from talos.budget import Budget, BudgetExhausted, Spend, exhausted
 from talos.c3_bench import C3CommandError
@@ -892,6 +893,8 @@ def cmd_run(args, ask) -> int:
         print(f"nonces per track must be between 1 and {HOLDOUT_START}, not {nonces}",
               file=sys.stderr)
         return 2
+    if cfg.provider != "fake":
+        recommend_image_update(challenge)
     rand_hash = new_rand_hash()
     training, holdout = draw_nonce_sets(info.tracks, rand_hash, training_count=nonces,
                                         holdout_count=nonces)
@@ -997,6 +1000,50 @@ def cmd_status(args, ask) -> int:
     return 0
 
 
+def recommend_image_update(challenge: str) -> None:
+    """New-job advisory only. A registry outage must not prevent an otherwise valid run."""
+    try:
+        update = image_updates.check_update(challenge)
+    except image_updates.UpdateCheckError:
+        return
+    if update.available:
+        print(f"TIG dev image update available for {challenge}: {update.current} -> "
+              f"{update.latest}. Run `talos check-updates` for upgrade guidance. "
+              f"This job will use the pinned image {update.current}.", file=sys.stderr)
+
+
+def cmd_check_updates(args, ask) -> int:
+    """Check published versions without Docker, compute credentials or a configured project."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    names = [args.challenge] if args.challenge else list(CHALLENGES)
+
+    def check(name):
+        try:
+            return image_updates.check_update(name)
+        except image_updates.UpdateCheckError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        updates = list(pool.map(check, names))
+    newer = False
+    for name, update in zip(names, updates):
+        if update is None:
+            print(f"{name}: unable to check GHCR; update status unknown", file=sys.stderr)
+            continue
+        status = "update available" if update.available else "no newer release"
+        print(f"{name}: configured {update.current}, newest published {update.latest} ({status})")
+        newer |= update.available
+    if newer:
+        print("To upgrade, review the TIG release and its matching source revision, then update "
+              "DEV_IMAGE_TAG and MONOREPO_REF in talos/challenges.py. The image tag must be "
+              "available for all challenges and required architectures. Run `make check`, "
+              "redeploy Modal with `talos setup` if used, then run your backend's live smoke test. "
+              "Start new jobs after upgrading. "
+              "A newer published tag does not establish source compatibility.")
+    return 1 if any(update is None for update in updates) else 0
+
+
 def main(argv=None, ask=default_ask) -> int:
     p = argparse.ArgumentParser(prog="talos")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1025,8 +1072,12 @@ def main(argv=None, ask=default_ask) -> int:
     c.add_argument("--dir", default="algorithm")
     c.add_argument("--backend", choices=list(BACKENDS))
     sub.add_parser("status")
+    updates = sub.add_parser("check-updates", help="check GHCR for newer TIG dev images")
+    updates.add_argument("--challenge", choices=list(CHALLENGES),
+                         help="check one challenge (default: all)")
     args = p.parse_args(argv)
-    return {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status}[args.cmd](args, ask)
+    return {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
+            "check-updates": cmd_check_updates}[args.cmd](args, ask)
 
 
 if __name__ == "__main__":
