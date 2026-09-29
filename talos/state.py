@@ -43,6 +43,7 @@ class JobSpec:
     # None identifies jobs written before the image pin was recorded. Their saved scores
     # cannot be reused with a newer runtime, even when the monorepo pin is unchanged.
     dev_image_tag: str | None = None
+    scoring: str = "metered"  # research scoring, `talos run --scoring`; frozen with the job
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -135,6 +136,13 @@ class JobState:
     # bench instead of probing again, so the candidates score on the hardware the baseline was
     # measured on (AGENTS.md invariant 1).
     hardware: str | None = None
+    # What research scoring actually runs: None until Loop.calibrate has run, "native" once a
+    # calibration record gave every research track a budget, "metered" when the job asked for
+    # native and calibration could not give one (the fallback is kept for the job's life).
+    scoring: str | None = None
+    fuel_budgets_us: dict[str, int] | None = None  # track -> native solve budget, microseconds
+    # One entry per metered validation of a would-be best: iteration, outcome, reason.
+    validations: list[dict] = field(default_factory=list)
 
     @classmethod
     def fresh(cls, spend: Spend) -> "JobState":
@@ -150,7 +158,8 @@ class JobState:
                 "confirmed": self.confirmed, "false_positives": self.false_positives,
                 "stop_reason": self.stop_reason, "tacit": self.tacit,
                 "strategy_counts": self.strategy_counts, "pending_job": self.pending_job,
-                "hardware": self.hardware}
+                "hardware": self.hardware, "scoring": self.scoring,
+                "fuel_budgets_us": self.fuel_budgets_us, "validations": self.validations}
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobState":
@@ -163,7 +172,9 @@ class JobState:
                    stop_reason=d.get("stop_reason"), tacit=d.get("tacit", ""),
                    strategy_counts=d.get("strategy_counts", {}),
                    pending_job=d.get("pending_job"),
-                   hardware=d.get("hardware", d.get("gpu")))
+                   hardware=d.get("hardware", d.get("gpu")),
+                   scoring=d.get("scoring"), fuel_budgets_us=d.get("fuel_budgets_us"),
+                   validations=d.get("validations", []))
 
 
 def _atomic_write(path: Path, text: str) -> None:

@@ -462,3 +462,14 @@ def test_prune_lines_keep_an_existing_pristine_copy(tmp_path):
     r = subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert (crate / "mod.rs").read_text() == pinned
+
+
+def test_warm_script_fetches_every_locked_crate_after_the_build():
+    script = warm_script("knapsack")
+    build = script.index('build_algorithm "$name"')
+    fetch = script.index("cargo +nightly-2025-02-10 fetch")
+    # mutation: no fetch leaves tig-structs' and tig-utils' crates out of the registry, and
+    # the first native build in the network-less job container fails to resolve them
+    assert build < fetch < script.index(f"touch /app/{WARM_MARKER}")
+    # mutation: keeping the old marker never re-warms a volume made before this change
+    assert WARM_MARKER == ".talos-warm-2"

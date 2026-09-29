@@ -58,6 +58,105 @@ hardware class, so the delta between them measures the edit and nothing else. Th
 `rand_hash` that seeds the nonces is never shown to the LLM, so it cannot tune to the exact
 nonces it is scored on.
 
+## Native research scoring
+
+`talos run --scoring native` (the default) changes how research candidates are scored, not how
+a winner is decided. With `--scoring metered` every nonce of every candidate runs under
+`tig-runtime` with TIG's fuel counter, as the baseline did. It is slow because the build
+instruments every dependency's IR and the runtime meters every instruction. In native mode a
+candidate is built into the `talos-native` runner (`talos/native_runner.py::render` writes it,
+`talos/inside.py::build_native` builds it), which has no fuel counter and stops when the
+solve has run for a time budget (exit 87). The loop then scores research candidates natively
+and only an improving one is scored on the metered runtime.
+
+**Calibration.** A native run has no fuel limit, so a per-track time budget stands in for it.
+`talos/loop.py::Loop.calibrate` finds one after the baseline, on every start and resume. The
+record is keyed by challenge, hardware class, both pins, the baseline's code, the native
+runner's digest and the baseline's hyperparameters
+(`talos/calibration.py::calibration_key`); nonce sets are not in the key, so
+one record serves later jobs on the same baseline and is cached in `~/.talos/calibration/`.
+With no record, Talos scores the baseline's training nonces natively with no budget and
+reads the metered fuel from the baseline's stored rows (or, for a baseline cached before fuel
+was recorded, from one metered call). For each track the ratio is the median of native
+`solve_us` over metered `fuel_consumed` (`talos/calibration.py::track_ratios`). Both numbers are taken at the algorithm's last `save_solution` call, so an algorithm that keeps improving its solution until the limit gives a ratio for the time of its last save.
+A nonce enters the median only when both runs are ok, neither hit its limit and both
+reached the same quality, since otherwise the two saves are different ones (a metered run
+cut off by fuel saved earlier than the unbudgeted native run). The budget is
+ratio x the job's fuel x a margin, never below one second
+(`talos/calibration.py::budgets_us`). The starting margin is 0.8, a validation that finds a
+metered out-of-fuel nonce the native run finished counts a miss for its track, and every third
+miss lowers that track's margin by 0.1 to a floor of 0.3
+(`talos/calibration.py::record_miss`). The 0.8, the 0.1 step, the 0.3 floor, the limit of 3
+misses and the one-second floor are ESTIMATES with no measurement behind them; they are
+tuned from the misses the records collect. The record stores the ratio measured when it was
+created, plus each track's margin and miss count; it never re-measures the ratio, and the
+budget is computed from it and the job's fuel each time.
+
+**Validation.** A candidate that would become the best natively is first scored on the
+metered runtime, on the job's training nonces, by `talos/loop.py::Loop._validate_and_finish`.
+`talos/scoring.py::validation_failure` checks, in this order, and the first failure is the
+demotion reason: the candidate builds metered (`native_metered_build_mismatch`); no metered
+nonce ran out of fuel where the native run stopped at neither its budget nor the per-nonce
+timeout (`fuel_proxy_miss`,
+`talos/scoring.py::fuel_proxy_misses`); every nonce both paths solved within their limits
+has the same quality (`nondeterministic`, `talos/scoring.py::quality_mismatches`; a row
+carries `limit_hit` when the solver exited 87, and a limit-cut nonce is never a quality
+mismatch); the metered result is scoreable (`unscoreable`); its error rate is under the
+challenge's ceiling (`error_ceiling`); and the loop's own improvement rule holds, meaning
+its mean delta exceeds the current best's or it beats the baseline (`not_improved`). The
+last check is not `beats` alone, so a stepping stone that improves on the best without yet
+beating the baseline is kept. A pass makes the candidate the best with its metered results,
+and held-out confirmation (`talos/loop.py::Loop._confirm`) runs on the metered path only. A
+failure leaves the previous best in place, appends a `demoted` entry to `state.json`'s
+`validations`, and counts in the calibration record. In native mode the recall record
+carries no native-versus-metered runtime ratio; a validated best gets the metered one.
+
+**Why the verifier uses the unmetered PTX.** For a GPU challenge the native build writes its
+own PTX beside the metered one, without `inject_fuel_and_runtime_sig`
+(`talos/inside.py::build_native_ptx`), and the native run and `tig-verifier` are given that
+file. The metered PTX is instrumented for fuel and is loaded by `tig-runtime`, which the
+native runner does not use.
+
+**Fallback and resume.** The job falls back when the baseline fails the metered build during
+calibration (a call made only when its stored rows carry no fuel;
+`talos/loop.py::Loop._measure_calibration`), when it fails the native build, when no track gets
+a ratio, or when a needed track has none. Then the job records `scoring: metered`, emits `calibration_fallback`
+with the reason and runs metered for the rest of its life. A resume keeps the job's own
+budgets: `Loop.calibrate` does not re-derive them once set, because another job may have
+tightened the record since and a changed budget changes the request of a C3 job still
+running. A calibration interrupted between its metered and native calls keeps the metered
+rows in `pending_job["calibration_metered"]`, so the resume goes straight to the native call.
+The scoring mode itself is frozen in `job.json`, and `--resume` refuses a different one.
+
+**What was measured.** All MEASURED on 2026-09-29, before the pin moved to dev image 0.0.8:
+every number below comes from dev image 0.0.7 at monorepo `84a5787`. The files the runner
+mirrors (`tig-runtime`, the entry point template, `build_so`, `build_ptx`, `framework.cu`,
+the crate manifests) are byte-identical at the current pin; the challenge sources changed.
+The hypergraph rows are from the design spec's claims table
+(`docs/ai/specs/2026-09-29-native-research-scoring-design.md`, section 10):
+
+| Measurement (hypergraph) | Value | Source |
+|---|---|---|
+| Metered build | 286.6 s | probe job job_1790678981167_ip26xh |
+| Native build, cold / warm / PTX | 43.9 / 27.7 / 3.7 s | same job |
+| Scoring 5 nonces, metered / native | 609 / 234 s | same job |
+| Quality across 4 runs, all tracks | identical | same job, and the baseline `results.json` of run 20260929-073341-hypergraph |
+| Submission to script start on C3 | 28 s | same job's C3 log |
+
+Local knapsack, native against metered (MEASURED 2026-09-29, dev image 0.0.7, local Docker,
+mainnet top `knap_exact16`, track `n_items=1000,budget=10`, `max_fuel` 5,000,000,000,000, 3 training
+nonces): the quality is equal on all 3 nonces (qualities 233007, 309510, 232131); one evaluate with
+the build took 260.8 s metered and 60.6 s native; a nonce's runtime was 881 to 960 ms metered
+and 657 to 703 ms native. The CPU runner template compiled on the first attempt, offline.
+The GPU template has not been compiled yet; the first compile is the live parity test
+(`tests/test_live.py::test_native_parity`), which a person runs.
+
+ESTIMATES, not measured: scoring one hypergraph candidate takes about 4.6 minutes native
+against about 15 minutes metered (the sum of the rows above); the knapsack ratio of about
+1.7e-4 us per fuel unit would put a budget at `max_fuel` and margin 0.8 near 690 s, above
+the 600 s per-nonce timeout, so on that track the timeout would bind first; other CPU
+challenges behaving like hypergraph is unmeasured.
+
 ## Guards between build and scoring
 
 A candidate that compiles but adds a function nothing calls (rustc's `never used` warning

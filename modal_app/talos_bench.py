@@ -19,6 +19,7 @@ from talos.inside import NONCE_TIMEOUT_S
 APP_NAME = "talos-bench"
 ARTIFACTS = "/artifacts"
 MONOREPO = Path("/app")
+NATIVE_BINARY = "talos-native"
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name("talos-artifacts", create_if_missing=True)
@@ -50,31 +51,36 @@ def _probe_image() -> modal.Image:
     return modal.Image.debian_slim(python_version=_python())
 
 
-def content_hash(files: dict[str, str]) -> str:
-    return inside.content_hash(files, MONOREPO_REF, DEV_IMAGE_TAG)
+def content_hash(files: dict[str, str], mode: str = "metered") -> str:
+    return inside.content_hash(files, MONOREPO_REF, DEV_IMAGE_TAG, mode)
 
 
-def _compile_impl(name: str, files: dict[str, str]) -> dict:
+def _compile_impl(name: str, files: dict[str, str], mode: str = "metered") -> dict:
     """Never raises for an application-level failure. A bad file map or a build that emits no
     .so is a failed compile the loop can act on; raising would instead burn the client's
     retry window on a deterministic error and pause the run."""
     try:
         volume.reload()
-        art_id = content_hash(files)
+        native = mode == "native"
+        art_id = content_hash(files, mode)
         dest = Path(ARTIFACTS) / name / art_id
-        if (dest / "algo.so").exists():
+        artifact = NATIVE_BINARY if native else "algo.so"
+        if (dest / artifact).exists():
             return {"ok": True, "artifact_id": art_id, "output": "cached"}
         inside.stage_algorithm(MONOREPO, name, files, inside.ALGO_NAME)
         try:
-            ok, out = inside.build(MONOREPO, name, inside.ALGO_NAME)
+            build = inside.build_native if native else inside.build
+            ok, out = build(MONOREPO, name, inside.ALGO_NAME)
             if not ok:
                 return {"ok": False, "artifact_id": None, "output": out}
-            so, ptx = inside.artifact_paths(MONOREPO, name, inside.ALGO_NAME)
+            paths = inside.native_artifact_paths if native else inside.artifact_paths
+            so, ptx = paths(MONOREPO, name, inside.ALGO_NAME)
             if not so.exists():
                 return {"ok": False, "artifact_id": None,
-                        "output": out + f"\nbuild produced no .so at {so}"}
+                        "output": out + f"\nbuild produced no {'runner' if native else '.so'}"
+                                        f" at {so}"}
             dest.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(so, dest / "algo.so")
+            shutil.copy2(so, dest / artifact)
             if ptx:
                 shutil.copy2(ptx, dest / "algo.ptx")
             volume.commit()
@@ -87,7 +93,8 @@ def _compile_impl(name: str, files: dict[str, str]) -> dict:
 
 
 def _score_batch_impl(name: str, challenge_id: str, artifact_id: str, tasks: list[dict],
-                      workers: int, pool_factory=None, clock=time.monotonic) -> dict:
+                      workers: int, mode: str = "metered", pool_factory=None,
+                      clock=time.monotonic) -> dict:
     """Scores `tasks` (one dict each: track, rand_hash, nonce, fuel, timeout_s,
     hyperparameters) on `workers` processes at once. The client sends at most `workers`
     tasks per call, so the batch's wall time is bounded by its slowest nonce and fits the
@@ -95,7 +102,7 @@ def _score_batch_impl(name: str, challenge_id: str, artifact_id: str, tasks: lis
     which is what Modal bills for and what the client charges."""
     volume.reload()
     d = Path(ARTIFACTS) / name / artifact_id
-    so, ptx = d / "algo.so", d / "algo.ptx"
+    so, ptx = d / (NATIVE_BINARY if mode == "native" else "algo.so"), d / "algo.ptx"
     if not so.exists():
         # Infrastructure, not an algorithm failure: say so plainly rather than letting
         # tig-runtime's exit code be classified as "panic".
@@ -104,7 +111,7 @@ def _score_batch_impl(name: str, challenge_id: str, artifact_id: str, tasks: lis
     order = {(t["track"], t["nonce"]): i for i, t in enumerate(tasks)}
     todo = [(challenge_id, t["track"], t["rand_hash"], t["nonce"], str(so), t["fuel"],
              min(t["timeout_s"], NONCE_TIMEOUT_S), str(ptx) if ptx.exists() else None,
-             str(MONOREPO), t["hyperparameters"]) for t in tasks]
+             str(MONOREPO), t["hyperparameters"], mode, t.get("budget_us")) for t in tasks]
     rows = list(inside.run_nonces(todo, workers, pool_factory=pool_factory))
     rows.sort(key=lambda r: order[(r["track"], r["nonce"])])
     return {"rows": rows, "seconds": clock() - t0}
@@ -136,14 +143,14 @@ def register(app, image=_image, probe_image=_probe_image) -> None:
 
 
 def _mk_compile(n):
-    def compile_fn(files: dict) -> dict:
-        return _compile_impl(n, files)
+    def compile_fn(files: dict, mode: str = "metered") -> dict:
+        return _compile_impl(n, files, mode)
     return compile_fn
 
 
 def _mk_score_batch(n, cid, workers):
-    def score_batch(artifact_id: str, tasks: list[dict]) -> dict:
-        return _score_batch_impl(n, cid, artifact_id, tasks, workers)
+    def score_batch(artifact_id: str, tasks: list[dict], mode: str = "metered") -> dict:
+        return _score_batch_impl(n, cid, artifact_id, tasks, workers, mode=mode)
     return score_batch
 
 

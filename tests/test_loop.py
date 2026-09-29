@@ -20,14 +20,14 @@ HO2 = [NonceSet("t", HASH, 1_000_000, 4), NonceSet("u", HASH, 1_000_000, 4)]
 BASE_FILES = {"mod.rs": "fn solve() { let k = 1; }\n"}
 
 
-def spec(budget=None, track=None, two_tracks=False):
+def spec(budget=None, track=None, two_tracks=False, scoring="metered", fuel=1):
     tracks = ["t", "u"] if two_tracks else ["t"]
     return JobSpec(job_id="j", challenge="knapsack", direction="go", provider="fake", model="m",
                    mode="single-shot",
                    budget=budget or Budget(usd=None, hours=None, iterations=20, compute_usd=None),
                    rand_hash=HASH, tracks=tracks, training=TR2 if two_tracks else TR,
-                   holdout=HO2 if two_tracks else HO, fuel=1, created_at=0.0,
-                   monorepo_ref="r", challenge_id="c003", track=track)
+                   holdout=HO2 if two_tracks else HO, fuel=fuel, created_at=0.0,
+                   monorepo_ref="r", challenge_id="c003", track=track, scoring=scoring)
 
 
 def baseline(q=100, holdout_n=4, tracks=("t",)):
@@ -55,15 +55,18 @@ def quality_from_files(challenge, files, ns):
 
 
 def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=None, holdout_n=4,
-         track=None, two_tracks=False):
+         track=None, two_tracks=False, scoring="metered", fuel=1, budgets=None, bench=None):
     store = JobStore(tmp_path)
-    sp = spec(budget, track=track, two_tracks=two_tracks)
+    sp = spec(budget, track=track, two_tracks=two_tracks, scoring=scoring, fuel=fuel)
     store.write_spec(sp)
     st = JobState.fresh(Spend(started_at=0.0))
     st.baseline = baseline(holdout_n=holdout_n, tracks=("t", "u") if two_tracks else ("t",))
     st.status = "researching"
     st.best = None
-    fb = FakeBench(scores)
+    if scoring == "native":
+        st.scoring = "native"
+        st.fuel_budgets_us = budgets or {"t": 1_000_000}
+    fb = bench if bench is not None else FakeBench(scores)
     fp = FakeProvider(script)
     loop = Loop(sp, st, store, fp, fb, template_rs="pub fn solve_challenge(",
                 clock=lambda: 0.0, sleep=lambda s: None, thresholds=thresholds or Thresholds())
@@ -797,3 +800,297 @@ def test_the_spec_hyperparameters_reach_baseline_candidates_and_prompts(tmp_path
     assert len(fb.calls) >= 2 and all(c.hyperparameters == hp for c in fb.calls)
     # mutation: _context without hyperparameters= leaves the model unaware of the keys
     assert any('track t: {"x":1}' in user for _system, user in fp.calls)
+
+
+def native(tmp_path, script, **kw):
+    kw.setdefault("scoring", "native")
+    return make(tmp_path, script, **kw)
+
+
+def test_native_research_validates_a_new_best_on_the_metered_path(tmp_path):
+    loop, fp, fb, store = native(tmp_path, [hyp("bump k"), edit(5)])
+    st = loop.run()
+    research, validation = fb.calls[0], fb.calls[1]
+    assert research.mode == "native" and research.fuel_budgets_us == {"t": 1_000_000}
+    # held-out is decided on the metered run, never on native results
+    assert research.holdout == [] and research.baseline_training is None
+    assert validation.mode == "metered" and validation.holdout == HO
+    assert validation.baseline_training is not None and validation.prior_functions is None
+    # mutation: best set from the native rows (they carry solve_us, not fuel_consumed)
+    assert st.best.iteration == 1 and st.best.training[0].fuel_consumed == 1000
+    assert st.validations == [{"iteration": 1, "outcome": "validated", "reason": None}]
+    assert st.status == "won" and st.confirmed == [1]
+    # mutation: confirming on the native call's (empty) held-out rows instead of the metered
+    # ones; FakeBench counts a held-out run for the native call too, so count rows, not runs
+    assert len(st.best.holdout) == 4 and all(r.fuel_consumed == 1000 for r in st.best.holdout)
+
+
+def test_a_native_score_carries_no_runtime_ratio_against_the_metered_baseline(tmp_path):
+    loop, fp, fb, store = native(tmp_path, [hyp("lower k"), edit(0)],
+                                 budget=Budget(usd=None, hours=None, iterations=1,
+                                               compute_usd=None))
+    st = loop.run()
+    # mutation: a native-over-metered ratio reaches the recall prompt as "runtime 0.4x
+    # baseline" for code that is no faster at all
+    assert "runtime_ratio" not in st.hypotheses[0]
+    scored = [json.loads(x) for x in
+              (store.run_dir / "timeline.jsonl").read_text().splitlines()
+              if json.loads(x)["kind"] == "scored"]
+    assert scored[0]["runtime_ratio"] is None
+
+
+def test_a_native_loss_is_not_validated(tmp_path):
+    # k = 0 scores 99 against the baseline's 100: worse, so nothing to validate
+    loop, fp, fb, store = native(tmp_path, [hyp("lower k"), edit(0)],
+                                 budget=Budget(usd=None, hours=None, iterations=1,
+                                               compute_usd=None))
+    loop.run()
+    # mutation: validating every scored candidate doubles the compute of every iteration
+    assert [c.mode for c in fb.calls] == ["native"]
+
+
+def test_a_nondeterministic_candidate_is_demoted_and_research_stays_on_the_old_code(tmp_path):
+    def metered(ch, files, ns):
+        q = quality_from_files(ch, files, ns)
+        return [x + 1 for x in q] if "let k = 5;" in files["mod.rs"] else q
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(5), hyp("b"), edit(3)], bench=fb,
+                                budget=Budget(usd=None, hours=None, iterations=2,
+                                              compute_usd=None))
+    st = loop.run()
+    # spec §6: both qualities recorded. k = 5 is 104 natively and 105 metered on every nonce
+    assert st.validations[0] == {
+        "iteration": 1, "outcome": "demoted", "reason": "nondeterministic",
+        "mismatches": [{"track": "t", "nonce": n, "native": 104, "metered": 105}
+                       for n in range(4)]}
+    assert st.hypotheses[0]["outcome"] == "failed:validation"
+    # mutation: building on the demoted candidate; edit(3) searches for "let k = 1;", which
+    # only the baseline still has, so iteration 2 would fail to apply its edit
+    assert st.best.iteration == 2 and "let k = 3;" in st.best.files["mod.rs"]
+    # mutation: a demotion that leaves best pointing at the rejected candidate
+    assert not (store.run_dir / "best" / "mod.rs").read_text().count("let k = 5;")
+
+
+def test_a_metered_build_failure_demotes_with_its_reason(tmp_path):
+    fb = FakeBench(quality_from_files, metered_compile_ok=lambda files: False)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(5)], bench=fb,
+                                budget=Budget(usd=None, hours=None, iterations=1,
+                                              compute_usd=None))
+    st = loop.run()
+    assert st.validations[0]["reason"] == "native_metered_build_mismatch" and st.best is None
+
+
+def _calibrated(loop, tmp_path, ratio=1.0):
+    """A fresh native job's first calibrate, from a stored record. make() pre-sets native
+    budgets for the loop tests; a fresh job has none, so they are cleared first."""
+    from talos import calibration
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    key = calibration.calibration_key("knapsack", "hw", loop.state.baseline.files,
+                                      loop.spec.hyperparameters)
+    calibration.save(tmp_path / "cal", "knapsack", key, calibration.new_record({"t": ratio}))
+    loop.calibrate(tmp_path / "cal", "hw")
+    return key
+
+
+def test_resume_keeps_the_jobs_budgets_and_its_pending_job(tmp_path):
+    from talos import calibration
+    loop, fp, fb, store = native(tmp_path, [], fuel=10_000_000, budgets={"t": 1_234_567})
+    key = calibration.calibration_key("knapsack", "hw", loop.state.baseline.files, None)
+    # another job has since tightened the shared record: 0.25 x 1e7 x 0.8 = 2_000_000
+    calibration.save(tmp_path / "cal", "knapsack", key, calibration.new_record({"t": 0.25}))
+    pend = {"purpose": 1, "hypothesis": {}, "files": {}, "job_id": "job_1",
+            "request_hash": "abc"}
+    loop.state.pending_job = dict(pend)
+    loop.calibrate(tmp_path / "cal", "hw")
+    # mutation: re-deriving budgets from the record changes the in-flight request's hash, and
+    # the resume submits a second job while the first still bills
+    assert loop.state.fuel_budgets_us == {"t": 1_234_567}
+    # mutation: re-measuring on resume overwrites pending_job and loses job_1's id
+    assert loop.state.pending_job == pend and fb.calls == []
+    # demotions still reach the record
+    assert loop._calibration == (tmp_path / "cal", key)
+
+
+def test_three_fuel_misses_lower_the_margin_and_the_budgets(tmp_path):
+    from talos import calibration
+    def metered(ch, files, ns):
+        return ["out_of_fuel"] + quality_from_files(ch, files, ns)[1:]
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    script = [hyp("a"), edit(5), hyp("b"), edit(6), hyp("c"), edit(7)]
+    loop, fp, _, store = native(tmp_path, script, bench=fb, fuel=10_000_000,
+                                budget=Budget(usd=None, hours=None, iterations=3,
+                                              compute_usd=None))
+    key = _calibrated(loop, tmp_path)
+    # 1.0 us/fuel x 10_000_000 fuel x 0.8 = 8_000_000 us, by hand
+    assert loop.state.fuel_budgets_us == {"t": 8_000_000}
+    st = loop.run()
+    assert [v["reason"] for v in st.validations] == ["fuel_proxy_miss"] * 3
+    rec = calibration.load(tmp_path / "cal", "knapsack", key)
+    assert rec["tracks"]["t"]["margin"] == pytest.approx(0.7)
+    assert rec["demotions"] == {"fuel_proxy_miss": 3}
+    # mutation: lowering the stored margin without recomputing the job's budgets
+    assert st.fuel_budgets_us == {"t": 7_000_000}
+    assert fb.calls[-2].fuel_budgets_us == {"t": 8_000_000}  # iteration 3's research call
+
+
+def test_resume_mid_validation_goes_straight_to_the_metered_run(tmp_path):
+    loop, fp, fb, store = native(tmp_path, [])  # no LLM reply scripted: none may be asked for
+    files = {"mod.rs": "fn solve() { let k = 5; }\n"}
+    native_rows = [NonceResult("t", n, True, 104, 1, None, solve_us=500) for n in range(4)]
+    loop.state.pending_job = {"purpose": 1, "hypothesis": {"title": "h", "description": "d",
+                                                           "strategy_tag": "local_search"},
+                              "files": files,
+                              "native_training": [r.to_dict() for r in native_rows]}
+    loop._save()
+    st = loop.run()
+    # mutation: re-entering at _score_candidate scores natively again before validating
+    assert fb.calls[0].mode == "metered"
+    assert st.best is not None and st.best.iteration == 1
+
+
+def test_calibrate_rescores_metered_fuel_when_the_cached_baseline_has_none(tmp_path):
+    from talos import calibration
+    loop, fp, fb, store = native(tmp_path, [], fuel=10_000_000)
+    loop.state.scoring = None  # as a fresh native job before calibration
+    loop.calibrate(tmp_path / "cal", "hw")
+    # the test baseline's rows have no fuel_consumed, like every pre-change cached baseline
+    # mutation: falling back to metered research instead of measuring the fuel
+    assert [c.mode for c in fb.calls] == ["metered", "native"]
+    assert all(c.holdout == [] for c in fb.calls)
+    # FakeBench: fuel 1000, solve 500 us -> 0.5 us/fuel; 0.5 x 10_000_000 x 0.8 = 4_000_000
+    assert loop.state.scoring == "native" and loop.state.fuel_budgets_us == {"t": 4_000_000}
+    key = calibration.calibration_key("knapsack", "hw", loop.state.baseline.files, None)
+    assert calibration.load(tmp_path / "cal", "knapsack", key) is not None
+    assert loop.state.pending_job is None
+
+
+def test_calibrate_uses_the_baselines_own_fuel_when_it_has_it(tmp_path):
+    loop, fp, fb, store = native(tmp_path, [], fuel=10_000_000)
+    loop.state.scoring = None
+    loop.state.baseline.training = [replace(r, fuel_consumed=2000)
+                                    for r in loop.state.baseline.training]
+    loop.calibrate(tmp_path / "cal", "hw")
+    assert [c.mode for c in fb.calls] == ["native"]
+    # 500 us / 2000 fuel = 0.25; 0.25 x 10_000_000 x 0.8 = 2_000_000
+    assert loop.state.fuel_budgets_us == {"t": 2_000_000}
+
+
+def test_calibrate_reuses_a_stored_record_without_a_bench_call(tmp_path):
+    # _calibrated clears make()'s preset budgets, so this is a fresh job reading the record
+    loop, fp, fb, store = native(tmp_path, [], fuel=10_000_000)
+    _calibrated(loop, tmp_path, ratio=0.25)
+    assert fb.calls == [] and loop.state.fuel_budgets_us == {"t": 2_000_000}
+
+
+def test_calibration_without_solve_times_falls_back_to_metered_research(tmp_path):
+    fb = FakeBench(quality_from_files, solve_us=None)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(5)], bench=fb,
+                                budget=Budget(usd=None, hours=None, iterations=1,
+                                              compute_usd=None))
+    loop.state.scoring = None
+    loop.calibrate(tmp_path / "cal", "hw")
+    assert loop.state.scoring == "metered"
+    events = [json.loads(x)["kind"] for x in
+              (store.run_dir / "timeline.jsonl").read_text().splitlines()]
+    assert "calibration_fallback" in events
+    n_before = len(fb.calls)
+    loop.run()
+    # mutation: a native run with no budget
+    assert all(c.mode == "metered" for c in fb.calls[n_before:])
+
+
+def test_a_metered_job_never_calibrates(tmp_path):
+    loop, fp, fb, store = make(tmp_path, [])
+    loop.calibrate(tmp_path / "cal", "hw")
+    assert fb.calls == [] and loop.state.scoring is None and loop._scoring() == "metered"
+
+
+def test_calibration_is_budget_checked_before_its_first_call(tmp_path):
+    loop, fp, fb, store = native(tmp_path, [],
+                                 budget=Budget(usd=None, hours=None, iterations=5,
+                                               compute_usd=0.0))
+    loop.state.scoring = None
+    # mutation: `if budget:` lets a zero compute cap through (AGENTS.md invariant 5)
+    with pytest.raises(BudgetExhausted):
+        loop.calibrate(tmp_path / "cal", "hw")
+    assert fb.calls == []
+
+
+def test_a_focused_native_job_needs_a_budget_only_for_its_track(tmp_path):
+    from talos import calibration
+    loop, fp, fb, store = native(tmp_path, [], track="t", two_tracks=True)
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    key = calibration.calibration_key("knapsack", "hw", loop.state.baseline.files, None)
+    calibration.save(tmp_path / "cal", "knapsack", key, calibration.new_record({"t": 1.0}))
+    loop.calibrate(tmp_path / "cal", "hw")
+    # the guard track u is scored only in the metered validation, so it needs no budget
+    # mutation: requiring every track's ratio sends a focused job to the metered fallback
+    assert loop.state.scoring == "native"
+
+
+def test_a_resumed_calibration_reuses_its_stored_metered_rows(tmp_path):
+    loop, fp, fb, store = native(tmp_path, [], fuel=10_000_000)
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    # killed during the native call: the metered rows (fuel 2000) were stored before it
+    rows = [NonceResult("t", n, True, 100, 1, None, fuel_consumed=2000) for n in range(4)]
+    loop.state.pending_job = {"purpose": "calibration",
+                              "calibration_metered": [r.to_dict() for r in rows]}
+    loop.calibrate(tmp_path / "cal", "hw")
+    # mutation: re-running the metered call on resume, whose request hash differs from the
+    # in-flight native job's, so C3 submits a new job and the native one is orphaned
+    assert [c.mode for c in fb.calls] == ["native"]
+    # 500 us / 2000 fuel = 0.25 (the stored rows, not FakeBench's 1000); x 1e7 x 0.8
+    assert loop.state.fuel_budgets_us == {"t": 2_000_000}
+    assert loop.state.pending_job is None
+
+
+def test_a_calibration_stores_its_metered_rows_before_the_native_call(tmp_path):
+    seen = []
+
+    class Recording(FakeBench):
+        def evaluate(self, request):
+            if request.mode == "native":
+                seen.append(store.load().pending_job)  # what a kill here would leave
+            return super().evaluate(request)
+
+    loop, fp, _, store = native(tmp_path, [], fuel=10_000_000,
+                                bench=Recording(quality_from_files))
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    loop.calibrate(tmp_path / "cal", "hw")
+    # mutation: keeping the metered rows only in a local, so a kill here loses them
+    assert seen[0]["purpose"] == "calibration"
+    assert [r["fuel_consumed"] for r in seen[0]["calibration_metered"]] == [1000] * 4
+    assert store.load().pending_job is None  # cleared once the native call is back
+
+
+def test_a_native_calibration_build_failure_scores_the_job_metered(tmp_path):
+    # The GPU runner template has never been compiled live; if it fails, the job still runs.
+    fb = FakeBench(quality_from_files, compile_ok=lambda files: False,
+                   metered_compile_ok=lambda files: True)
+    loop, fp, _, store = native(tmp_path, [], bench=fb)
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    loop.calibrate(tmp_path / "cal", "hw")
+    assert loop.state.scoring == "metered" and loop.state.fuel_budgets_us is None
+    assert [c.mode for c in fb.calls][-1] == "native"
+    events = [json.loads(x) for x in
+              (store.run_dir / "timeline.jsonl").read_text().splitlines()]
+    fallback = [e for e in events if e["kind"] == "calibration_fallback"]
+    # mutation: dropping the native compile check reports "no native budget" with no build
+    # output, so the user cannot tell a broken runner from a baseline without ratios
+    assert any("native build" in e["reason"] and "E0308" in e.get("output", "")
+               for e in fallback)
+    assert list((tmp_path / "cal").rglob("*.json")) == []  # a failed build caches nothing
+
+
+def test_a_metered_calibration_build_failure_falls_back_with_its_output(tmp_path):
+    fb = FakeBench(quality_from_files, metered_compile_ok=lambda files: False)
+    loop, fp, _, store = native(tmp_path, [], bench=fb)
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    loop.calibrate(tmp_path / "cal", "hw")
+    events = [json.loads(x) for x in
+              (store.run_dir / "timeline.jsonl").read_text().splitlines()]
+    fallback = [e for e in events if e["kind"] == "calibration_fallback"]
+    # mutation: a failed metered build silently becomes "no fuel", and the event hides why
+    assert any("metered build" in e["reason"] and "E0308" in e.get("output", "")
+               for e in fallback)
+    assert loop.state.scoring == "metered" and [c.mode for c in fb.calls] == ["metered"]

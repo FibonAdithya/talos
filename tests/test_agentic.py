@@ -351,3 +351,13 @@ def test_agent_env_passes_the_frozen_gpu_through(monkeypatch):
     # mutation: dropping TALOS_HARDWARE from the allowlist makes every sandbox `talos compile`
     # probe for a GPU of its own instead of using the job's
     assert _agent_env()["TALOS_HARDWARE"] == "A100-80GB"
+
+
+def test_a_native_job_tells_its_agent_to_compile_natively():
+    from dataclasses import replace
+    c = ctx()
+    metered = claude_md(c)
+    native = claude_md(replace(c, scoring="native"))
+    assert "`talos compile --challenge knapsack --dir algorithm`" in metered
+    # mutation: the flag left out puts a native job's agent on the 287 s metered build
+    assert "`talos compile --challenge knapsack --dir algorithm --native`" in native

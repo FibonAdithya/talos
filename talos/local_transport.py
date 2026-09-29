@@ -19,6 +19,7 @@ from talos.c3_jobdir import LOCAL_APP, LOCAL_LOCK
 from talos.challenges import CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, dev_image
 from talos.executables import argv0
 from talos.inside import PRISTINE_MOD_RS, PRUNED_MARKER
+from talos.native_runner import TOOLCHAIN
 
 APP = LOCAL_APP
 WORK = "/work"
@@ -212,7 +213,9 @@ class DockerTransport:
 
 
 READY_MARKER = ".talos-ready"
-WARM_MARKER = ".talos-warm"
+# -2: the warm-up also runs `cargo fetch`, which the native build needs offline; a volume warmed
+# before that is warmed again.
+WARM_MARKER = ".talos-warm-2"
 MONOREPO_TARBALL = "https://codeload.github.com/tig-foundation/tig-monorepo/tar.gz/"
 
 
@@ -281,13 +284,17 @@ def warm_script(challenge: str) -> str:
     """Builds the first algorithm the pinned monorepo ships for the challenge, alone in its
     crate, so the registry volume is populated with networking on, once, by code that is not
     LLM-authored. Alone, because the crate's size sets the build cost: job_scheduling's full
-    crate ran past 2 h and 23 GB of rustc (MEASURED 2026-09-25, docs/compute-backends.md)."""
+    crate ran past 2 h and 23 GB of rustc (MEASURED 2026-09-25, docs/compute-backends.md).
+    `cargo fetch` then downloads every crate in Cargo.lock, including the ones the talos-native
+    runner uses and the metered build does not (tig-structs, tig-utils), so a native build in
+    the network-less job container resolves offline."""
     return ("set -euo pipefail\n" + lock_lines()
             + f"cd {APP}\n"
             f"name=$(ls -d tig-algorithms/src/{challenge}/*/ | grep -v talos_cand | head -1 "
             "| xargs basename)\n"
             + prune_lines(challenge)
             + "build_algorithm \"$name\"\n"
+            f"cargo {TOOLCHAIN} fetch\n"
             f"touch {APP}/{WARM_MARKER}\n")
 
 

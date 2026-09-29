@@ -12,7 +12,7 @@ from talos.challenges import CHALLENGES, BeatRule, hardware_options, gpu_slug, m
 from talos.diagnostics import dead_new_functions
 from talos.inside import NONCE_TIMEOUT_S
 from talos.scoring import holdout_decision
-from talos.types import CompileResult, NonceResult, NonceSet
+from talos.types import CompileResult, NonceResult, NonceSet, SCORING_MODES
 
 # Rough Modal list prices, $/second, used only for budget accounting (marked estimated).
 CPU_USD_PER_CORE_SECOND = 0.0000131
@@ -89,6 +89,15 @@ class EvalRequest:
     # track mapped to None, or absent, runs without the flag. None = no track gets any. The loop
     # and the baseline both take it from JobSpec.hyperparameters, never per request.
     hyperparameters: dict[str, dict | None] | None = None
+    # "metered" builds with TIG's build_algorithm and runs tig-runtime under `fuel`; "native"
+    # builds the talos-native runner and runs it under the per-track budget in
+    # fuel_budgets_us (microseconds of solve time; a track absent from it runs without one).
+    mode: str = "metered"
+    fuel_budgets_us: dict[str, int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in SCORING_MODES:
+            raise ValueError(f"unknown scoring mode {self.mode!r}")
 
 
 @dataclass
@@ -241,16 +250,20 @@ class ModalBench:
                 self._sleep(delay)
                 delay = min(delay * 2, 60)
 
-    def _compile(self, challenge: str, files: dict[str, str]) -> CompileResult:
+    def _compile(self, challenge: str, files: dict[str, str],
+                 mode: str = "metered") -> CompileResult:
         t0 = self._clock()
         name = self._name("compile", challenge)  # outside the retry: a missing GPU is a bug
-        out = self._with_retry(lambda: self._fn(name).remote(files))
+        # A metered call sends no mode, so an app deployed before native scoring still accepts it.
+        kw = {} if mode == "metered" else {"mode": mode}
+        out = self._with_retry(lambda: self._fn(name).remote(files, **kw))
         self._cost += _seconds_cost(challenge, self._clock() - t0, self.gpu)
         return CompileResult(ok=out["ok"], artifact_id=out.get("artifact_id"), output=out["output"])
 
     def _score(self, challenge: str, artifact_id: str, nonce_sets: list[NonceSet],
               fuel: int, timeouts: dict[str, int] | None,
-              hyperparameters: dict[str, dict | None] | None) -> list[NonceResult]:
+              hyperparameters: dict[str, dict | None] | None, mode: str = "metered",
+              budgets: dict[str, int] | None = None) -> list[NonceResult]:
         """One `score_batch` call per `modal_workers` nonces, across tracks: a container scores
         its batch on every core at once, and a batch never holds more nonces than the
         container has workers, so its wall time is one nonce's, not a queue's."""
@@ -258,12 +271,17 @@ class ModalBench:
                   "timeout_s": timeout_for(timeouts, ns.track),
                   "hyperparameters": hyperparameters_for(hyperparameters, ns.track)}
                  for ns in nonce_sets for n in ns.nonces()]
+        native = mode != "metered"
+        if native:
+            for t in tasks:
+                t["budget_us"] = (budgets or {}).get(t["track"])
         if not tasks:
             # A holdout count of 0 still yields one NonceSet per track, each with no nonces.
             # modal 1.5.5 never returns from starmap([]), so the client would hang here.
             return []
         size = modal_workers(CHALLENGES[challenge])
-        args = [(artifact_id, tasks[i:i + size]) for i in range(0, len(tasks), size)]
+        tail = (mode,) if native else ()
+        args = [(artifact_id, tasks[i:i + size], *tail) for i in range(0, len(tasks), size)]
         name = self._name("score_batch", challenge)
         batches = self._with_retry(lambda: list(self._fn(name).starmap(args)))
         # The container's wall seconds are what Modal bills: verifier time and the batch's
@@ -272,19 +290,21 @@ class ModalBench:
         return [NonceResult.from_dict(r) for b in batches for r in b["rows"]]
 
     def evaluate(self, request: EvalRequest) -> EvalResult:
-        c = self._compile(request.challenge, request.files)
+        c = self._compile(request.challenge, request.files, request.mode)
         if not c.ok:
             return EvalResult(c, [], None, "not_compiled")
         if dead_code(request, c.output):
             return EvalResult(c, [], None, "dead_code")
         tr = (self._score(request.challenge, c.artifact_id, request.training, request.fuel,
-                          request.timeouts, request.hyperparameters)
+                          request.timeouts, request.hyperparameters, request.mode,
+                          request.fuel_budgets_us)
               if request.training else [])
         go, reason = holdout_decision(request.baseline_training, tr, request.rule)
         ho = None
         if go:
             ho = (self._score(request.challenge, c.artifact_id, request.holdout, request.fuel,
-                              request.timeouts, request.hyperparameters)
+                              request.timeouts, request.hyperparameters, request.mode,
+                              request.fuel_budgets_us)
                   if request.holdout else [])
         return EvalResult(c, tr, ho, reason)
 
@@ -304,9 +324,18 @@ class FakeBench:
     def __init__(self, scores: Callable[[str, dict[str, str], NonceSet], list[int | None]],
                  compile_ok: Callable[[dict[str, str]], bool] = lambda files: True,
                  usd_per_nonce: float = 0.01,
-                 compile_output: Callable[[dict[str, str]], str] = lambda files: "ok"):
+                 compile_output: Callable[[dict[str, str]], str] = lambda files: "ok",
+                 metered_scores=None, metered_compile_ok=None,
+                 fuel_consumed: int | None = 1000, solve_us: int | None = 500):
         self._scores = scores
         self._compile_ok = compile_ok
+        # Native and metered scoring of the same files give the same qualities unless a test
+        # says otherwise: metered_scores and metered_compile_ok stand in for the metered path
+        # in validation tests. A str from a scores callback is that nonce's error kind.
+        self._metered_scores = metered_scores
+        self._metered_compile_ok = metered_compile_ok
+        self._fuel_consumed = fuel_consumed
+        self._solve_us = solve_us
         self._compile_output = compile_output
         self._runtime_ms = 1
         self._usd_per_nonce = usd_per_nonce
@@ -323,7 +352,11 @@ class FakeBench:
 
     def evaluate(self, request: EvalRequest) -> EvalResult:
         self.calls.append(request)
-        if not self._compile_ok(request.files):
+        metered = request.mode == "metered"
+        compile_ok = (self._metered_compile_ok if metered and self._metered_compile_ok
+                      else self._compile_ok)
+        scores = self._metered_scores if metered and self._metered_scores else self._scores
+        if not compile_ok(request.files):
             return EvalResult(CompileResult(ok=False, artifact_id=None,
                                             output="error[E0308]: mismatched types"),
                               [], None, "not_compiled")
@@ -331,28 +364,36 @@ class FakeBench:
         comp = CompileResult(ok=True, artifact_id=art, output=self._compile_output(request.files))
         if dead_code(request, comp.output):
             return EvalResult(comp, [], None, "dead_code")
-        tr = self._score(request.challenge, request.files, request.training)
+        tr = self._score(request.challenge, request.files, request.training, scores, request.mode)
         go, reason = holdout_decision(request.baseline_training, tr, request.rule)
         ho = None
         if go:
             self.holdout_runs += 1
-            ho = self._score(request.challenge, request.files, request.holdout)
+            ho = self._score(request.challenge, request.files, request.holdout, scores,
+                             request.mode)
         return EvalResult(comp, tr, ho, reason)
 
-    def _score(self, challenge, files, nonce_sets) -> list[NonceResult]:
+    def _score(self, challenge, files, nonce_sets, scores, mode) -> list[NonceResult]:
         out: list[NonceResult] = []
         for ns in nonce_sets:
-            qs = self._scores(challenge, files, ns)
+            qs = scores(challenge, files, ns)
             if len(qs) != ns.count:
                 raise ValueError(f"scores callback returned {len(qs)} qualities "
                                  f"for {ns.count} nonces on track {ns.track}")
             for n, q in zip(ns.nonces(), qs):
                 self._cost += self._usd_per_nonce
-                if q is None:
+                extra = ({"fuel_consumed": self._fuel_consumed} if mode == "metered"
+                         else {"solve_us": self._solve_us})
+                if isinstance(q, str):
+                    # an out_of_fuel row stopped at its limit, as run_nonce reports it
+                    out.append(NonceResult(ns.track, n, False, None, self._runtime_ms, q,
+                                           limit_hit=q == "out_of_fuel", **extra))
+                elif q is None:
                     out.append(NonceResult(ns.track, n, False, None, self._runtime_ms,
-                                           "no_solution"))
+                                           "no_solution", **extra))
                 else:
-                    out.append(NonceResult(ns.track, n, True, q, self._runtime_ms, None))
+                    out.append(NonceResult(ns.track, n, True, q, self._runtime_ms, None,
+                                           **extra))
         return out
 
     def request_stop(self) -> None:

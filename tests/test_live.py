@@ -186,3 +186,41 @@ def test_claude_agent_can_edit_after_cd(tmp_path):
     _run_claude(wt, model, prompt, 300, subprocess.run)
     out = (wt / ".talos" / "agent_stdout.txt").read_text()
     assert mod.read_text() == "// bye\n", out
+
+
+def test_native_parity(tmp_path):
+    """Manual: the baseline scored metered and native on the same nonces, one per track, must
+    give the same quality on every nonce. Run:
+    TALOS_LIVE_NATIVE=c3 TALOS_LIVE_CHALLENGE=hypergraph .venv/bin/pytest -m live \
+        tests/test_live.py -k native_parity -s
+    TALOS_LIVE_NATIVE is c3, modal or local. Spends real credit on c3 and modal."""
+    backend = os.environ.get("TALOS_LIVE_NATIVE")
+    if backend not in ("c3", "modal", "local"):
+        pytest.skip("set TALOS_LIVE_NATIVE=c3|modal|local")
+    from talos.bench import EvalRequest, PendingJobStore
+    from talos.challenges import CHALLENGES
+    from talos.cli import local_settings, make_bench
+    ch = os.environ.get("TALOS_LIVE_CHALLENGE", "knapsack")
+    info = mainnet.fetch_challenge_info(ch)
+    name, _algorithm_id, _adoption = mainnet.top_algorithm(ch)
+    files = mainnet.fetch_algorithm_files(ch, name)
+    tr, _ = draw_nonce_sets(info.tracks, new_rand_hash(), training_count=1, holdout_count=0)
+    if backend == "local":
+        from talos.local_transport import prepare
+        prepare(ch)
+    bench = make_bench(backend, tmp_path, PendingJobStore.memory(),
+                       c3_api_key=os.environ.get("C3_API_KEY"),
+                       local=local_settings(None) if backend == "local" else None)
+    bench.select_hardware(ch)
+    out = {}
+    for mode in ("metered", "native"):
+        r = bench.evaluate(EvalRequest(ch, files, tr, [], info.max_fuel, None,
+                                       CHALLENGES[ch].beat, mode=mode))
+        assert r.compile.ok, r.compile.output[-3000:]
+        out[mode] = {(x.track, x.nonce): x for x in r.training}
+    for k, m in out["metered"].items():
+        n = out["native"][k]
+        assert m.quality == n.quality, (k, m.to_dict(), n.to_dict())
+        assert m.fuel_consumed is not None and n.solve_us is not None
+    print({"algorithm": name, "rows": {str(k): (v.to_dict(), out["native"][k].to_dict())
+                                       for k, v in out["metered"].items()}})

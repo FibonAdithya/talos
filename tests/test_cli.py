@@ -277,7 +277,9 @@ def test_fake_run_end_to_end_wins_and_packages(tmp_path, monkeypatch, capsys):
     # mutation: dropping the delta line, the status line or build_package fails these asserts
     monkeypatch.chdir(tmp_path)
     fake_config(tmp_path)
-    rc = fake_run(monkeypatch)
+    # metered: the spend below counts the metered path's calls (native adds calibration and
+    # validation; test_fake_native_run_validates_its_best_and_wins covers that path)
+    rc = fake_run(monkeypatch, ["--scoring", "metered"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "Status: won" in out
@@ -2410,3 +2412,82 @@ def test_the_gpu_probe_is_charged_to_compute_spend(tmp_path, monkeypatch):
     # mutation: not adding the bench's charge leaves the probe out of the printed estimate
     # and out of the next budget check
     assert st["spend"]["compute_usd"] == pytest.approx(0.05)
+
+
+def test_fake_native_run_validates_its_best_and_wins(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    rc = fake_run(monkeypatch, ["--scoring", "native"])
+    out = capsys.readouterr().out
+    assert rc == 0 and "Status: won" in out and "scoring native" in out
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert json.loads((run_dir / "job.json").read_text())["scoring"] == "native"
+    kinds = [json.loads(x)["kind"] for x in (run_dir / "timeline.jsonl").read_text().splitlines()]
+    # mutation: execute_job never calling calibrate leaves state.scoring None, so the native
+    # job silently runs metered
+    assert "calibrated" in kinds and "validated" in kinds
+    # the fake run keeps its calibration inside the run directory, never in ~/.talos
+    assert list((run_dir / "calibration_cache").rglob("*.json"))
+
+
+def test_run_defaults_to_native_scoring_and_metered_is_the_flag(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    seen = []
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.append(spec.scoring) or 0)
+    fake_run(monkeypatch)
+    fake_run(monkeypatch, ["--scoring", "metered"])
+    # mutation: a metered default (`args.scoring or "metered"`) gives metered first; ignoring
+    # the flag gives native second
+    assert seen == ["native", "metered"]
+
+
+def test_resume_refuses_a_different_scoring_mode(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "execute_job", lambda spec, store, cfg, resume: 0)
+    fake_run(monkeypatch)
+    job_id = next((tmp_path / "runs").glob("*/job.json")).parent.name
+    run_dir = tmp_path / "runs" / job_id
+    (run_dir / "state.json").write_text("{}", encoding="utf-8")
+    rc = cli.main(["run", "--resume", job_id, "--scoring", "metered"])
+    assert rc == 2
+    # mutation: dropping the resume check lets a native job continue as metered
+    assert "started with native scoring; start a new job" in capsys.readouterr().err
+
+
+def test_compile_is_metered_by_default_and_native_on_the_flag(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "algorithm").mkdir()
+    (tmp_path / "algorithm" / "mod.rs").write_text("fn x(){}")
+    modes = []
+
+    class Bench:
+        def select_hardware(self, challenge, chosen=None):
+            return None
+
+        def evaluate(self, request):
+            modes.append(request.mode)
+            from talos.bench import EvalResult
+            from talos.types import CompileResult
+            return EvalResult(CompileResult(True, "a", "ok"), [], [], "forced")
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: Bench())
+    monkeypatch.setenv("TALOS_BACKEND", "modal")
+    assert cli.main(["compile", "--challenge", "knapsack"]) == 0
+    assert cli.main(["compile", "--challenge", "knapsack", "--native"]) == 0
+    # mutation: a native default before the rollout's live checks (spec §8); the flag ignored
+    # keeps a native job's agent on the slow path for good
+    assert modes == ["metered", "native"]
+
+
+def test_event_lines_for_validation():
+    # mutation: a missing branch prints nothing for the validation events
+    assert cli._event_line("validating", {}) == "validating on TIG's metered runtime"
+    assert cli._event_line("validated", {"mean_rel_delta": 0.012}) == \
+        "validated: +1.200% vs baseline on the metered runtime"
+    assert cli._event_line("demoted", {"reason": "nondeterministic"}) == \
+        "demoted by metered validation: nondeterministic"
+    assert cli._event_line("iteration_done", {"outcome": "failed:validation",
+                                               "runs_since_improvement": 2}) == \
+        "rejected: failed metered validation (2 in a row)"

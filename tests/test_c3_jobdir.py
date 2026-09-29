@@ -98,7 +98,7 @@ def test_write_job_dir_contents_and_secrecy(tmp_path):
     names = sorted(p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file())
     assert names == [".c3", "job.sh", "payload.json", "talos/__init__.py", "talos/c3_job.py",
                      "talos/challenges.py", "talos/diagnostics.py", "talos/inside.py",
-                     "talos/scoring.py", "talos/types.py"]
+                     "talos/native_runner.py", "talos/scoring.py", "talos/types.py"]
     if os.name != "nt":  # Windows has no execute bit to set
         assert stat.S_IMODE((d / "job.sh").stat().st_mode) & stat.S_IXUSR
     # mutation: text-mode writes on Windows end lines in CRLF, and bash in the Linux container
@@ -306,3 +306,48 @@ def test_write_job_dir_takes_the_frozen_gpu(tmp_path):
     assert parse_c3((d / ".c3").read_text(encoding="utf-8"))["hardware"] == "a100"
     with pytest.raises(ValueError):  # a GPU job with no chosen GPU is a programming error
         c3_jobdir.write_job_dir(tmp_path / "job2", req(challenge="hypergraph"), "3")
+
+
+def _native_req(budgets=None):
+    return EvalRequest("knapsack", {"mod.rs": "fn x(){}"}, [NonceSet("t", "ab" * 32, 0, 2)], [],
+                       7, None, CHALLENGES["knapsack"].beat, mode="native",
+                       fuel_budgets_us=budgets)
+
+
+def test_native_payload_carries_mode_and_budgets_and_metered_carries_neither():
+    p = c3_jobdir.payload(_native_req({"t": 1_500_000}))
+    assert p["mode"] == "native" and p["fuel_budgets_us"] == {"t": 1_500_000}
+    metered = EvalRequest("knapsack", {"mod.rs": "fn x(){}"}, [NonceSet("t", "ab" * 32, 0, 2)],
+                          [], 7, None, CHALLENGES["knapsack"].beat)
+    # mutation: always writing the keys changes request_hash for every metered request, so a
+    # resumed job cannot find the C3 job it is still paying for
+    assert "mode" not in c3_jobdir.payload(metered)
+    assert "fuel_budgets_us" not in c3_jobdir.payload(metered)
+    assert c3_jobdir.request_hash(_native_req()) != c3_jobdir.request_hash(metered)
+
+
+def test_the_local_job_runs_cargo_offline_and_the_c3_job_does_not():
+    assert "export CARGO_NET_OFFLINE=true\n" in c3_jobdir.local_job_sh_text()
+    # C3 containers have a network; offline there would fail a cold registry
+    assert "CARGO_NET_OFFLINE" not in c3_jobdir.job_sh_text("abc")
+
+
+def test_every_job_module_imports_only_job_modules(tmp_path):
+    import ast
+    from pathlib import Path
+    root = Path(c3_jobdir.__file__).resolve().parent
+    for mod in c3_jobdir.JOB_MODULES:
+        tree = ast.parse((root / f"{mod}.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names = ([node.module] if isinstance(node, ast.ImportFrom) and node.module else
+                     [a.name for a in node.names] if isinstance(node, ast.Import) else [])
+            if isinstance(node, ast.ImportFrom) and node.module == "talos":
+                names = [f"talos.{a.name}" for a in node.names]
+            for name in names:
+                if name.startswith("talos."):
+                    # mutation: inside.py importing a module the job dir does not ship fails
+                    # every C3 and local job at import, before it can report anything
+                    assert name.split(".")[1] in c3_jobdir.JOB_MODULES, (mod, name)
+    job = c3_jobdir.write_job_dir(tmp_path / "j", _native_req(), "1",
+                                  hardware="cpu-d3-4vcpu-16gb")
+    assert (job / "talos" / "native_runner.py").exists()

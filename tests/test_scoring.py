@@ -2,7 +2,8 @@ import pytest
 
 from talos.challenges import BeatRule
 from talos.scoring import (ScoringError, beats, beats_focused, bundle_delta, focus_sets,
-                           runtime_ratio, select)
+                           fuel_proxy_misses, quality_mismatches,
+                           runtime_ratio, select, validation_failure)
 from talos.types import NonceResult, NonceSet
 
 
@@ -153,3 +154,133 @@ def test_runtime_ratio_is_the_slowest_track_relative_to_baseline():
     # a baseline track with no measured runtime cannot be a divisor
     zero = [T("a", 0, 0), T("a", 1, 0)]
     assert runtime_ratio(zero, [T("a", 0, 5), T("a", 1, 5)]) == pytest.approx(1.0)
+
+
+# The file defines BASE (two tracks, t1/t2) and RULE at module level, and the existing tests
+# read them at call time. These names must not collide: a second `BASE = ...` below would
+# silently replace the first and break every existing bundle_delta/beats test.
+def vrows(qs, track="t", error=None, limit=()):
+    return [NonceResult(track, i, q is not None, q, 1, None if q is not None else error,
+                        limit_hit=i in limit)
+            for i, q in enumerate(qs)]
+
+
+VBASE = vrows([100, 100, 100, 100])
+VRULE = BeatRule()  # margin 0.005, track tolerance 0.0, error ceiling 0.05
+
+
+def test_validation_passes_a_stepping_stone_short_of_the_margin():
+    # mean 100.25 vs 100: +0.25%, short of the 0.5% margin, above a best of 0.0
+    # mutation: requiring beats() here (spec §5.3 as written) demotes every stepping stone
+    step = vrows([100, 100, 100, 101])
+    reason, d = validation_failure(True, step, step, VBASE, 0.0, VRULE)
+    assert reason is None and d.mean_rel_delta == pytest.approx(0.0025)
+
+
+def test_each_failure_reason_in_order():
+    good = vrows([110, 110, 110, 110])
+    assert validation_failure(False, [], good, VBASE, 0.0, VRULE)[0] == \
+        "native_metered_build_mismatch"
+    oof = vrows([None, 110, 110, 110], error="out_of_fuel", limit=(0,))
+    # mutation: out_of_fuel read as an ordinary error lets a fuel-proxy miss through as long
+    # as the error rate stays under the ceiling; checked before the quality comparison
+    assert validation_failure(True, oof, good, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+    drift = vrows([110, 110, 110, 111])
+    # mutation: comparing means instead of nonce by nonce hides a +1/-1 pair of drifts
+    assert validation_failure(True, drift, good, VBASE, 0.0, VRULE)[0] == "nondeterministic"
+    pair = vrows([111, 109, 110, 110])
+    assert validation_failure(True, pair, good, VBASE, 0.0, VRULE)[0] == "nondeterministic"
+    worse = vrows([100, 100, 100, 100])
+    assert validation_failure(True, worse, worse, VBASE, 0.0, VRULE)[0] == "not_improved"
+    timeouts = vrows([None, 110, 110, 110], error="timeout")
+    # 1 error in 4 nonces is a rate of 0.25, above the 0.05 ceiling (by hand)
+    assert validation_failure(True, timeouts, good, VBASE, 0.0, VRULE)[0] == "error_ceiling"
+    short = vrows([110, 110])
+    assert validation_failure(True, short, short, VBASE, 0.0, VRULE)[0] == "unscoreable"
+
+
+def test_a_metered_run_out_of_fuel_with_a_verified_solution_is_a_proxy_miss():
+    # tig-runtime exited 87 on nonce 0 after saving a solution that verified: ok, error None
+    metered = vrows([108, 110, 110, 110], limit=(0,))
+    native = vrows([110, 110, 110, 110])
+    # mutation: detecting misses by `error == "out_of_fuel"` alone calls this
+    # "nondeterministic" (108 vs 110), and the margin never adapts
+    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+    assert [(r.track, r.nonce) for r in fuel_proxy_misses(metered, native)] == [("t", 0)]
+
+
+def test_an_out_of_fuel_row_without_limit_hit_is_still_a_proxy_miss():
+    # A Modal app deployed before limit_hit existed sends error="out_of_fuel", limit_hit False.
+    metered = vrows([None, 110, 110, 110], error="out_of_fuel")
+    native = vrows([110, 110, 110, 110])
+    assert not metered[0].limit_hit
+    # mutation: detecting misses by limit_hit alone reads this as an ordinary error, which
+    # the 0.05 ceiling then reports as "error_ceiling" and the margin never adapts
+    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+
+
+def test_a_native_timeout_is_a_cutoff_not_a_proxy_miss():
+    # The candidate's outer timeout (max(60 s, 3 x the baseline's metered time)) can fire
+    # before a budget calibrated from the full fuel does: the native run never reached its
+    # budget, so the budget did not stand in for more fuel than TIG gives.
+    metered = vrows([None, 110, 110, 110], error="out_of_fuel", limit=(0,))
+    native = vrows([None, 110, 110, 110], error="timeout")
+    # mutation: reading only native limit_hit charges this nonce as a miss against the
+    # track's shared margin; the metered error is still counted, by the ceiling (1 in 4)
+    assert fuel_proxy_misses(metered, native) == []
+    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "error_ceiling"
+
+
+def test_a_proxy_miss_is_reported_before_a_quality_drift_on_another_nonce():
+    # nonce 0 hit the metered limit (native had budget left); nonce 1 drifted 110 -> 111
+    metered = vrows([108, 110, 110, 110], limit=(0,))
+    native = vrows([110, 111, 110, 110])
+    # mutation: checking quality before fuel reports "nondeterministic", which records no
+    # miss, so the track's margin never drops
+    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+
+
+def test_a_nonce_where_both_runs_hit_their_limit_is_neither_a_miss_nor_a_mismatch():
+    # the native budget stopped nonce 0 early (margin < 1 by design) and the metered run used
+    # its whole fuel: consistent, and the two qualities are expected to differ
+    metered = vrows([112, 110, 110, 110], limit=(0,))
+    native = vrows([109, 110, 110, 110], limit=(0,))
+    # mutation: comparing qualities on a limit-truncated nonce demotes a valid candidate
+    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] is None
+    assert quality_mismatches(metered, native) == []
+
+
+def test_a_native_budget_exit_is_not_a_quality_mismatch():
+    # native stopped at its budget; metered finished inside its fuel with a better solution
+    metered = vrows([112, 110, 110, 110])
+    native = vrows([109, 110, 110, 110], limit=(0,))
+    # mutation: ignoring native limit_hit demotes every candidate that uses 80-100% of its fuel
+    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] is None
+
+
+def test_a_nonce_ok_on_only_one_path_is_not_a_quality_mismatch():
+    native = vrows([110, None, 110, 110], error="no_solution")
+    metered = vrows([110, 110, 110, 110])
+    # mutation: comparing None to 110 calls a native error "nondeterministic"
+    reason, _ = validation_failure(True, metered, native, VBASE, 0.0, VRULE)
+    assert reason is None
+
+
+def test_a_stepping_stone_must_also_beat_the_current_best():
+    step = vrows([100, 100, 100, 101])  # +0.25%: not over a best of +0.3%, and no beats()
+    # mutation: comparing against 0.0 instead of the current best keeps replacing the best
+    # with worse stepping stones
+    assert validation_failure(True, step, step, VBASE, 0.003, VRULE)[0] == "not_improved"
+    # the loop's rule is mean-over-best OR beats: +2% beats the baseline and passes even
+    # under a +3% best (tests/test_loop.py::test_win_with_lower_delta_than_a_false_positive_best)
+    big = vrows([102, 102, 102, 102])
+    assert validation_failure(True, big, big, VBASE, 0.03, VRULE)[0] is None
+
+
+def test_quality_mismatches_lists_each_differing_nonce():
+    native = vrows([110, 110, None, 110], error="no_solution")
+    metered = vrows([110, 111, 105, 109])
+    # nonce 2 is ok on one path only, so it is not a mismatch
+    assert quality_mismatches(metered, native) == [
+        {"track": "t", "nonce": 1, "native": 110, "metered": 111},
+        {"track": "t", "nonce": 3, "native": 110, "metered": 109}]

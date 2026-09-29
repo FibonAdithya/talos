@@ -7,8 +7,10 @@ import math
 import shutil
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
+from talos import calibration
 from talos.baseline import resolve_baseline
 from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, EvalResult
 from talos.budget import BudgetExhausted, exhausted
@@ -22,10 +24,11 @@ from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
                            parse_distillation, parse_hypothesis)
 from talos.providers import ProviderAuthError, ProviderError, ProviderRateLimited
 from talos.scoring import (ScoringError, beats, beats_focused, bundle_delta, focus_sets,
-                           runtime_ratio, select)
+                           fuel_proxy_misses, quality_mismatches, runtime_ratio, select,
+                           validation_failure)
 from talos.search_replace import format_misses
 from talos.state import Candidate, JobSpec, JobState, JobStore, TERMINAL
-from talos.types import Completion
+from talos.types import Completion, NonceResult
 
 
 @dataclass
@@ -100,6 +103,9 @@ class Loop:
         # The iteration an event belongs to. state.iteration only catches up when the iteration
         # finishes, so events raised mid-iteration would otherwise carry the previous number.
         self._n = state.iteration
+        # The (cache dir, key) of the calibration record in use, set by calibrate(); demotions
+        # are counted in it.
+        self._calibration: tuple[Path, str] | None = None
         self.propose_and_edit = self.single_shot_propose_and_edit
 
     # ── plumbing ──────────────────────────────────────────────────────
@@ -146,15 +152,22 @@ class Loop:
     def _focus(self) -> tuple[list, list]:
         return focus_sets(self.spec.track, self.spec.training, self.spec.holdout)
 
-    def _request(self, files: dict[str, str], baseline_training) -> EvalRequest:
+    def _request(self, files: dict[str, str], baseline_training, scoring: str = "metered",
+                 validation: bool = False) -> EvalRequest:
         training, holdout = self._focus()
         base = select(baseline_training, training) if baseline_training is not None else None
-        prior = {name: defined_functions(text) for name, text in self._current_files().items()}
-        return EvalRequest(challenge=self.spec.challenge, files=files, training=training,
-                           holdout=holdout, fuel=self.spec.fuel, baseline_training=base,
-                           rule=self.rule, prior_functions=prior,
-                           timeouts=self._timeouts(baseline_training),
-                           hyperparameters=self.spec.hyperparameters)
+        prior = ({name: defined_functions(text) for name, text in self._current_files().items()}
+                 if not validation else None)  # the native build already passed the check
+        req = EvalRequest(challenge=self.spec.challenge, files=files, training=training,
+                          holdout=holdout, fuel=self.spec.fuel, baseline_training=base,
+                          rule=self.rule, prior_functions=prior,
+                          timeouts=self._timeouts(baseline_training),
+                          hyperparameters=self.spec.hyperparameters)
+        if scoring == "native":
+            # Held-out is decided on the metered validation run, never on native results.
+            req.holdout, req.baseline_training = [], None
+            req.mode, req.fuel_budgets_us = "native", self.state.fuel_budgets_us
+        return req
 
     def _timeouts(self, baseline_training) -> dict[str, int] | None:
         if self.t.runtime_ceiling <= 0 or not baseline_training:
@@ -167,7 +180,11 @@ class Loop:
                                math.ceil(self.t.runtime_ceiling * ms / 1000)))
                 for track, ms in slowest.items()}
 
-    def _bench_evaluate(self, files: dict[str, str]) -> EvalResult:
+    def _scoring(self) -> str:
+        return "native" if self.state.scoring == "native" else "metered"
+
+    def _bench_evaluate(self, files: dict[str, str], scoring: str = "metered",
+                        validation: bool = False) -> EvalResult:
         """pending_job carries the files BEFORE the call: a C3 job outlives this process, and a
         resume must be able to rebuild the exact request and reattach to it."""
         self._check_budget()
@@ -175,7 +192,8 @@ class Loop:
         self._save()
         mark = self.bench.cost_mark()
         try:
-            return self.bench.evaluate(self._request(files, self.state.baseline.training))
+            return self.bench.evaluate(self._request(files, self.state.baseline.training,
+                                                     scoring, validation))
         finally:
             self.state.spend.compute_usd += self.bench.cost_usd_since(mark)
             self._save()
@@ -209,6 +227,94 @@ class Loop:
              "holdout": [r.to_dict() for r in rec.holdout]}, indent=1),
             encoding="utf-8", newline="\n")
         self._event("baseline_ready", name=rec.name, adoption=rec.adoption)
+
+    # ── calibration (native scoring) ──────────────────────────────────
+
+    def calibrate(self, cache_dir, hardware_class: str) -> None:
+        """Native scoring only. Finds this job's per-track budgets: a stored record for its key,
+        or one measured now from the baseline on the training nonces in both modes. A job the
+        record cannot give every research track a budget runs metered for good, and says so.
+        Called on every start and resume, after the baseline; a stored decision is kept."""
+        if self.spec.scoring != "native" or self.state.scoring == "metered":
+            return
+        key = calibration.calibration_key(self.spec.challenge, hardware_class,
+                                          self.state.baseline.files, self.spec.hyperparameters)
+        if self.state.scoring == "native" and self.state.fuel_budgets_us is not None:
+            # A resume keeps the job's own budgets. Re-deriving them from the record (which
+            # another job may have tightened since) changes an in-flight native request, so the
+            # C3 request_hash no longer matches and the still-billing job is orphaned; and a
+            # re-measure would overwrite pending_job, losing that job's id altogether.
+            self._calibration = (Path(cache_dir), key)
+            return
+        rec = calibration.load(cache_dir, self.spec.challenge, key)
+        if rec is None:
+            rec = self._measure_calibration()
+            if rec is not None:
+                calibration.save(cache_dir, self.spec.challenge, key, rec)
+        needed = {s.track for s in self._focus()[0]}
+        missing = sorted(needed - set((rec or {}).get("tracks", {})))
+        if rec is None or missing:
+            self.state.scoring, self.state.fuel_budgets_us = "metered", None
+            self._save()
+            self._event("calibration_fallback",
+                        reason=f"no native budget for track(s) {missing or sorted(needed)}; "
+                               f"scoring this job metered")
+            return
+        self._calibration = (Path(cache_dir), key)
+        self.state.scoring = "native"
+        self.state.fuel_budgets_us = calibration.budgets_us(rec, self.spec.fuel)
+        self._save()
+        self._event("calibrated", budgets_us=self.state.fuel_budgets_us)
+
+    def _measure_calibration(self) -> dict | None:
+        """The baseline on the training nonces: metered only if its stored rows carry no fuel
+        (every baseline cached before fuel was recorded), then native with no budget. Both go
+        through the budgeted bench. The metered rows are kept in pending_job until the native
+        call returns. None when either build fails or no track yields a ratio."""
+        bench = _BudgetedBench(self)
+        pend = self.state.pending_job
+        self.state.pending_job = (pend if pend and pend.get("purpose") == "calibration"
+                                  else {"purpose": "calibration"})
+        self._save()
+
+        def score(mode: str):
+            return bench.evaluate(EvalRequest(
+                challenge=self.spec.challenge, files=self.state.baseline.files,
+                training=self.spec.training, holdout=[], fuel=self.spec.fuel,
+                baseline_training=None, rule=self.rule,
+                hyperparameters=self.spec.hyperparameters, mode=mode))
+
+        metered = self.state.baseline.training
+        stored = self.state.pending_job.get("calibration_metered")
+        if stored is not None:
+            # A resume after a kill during the native call. Re-running the metered call would
+            # not match the native job's request_hash, so C3 would submit a new job and orphan
+            # the native one, still billing.
+            metered = [NonceResult.from_dict(r) for r in stored]
+        elif all(r.fuel_consumed is None for r in metered):
+            res = score("metered")
+            if not res.compile.ok:
+                self.state.pending_job = None
+                self._save()
+                self._event("calibration_fallback",
+                            reason="the baseline failed the metered build",
+                            output=res.compile.output[-2000:])
+                return None
+            metered = res.training
+            # Saved before the native call, so a kill during it resumes at the native call.
+            # The metered job is collected, so its reattach keys are dropped.
+            self.state.pending_job = {"purpose": "calibration",
+                                      "calibration_metered": [r.to_dict() for r in metered]}
+            self._save()
+        res = score("native")
+        self.state.pending_job = None
+        self._save()
+        if not res.compile.ok:
+            self._event("calibration_fallback", reason="the baseline failed the native build",
+                        output=res.compile.output[-2000:])
+            return None
+        ratios = calibration.track_ratios(metered, res.training)
+        return calibration.new_record(ratios) if ratios else None
 
     @staticmethod
     def _write_files(directory, files: dict[str, str]) -> None:
@@ -257,7 +363,8 @@ class Loop:
                              track=self.spec.track,
                              guard_tracks=([t for t in self.spec.tracks if t != self.spec.track]
                                            if self.spec.track else []),
-                             hyperparameters=self.spec.hyperparameters)
+                             hyperparameters=self.spec.hyperparameters,
+                             scoring=self._scoring())
 
     # ── single-shot propose + edit ────────────────────────────────────
 
@@ -321,7 +428,7 @@ class Loop:
         """Everything after the LLM has produced files: compile-fix rounds, scoring, confirmation.
         Entered from iterate() and from a resume with a pending job."""
         it_dir = self.store.iteration_dir(n)
-        res = self._bench_evaluate(files)
+        res = self._bench_evaluate(files, self._scoring())
         for _ in range(self.t.compile_fix_rounds):
             dead = self._dead_code(res)
             if res.compile.ok and not dead:
@@ -348,7 +455,7 @@ class Loop:
             if fixed.applied == 0:
                 break  # byte-identical files; re-evaluating them would repeat the same error
             files = fixed.files
-            res = self._bench_evaluate(files)
+            res = self._bench_evaluate(files, self._scoring())
         if not res.compile.ok:
             record.update(outcome="failed:compile")
             self._finish_iteration(n, record, improved=False)
@@ -374,11 +481,14 @@ class Loop:
         worst = min(delta.tracks, key=lambda t: t.rel_delta)
         # What the next prompt's recall block says about this attempt, beyond its outcome.
         record.update(mean_rel_delta=delta.mean_rel_delta, worst_track=worst.track,
-                      worst_rel_delta=delta.worst_rel_delta,
-                      runtime_ratio=runtime_ratio(base_tr, results))
+                      worst_rel_delta=delta.worst_rel_delta)
+        if self._scoring() == "metered":
+            # Native runtimes are not comparable with the baseline's metered ones; the
+            # validated record gets the metered ratio instead (_validate_and_finish).
+            record["runtime_ratio"] = runtime_ratio(base_tr, results)
         self._event("scored", mean_rel_delta=delta.mean_rel_delta,
                     worst_rel_delta=delta.worst_rel_delta, error_rate=delta.error_rate,
-                    runtime_ratio=record["runtime_ratio"])
+                    runtime_ratio=record.get("runtime_ratio"))
         if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a failure
             record.update(outcome="failed:runtime", error_rate=delta.error_rate)
             self._finish_iteration(n, record, improved=False)
@@ -388,6 +498,9 @@ class Loop:
         # report "won" with different code in state.best.
         wins = beats(base_tr, results, self.rule)
         improved = delta.mean_rel_delta > self._best_delta() or wins
+        if improved and self._scoring() == "native":
+            self._validate_and_finish(n, record, cand, base_tr)
+            return
         if improved:
             self.state.best = cand
             self._write_files(self.store.run_dir / "best", cand.files)
@@ -407,6 +520,63 @@ class Loop:
             return []
         prior = {name: defined_functions(text) for name, text in self._current_files().items()}
         return dead_new_functions(res.compile.output, prior) or ["<unnamed>"]
+
+    def _validate_and_finish(self, n: int, record: dict, cand: Candidate, base_tr) -> None:
+        """A native candidate that would become the best is scored again on TIG's metered
+        runtime, on the job's own training and held-out nonces, before it counts. It becomes
+        best only on a pass; held-out confirmation then runs on the metered results. On a fail
+        research stays on the previous best. The native rows go into pending_job first, so a
+        resume re-enters here rather than scoring natively again."""
+        self.state.pending_job = {**(self.state.pending_job or {}), "files": cand.files,
+                                  "native_training": [r.to_dict() for r in cand.training]}
+        self._save()
+        self._event("validating")
+        res = self._bench_evaluate(cand.files, "metered", validation=True)
+        reason, d = validation_failure(res.compile.ok, res.training, cand.training, base_tr,
+                                       self._best_delta(), self.rule)
+        entry = {"iteration": n, "outcome": "demoted" if reason else "validated",
+                 "reason": reason}
+        if reason == "nondeterministic":
+            entry["mismatches"] = quality_mismatches(res.training, cand.training)
+        self.state.validations.append(entry)
+        if reason:
+            self._note_demotion(reason, res.training, cand.training)
+            record.update(outcome="failed:validation", error=reason)
+            self._event("demoted", reason=reason)
+            self._finish_iteration(n, record, improved=False)
+            return
+        best = Candidate(iteration=n, files=cand.files, artifact_id=res.compile.artifact_id,
+                         training=res.training, delta=d.to_dict(), hypothesis=cand.hypothesis)
+        self.state.best = best
+        self._write_files(self.store.run_dir / "best", best.files)
+        record.update(outcome="improved", mean_rel_delta=d.mean_rel_delta,
+                      worst_rel_delta=d.worst_rel_delta,
+                      runtime_ratio=runtime_ratio(base_tr, res.training))
+        self._event("validated", mean_rel_delta=d.mean_rel_delta)
+        self._finish_iteration(n, record, improved=True)
+        if beats(base_tr, res.training, self.rule):
+            self._confirm(best, res.holdout, res.holdout_reason)
+
+    def _note_demotion(self, reason: str, metered, native) -> None:
+        """Counts the demotion in the calibration record; a fuel-proxy miss also counts against
+        each track with a miss (talos/scoring.py::fuel_proxy_misses), and a lowered margin
+        tightens this job's budgets."""
+        if self._calibration is None:
+            return
+        cache_dir, key = self._calibration
+        rec = calibration.load(cache_dir, self.spec.challenge, key)
+        if rec is None:
+            return
+        calibration.note_demotion(rec, reason)
+        changed = False
+        if reason == "fuel_proxy_miss":
+            for track in sorted({r.track for r in fuel_proxy_misses(metered, native)}):
+                if track in rec["tracks"]:
+                    changed = calibration.record_miss(rec, track) or changed
+        calibration.save(cache_dir, self.spec.challenge, key, rec)
+        if changed:
+            self.state.fuel_budgets_us = calibration.budgets_us(rec, self.spec.fuel)
+            self._save()
 
     def _confirm(self, cand: Candidate, ho, reason: str) -> None:
         """The held-out results come back from the same evaluate call that scored training: the
@@ -519,6 +689,15 @@ class Loop:
         anchor = self.state.best.iteration if self.state.best else 0
         hypothesis = pending["hypothesis"]
         record = {"iteration": n, "against": anchor, **hypothesis, "outcome": "started"}
+        if pending.get("native_training"):
+            files = pending["files"]
+            native = [NonceResult.from_dict(r) for r in pending["native_training"]]
+            base_tr = select(self.state.baseline.training, self._focus()[0])
+            cand = Candidate(iteration=n, files=files, artifact_id="", training=native,
+                             delta=bundle_delta(base_tr, native).to_dict(),
+                             hypothesis=hypothesis)
+            self._validate_and_finish(n, record, cand, base_tr)
+            return
         self._score_candidate(n, self._context(), record, hypothesis, pending["files"])
 
     def run(self) -> JobState:
@@ -529,7 +708,7 @@ class Loop:
             self.state.status = "researching"
             self._save()
             pending = self.state.pending_job
-            if pending is not None and pending.get("purpose") == "baseline":
+            if pending is not None and pending.get("purpose") in ("baseline", "calibration"):
                 self.state.pending_job = None  # the baseline is recorded; the record is stale
                 self._save()
             elif pending is not None and isinstance(pending.get("purpose"), int):

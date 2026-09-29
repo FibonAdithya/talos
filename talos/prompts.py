@@ -46,6 +46,7 @@ class PromptContext:
     track: str | None = None
     guard_tracks: list[str] = field(default_factory=list)
     hyperparameters: dict[str, dict | None] | None = None
+    scoring: str = "metered"
 
 
 def _files_block(files: dict[str, str]) -> str:

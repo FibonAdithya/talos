@@ -219,7 +219,8 @@ def test_the_pool_path_passes_run_task_positional_tuples_and_sorts_the_rows(tmp_
     # mutation: swapping two positions in the task tuple (say nonce and fuel) sends the wrong
     # nonce or the wrong fuel to run_nonce, and run_task unpacks it without noticing
     assert {t[3]: t for t in seen}[0] == ("c003", "t", HASH, 0, str(so), 7,
-                                          inside.NONCE_TIMEOUT_S, None, str(mono), None)
+                                          inside.NONCE_TIMEOUT_S, None, str(mono), None,
+                                          "metered", None)
     assert [t[3] for t in seen] == [1, 0]  # the pool really did finish out of order
     r = json.loads((art / "results.json").read_text())
     # mutation: dropping the sort in `scored` writes the rows in completion order, and the
@@ -342,3 +343,75 @@ def test_a_leftover_candidate_from_a_previous_job_is_removed_before_staging(tmp_
     # compiled into this candidate
     assert not (left / "extra.rs").exists() and (left / "mod.rs").exists()
     assert mod_rs.read_text().count("pub mod talos_cand;") == 1
+
+
+def native_setup(tmp_path, budgets=None, n=2):
+    mono = tmp_path / "mono"
+    (mono / "tig-algorithms" / "src" / "knapsack").mkdir(parents=True)
+    (mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs").write_text("// c003\n")
+    (mono / "Cargo.toml").write_text("[workspace]\nmembers = [\n    \"tig-algorithms\",\n]\n")
+    req = EvalRequest("knapsack", {"mod.rs": "fn x(){}"}, [NonceSet("t", HASH, 0, n)], [], 7,
+                      None, CHALLENGES["knapsack"].beat, mode="native", fuel_budgets_us=budgets)
+    work = write_job_dir(tmp_path / "work", req, "1", hardware="cpu-d3-4vcpu-16gb")
+    art = tmp_path / "art"
+    art.mkdir()
+    return mono, work, art
+
+
+def fake_native_run(quality=120, build_rc=0):
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[0] == "cargo":
+            binary, _ = inside.native_artifact_paths(Path(kw["cwd"]), "knapsack", "talos_cand")
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            binary.write_bytes(b"\x7fELF")
+            return Result(build_rc, "Compiling talos-native\n", "" if build_rc == 0 else "error")
+        if cmd[0].endswith("talos-native"):
+            Path(cmd[4]).write_text('{"nonce": 0, "solution": "e30=", "solve_us": 900}')
+            return Result(0)
+        if cmd[0] == "tig-verifier":
+            return Result(0, f"quality: {quality}\n")
+        raise AssertionError(cmd)
+    run.calls = calls
+    return run
+
+
+def test_a_native_payload_builds_and_scores_with_the_runner(tmp_path):
+    from talos.challenges import DEV_IMAGE_TAG, MONOREPO_REF
+    mono, work, art = native_setup(tmp_path, budgets={"t": 1_500_000})
+    run = fake_native_run()
+    c3_job.main(workdir=work, artifacts_dir=art, run=run, monorepo=mono, log=lambda *a: None)
+    r = json.loads((art / "results.json").read_text())
+    # mutation: ignoring the mode builds with build_algorithm and scores with tig-runtime
+    assert not any(c[0] in ("build_algorithm", "tig-runtime") for c in run.calls)
+    assert r["compile"]["ok"]
+    assert r["compile"]["artifact_id"] == inside.content_hash(
+        {"mod.rs": "fn x(){}"}, MONOREPO_REF, DEV_IMAGE_TAG, "native")
+    assert [x["solve_us"] for x in r["training"]] == [900, 900]
+    runner = next(c for c in run.calls if c[0].endswith("talos-native"))
+    assert runner[runner.index("--budget-us") + 1] == "1500000"
+
+
+def test_a_native_build_failure_is_a_compile_result(tmp_path):
+    mono, work, art = native_setup(tmp_path)
+    c3_job.main(workdir=work, artifacts_dir=art, run=fake_native_run(build_rc=101),
+                monorepo=mono, log=lambda *a: None)
+    r = json.loads((art / "results.json").read_text())
+    assert r["compile"]["ok"] is False and r["holdout_reason"] == "not_compiled"
+
+
+def test_native_pool_tasks_carry_the_mode_and_each_tracks_budget(tmp_path, monkeypatch):
+    mono, work, art = native_setup(tmp_path, budgets={"t": 1_500_000})
+    seen = []
+    monkeypatch.setattr(inside, "run_task", lambda task: seen.append(task) or {
+        "track": task[1], "nonce": task[3], "ok": True, "quality": 1, "runtime_ms": 1,
+        "error": None})
+    FakePool.sizes = []
+    c3_job.main(workdir=work, artifacts_dir=art, run=fake_native_run(), monorepo=mono,
+                log=lambda *a: None, pool_factory=FakePool)
+    binary, _ = inside.native_artifact_paths(mono, "knapsack", inside.ALGO_NAME)
+    assert {t[3]: t for t in seen}[0] == ("c003", "t", HASH, 0, str(binary), 7,
+                                          inside.NONCE_TIMEOUT_S, None, str(mono), None,
+                                          "native", 1_500_000)

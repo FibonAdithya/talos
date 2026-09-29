@@ -87,6 +87,15 @@ progress.
    flat `talos/inside.py::NONCE_TIMEOUT_S`, a candidate under the tighter per-track cap
    from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a `timeout` error,
    never a quality, so it can only fail a candidate, never flatter one.
+   With `--scoring native` there is a second, bounded asymmetry. Research candidates run
+   natively (`talos/inside.py::run_nonce_native`) under a per-track time budget calibrated
+   from the baseline's metered fuel (`talos/calibration.py::budgets_us`), while the baseline
+   ran metered. A native score never decides anything by itself: a candidate becomes best
+   only after `talos/loop.py::Loop._validate_and_finish` scores it on TIG's metered runtime,
+   on the same nonces, fuel and hardware as the baseline, and held-out confirmation runs only
+   on those metered results. The calibration key (`talos/calibration.py::calibration_key`)
+   carries the hardware class, both pins, the baseline's code, the native runner's digest
+   (`talos/native_runner.py::runner_digest`) and the baseline's hyperparameters.
 2. **The job's `rand_hash` lives in `job.json` and nowhere the agent can
    read.** It seeds every nonce; an LLM that sees it can tune to the exact
    nonces it is scored on. It is stripped from the spec the prompts see
@@ -107,6 +116,11 @@ progress.
    The baseline cache key also includes the hyperparameter map
    (`talos/baseline.py::effective_hyperparameters`); a key computed without one
    is unchanged from before the map existed.
+   The calibration key carries both pins too (`talos/calibration.py::calibration_key`).
+   The native runner's toolchain is `talos/native_runner.py::TOOLCHAIN`, the one `build_so`
+   uses at the pin, and must move with `MONOREPO_REF`. A native artifact id also carries
+   `talos/native_runner.py::runner_digest` (templates, toolchain, build profile), so a
+   runner change never reuses a binary cached on the Modal volume.
 4. **An edit outside the algorithm files fails the whole iteration; its
    in-scope blocks are never applied either.** `talos/edits.py::apply_edit_response`
    reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration
@@ -183,6 +197,12 @@ Do not decide these yourself. Raise them and stop.
   provider and Modal account.
 - Running `tests/test_live.py`. It spends the user's Modal budget, C3 credit or, for
   the agentic test, LLM tokens.
+- Changing the calibration constants in `talos/calibration.py` (`MARGIN_START`,
+  `MARGIN_STEP`, `MARGIN_FLOOR`, `MISS_LIMIT`, `BUDGET_FLOOR_US`), or changing the default
+  of `talos run --scoring` (`native` since 2026-09-29, the repo owner's decision). Together
+  they decide how close a native budget is to TIG's fuel limit.
+- Running the native parity live tests (`tests/test_live.py::test_native_parity`). They
+  spend Modal budget or C3 credit.
 - Changing the C3 prices in `talos/c3_bench.py::GBP_PER_HOUR`. They are the
   budget for the C3 backend.
 - Running the C3 live test (`tests/test_live.py::test_c3_knapsack_job`). It
@@ -220,6 +240,7 @@ nobody.
 | Local backend: image pull, volumes, clone, warm build | `talos/local_transport.py::prepare` |
 | LLM providers and prices | `talos/providers/__init__.py`, `talos/providers/pricing.py::PRICES` |
 | Agentic mode: sandbox and scope check | `talos/agentic.py::sandbox_settings`, `talos/agentic.py::read_back` |
+| Native research scoring: runner, calibration, validation | `talos/native_runner.py::render`, `talos/calibration.py::budgets_us`, `talos/scoring.py::validation_failure`, `talos/loop.py::Loop.calibrate` |
 | Budget rules | `talos/budget.py::exhausted`, `README.md#budget` |
 | Hand-back package contents | `talos/package.py`, `README.md#where-results-land` |
 | Tests | `tests/`, one file per module; the manual live smoke test is `tests/test_live.py` |
