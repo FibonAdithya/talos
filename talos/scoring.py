@@ -148,13 +148,14 @@ def fuel_proxy_misses(metered: list[NonceResult],
                       native: list[NonceResult]) -> list[NonceResult]:
     """Metered rows whose fuel ran out (with or without a saved solution) where the same
     nonce's native run did not reach its budget: the budget stood in for more fuel than TIG
-    gives. A nonce that hit its limit on both paths is consistent, not a miss."""
+    gives. A nonce that hit its limit on both paths is consistent, not a miss. Nor is one whose
+    native run hit the outer per-nonce timeout first: it never reached its budget."""
     nat = {(r.track, r.nonce): r for r in native}
     out = []
     for r in metered:
         if r.error == "out_of_fuel" or r.limit_hit:
             o = nat.get((r.track, r.nonce))
-            if o is None or not o.limit_hit:
+            if o is None or not (o.limit_hit or o.error == "timeout"):
                 out.append(r)
     return out
 

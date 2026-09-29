@@ -219,6 +219,18 @@ def test_an_out_of_fuel_row_without_limit_hit_is_still_a_proxy_miss():
     assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
 
 
+def test_a_native_timeout_is_a_cutoff_not_a_proxy_miss():
+    # The candidate's outer timeout (max(60 s, 3 x the baseline's metered time)) can fire
+    # before a budget calibrated from the full fuel does: the native run never reached its
+    # budget, so the budget did not stand in for more fuel than TIG gives.
+    metered = vrows([None, 110, 110, 110], error="out_of_fuel", limit=(0,))
+    native = vrows([None, 110, 110, 110], error="timeout")
+    # mutation: reading only native limit_hit charges this nonce as a miss against the
+    # track's shared margin; the metered error is still counted, by the ceiling (1 in 4)
+    assert fuel_proxy_misses(metered, native) == []
+    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "error_ceiling"
+
+
 def test_a_proxy_miss_is_reported_before_a_quality_drift_on_another_nonce():
     # nonce 0 hit the metered limit (native had budget left); nonce 1 drifted 110 -> 111
     metered = vrows([108, 110, 110, 110], limit=(0,))
