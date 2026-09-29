@@ -665,3 +665,19 @@ def test_metered_modal_calls_are_unchanged_and_native_ones_add_mode(monkeypatch)
     assert all(len(a) == 3 and a[2] == "native" for a in starmaps[1])
     # mutation: the budget left off the task runs every native nonce unbounded
     assert {t["budget_us"] for a in starmaps[1] for t in a[1]} == {900}
+
+
+def test_fake_bench_modes_carry_fuel_or_solve_time_and_separate_scores():
+    fb = FakeBench(lambda ch, files, ns: [100] * ns.count,
+                   metered_scores=lambda ch, files, ns: ["out_of_fuel"] + [100] * (ns.count - 1),
+                   fuel_consumed=1234, solve_us=55)
+    nat = fb.evaluate(EvalRequest(challenge="knapsack", files={"mod.rs": "x"}, training=TR,
+                                  holdout=[], fuel=1, baseline_training=None, rule=BeatRule(),
+                                  mode="native"))
+    met = fb.evaluate(req(holdout=[]))
+    assert [r.solve_us for r in nat.training] == [55, 55, 55]
+    assert all(r.fuel_consumed is None for r in nat.training)
+    assert [r.fuel_consumed for r in met.training] == [1234, 1234, 1234]
+    # mutation: the metered callback ignored makes every validation pass in the loop tests
+    assert met.training[0].error == "out_of_fuel" and not met.training[0].ok
+    assert all(r.ok for r in nat.training)

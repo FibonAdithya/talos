@@ -324,9 +324,18 @@ class FakeBench:
     def __init__(self, scores: Callable[[str, dict[str, str], NonceSet], list[int | None]],
                  compile_ok: Callable[[dict[str, str]], bool] = lambda files: True,
                  usd_per_nonce: float = 0.01,
-                 compile_output: Callable[[dict[str, str]], str] = lambda files: "ok"):
+                 compile_output: Callable[[dict[str, str]], str] = lambda files: "ok",
+                 metered_scores=None, metered_compile_ok=None,
+                 fuel_consumed: int | None = 1000, solve_us: int | None = 500):
         self._scores = scores
         self._compile_ok = compile_ok
+        # Native and metered scoring of the same files give the same qualities unless a test
+        # says otherwise: metered_scores and metered_compile_ok stand in for the metered path
+        # in validation tests. A str from a scores callback is that nonce's error kind.
+        self._metered_scores = metered_scores
+        self._metered_compile_ok = metered_compile_ok
+        self._fuel_consumed = fuel_consumed
+        self._solve_us = solve_us
         self._compile_output = compile_output
         self._runtime_ms = 1
         self._usd_per_nonce = usd_per_nonce
@@ -343,7 +352,11 @@ class FakeBench:
 
     def evaluate(self, request: EvalRequest) -> EvalResult:
         self.calls.append(request)
-        if not self._compile_ok(request.files):
+        metered = request.mode == "metered"
+        compile_ok = (self._metered_compile_ok if metered and self._metered_compile_ok
+                      else self._compile_ok)
+        scores = self._metered_scores if metered and self._metered_scores else self._scores
+        if not compile_ok(request.files):
             return EvalResult(CompileResult(ok=False, artifact_id=None,
                                             output="error[E0308]: mismatched types"),
                               [], None, "not_compiled")
@@ -351,28 +364,36 @@ class FakeBench:
         comp = CompileResult(ok=True, artifact_id=art, output=self._compile_output(request.files))
         if dead_code(request, comp.output):
             return EvalResult(comp, [], None, "dead_code")
-        tr = self._score(request.challenge, request.files, request.training)
+        tr = self._score(request.challenge, request.files, request.training, scores, request.mode)
         go, reason = holdout_decision(request.baseline_training, tr, request.rule)
         ho = None
         if go:
             self.holdout_runs += 1
-            ho = self._score(request.challenge, request.files, request.holdout)
+            ho = self._score(request.challenge, request.files, request.holdout, scores,
+                             request.mode)
         return EvalResult(comp, tr, ho, reason)
 
-    def _score(self, challenge, files, nonce_sets) -> list[NonceResult]:
+    def _score(self, challenge, files, nonce_sets, scores, mode) -> list[NonceResult]:
         out: list[NonceResult] = []
         for ns in nonce_sets:
-            qs = self._scores(challenge, files, ns)
+            qs = scores(challenge, files, ns)
             if len(qs) != ns.count:
                 raise ValueError(f"scores callback returned {len(qs)} qualities "
                                  f"for {ns.count} nonces on track {ns.track}")
             for n, q in zip(ns.nonces(), qs):
                 self._cost += self._usd_per_nonce
-                if q is None:
+                extra = ({"fuel_consumed": self._fuel_consumed} if mode == "metered"
+                         else {"solve_us": self._solve_us})
+                if isinstance(q, str):
+                    # an out_of_fuel row stopped at its limit, as run_nonce reports it
+                    out.append(NonceResult(ns.track, n, False, None, self._runtime_ms, q,
+                                           limit_hit=q == "out_of_fuel", **extra))
+                elif q is None:
                     out.append(NonceResult(ns.track, n, False, None, self._runtime_ms,
-                                           "no_solution"))
+                                           "no_solution", **extra))
                 else:
-                    out.append(NonceResult(ns.track, n, True, q, self._runtime_ms, None))
+                    out.append(NonceResult(ns.track, n, True, q, self._runtime_ms, None,
+                                           **extra))
         return out
 
     def request_stop(self) -> None:
