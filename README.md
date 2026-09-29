@@ -516,10 +516,10 @@ unreachable) or `failed` (the reason is in `state.json` and the last lines of
 `--mode agentic` (CLI providers only) hands each iteration to a headless `claude` or `codex`
 session in a throwaway worktree outside `runs/`, instead of asking an API for one edit.
 
-With `claude-cli`, the session runs under a sandbox that the CLI enforces: it can read and
-edit only the algorithm files and its notes, the only command it can run is
-`talos compile`, it has no network tools, and its environment holds no LLM keys or Modal
-tokens. The exact rules are in [docs/architecture.md](docs/architecture.md#the-agentic-sandbox).
+With `claude-cli`, the session runs under a sandbox that the CLI enforces: it can read only
+inside its worktree and edit only the algorithm files and its notes, the only commands it can
+run are `talos compile` and read-only ones such as `ls` and `grep`, it has no network tools,
+and its environment holds no LLM keys or Modal tokens. The exact rules are in [docs/architecture.md](docs/architecture.md#the-agentic-sandbox).
 
 `codex-cli` has no equivalent sandbox: under it the agent can execute arbitrary
 agent-authored commands on your machine and read any file you can read. Talos therefore
