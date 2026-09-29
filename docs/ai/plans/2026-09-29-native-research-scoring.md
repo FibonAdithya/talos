@@ -2928,3 +2928,30 @@ Report the gate's final lines, the test count before (MEASURED at the rebased br
 1. Run `test_native_parity` on C3 for hypergraph (the first compile of the GPU template if Task 5 Step 4 was skipped), on C3 for knapsack, and on Modal for hypergraph. A challenge whose native quality differs from metered stays metered.
 2. Run one hypergraph night on tig-adi with `--scoring native`, with the same direction and budget as a recent metered night. Compare iteration wall time, validation pass rate and fuel-proxy misses from `state.json` `validations` and the calibration record's `demotions`.
 3. Switching the default to `native` needs a human (AGENTS.md, Task 11). It flips `talos run --scoring` and `talos compile` together (Task 10's deviation note).
+
+---
+
+## Task 5 results: local knapsack, native vs metered (MEASURED 2026-09-29)
+
+Command: `$S/venv311/bin/python $S/native_local_check.py $S/localcheck` (the Task 5 script, with
+`local_settings(None)`), at commit f4402b7 plus Tasks 6–7, on this machine's Docker. Image
+`ghcr.io/tig-foundation/tig-monorepo/knapsack/dev:0.0.7`, already local; `prepare` re-warmed the
+volume for the `.talos-warm-2` marker (`cargo fetch`) in 40 s. Container limits from the daemon:
+16 CPUs, 26 GiB. Algorithm: mainnet top `knap_exact16`, track `n_items=1000,budget=10`,
+`max_fuel` 5,000,000,000,000, 3 training nonces.
+
+| nonce | metered quality | native quality | fuel_consumed | solve_us | metered runtime_ms | native runtime_ms |
+|---|---|---|---|---|---|---|
+| 0 | 233007 | 233007 | 377,194,024 | 65,360 | 943 | 657 |
+| 1 | 309510 | 309510 | 410,580,013 | 71,273 | 960 | 703 |
+| 2 | 232131 | 232131 | 366,507,720 | 63,202 | 881 | 680 |
+
+- `quality_equal`: true on all 3 nonces.
+- Wall time per evaluate, build included: metered 260.8 s, native 60.6 s.
+- The CPU runner template compiled on the first attempt, offline, in the network-less local job
+  container (`CARGO_NET_OFFLINE=true`), so the `cargo fetch` warm-up covers every crate it needs.
+- Step 4 (GPU template compile) was not run, by the user's choice. The GPU template is first
+  compiled in the human-run live parity test (Task 11).
+- Derived, not measured: the per-nonce ratio is about 1.7e-4 us per fuel unit, so a knapsack
+  budget at `max_fuel` and margin 0.8 is about 690 s (ESTIMATE). That is above `NONCE_TIMEOUT_S`
+  (600 s), so on this track the outer per-nonce timeout, not the fuel budget, is the binding cap.
