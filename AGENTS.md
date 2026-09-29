@@ -156,8 +156,8 @@ That is the same command CI runs (`.github/workflows/ci.yml`). No target uses
 executable definition of a valid change.
 
 `make check` is ruff lint, pytest with the `live` marker excluded, and the
-agentify contract self-check. `tests/test_live.py` spends real Modal budget or
-real C3 credit and is run by hand (see `README.md#live-smoke-test`).
+agentify contract self-check. `tests/test_live.py` spends real Modal budget, real
+C3 credit or LLM tokens and is run by hand (see `README.md#live-smoke-test`).
 
 ## What requires a human
 
@@ -181,7 +181,8 @@ Do not decide these yourself. Raise them and stop.
 - Anything that submits to TIG, stores a credential anywhere other than
   `.talos/secrets.json`, or sends data anywhere other than the user's own LLM
   provider and Modal account.
-- Running `tests/test_live.py`. It spends the user's Modal budget or C3 credit.
+- Running `tests/test_live.py`. It spends the user's Modal budget, C3 credit or, for
+  the agentic test, LLM tokens.
 - Changing the C3 prices in `talos/c3_bench.py::GBP_PER_HOUR`. They are the
   budget for the C3 backend.
 - Running the C3 live test (`tests/test_live.py::test_c3_knapsack_job`). It

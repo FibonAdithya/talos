@@ -78,7 +78,7 @@ def test_sandbox_denies_network_and_scopes_edits(tmp_path):
     # mutation: adding "Edit(**)" or "Bash(*)" to deny breaks agentic mode entirely
     s = sandbox_settings(tmp_path)
     allow, deny = s["permissions"]["allow"], s["permissions"]["deny"]
-    root = "/" + tmp_path.as_posix()
+    root = rule_root(str(tmp_path))  # its exact form is pinned by the literal cases below
     # Claude Code's documented prefix form is `Bash(cmd:*)`; a bare `*` is not a prefix match
     assert "Bash(talos compile:*)" in allow
     assert f"Edit({root}/algorithm/**)" in allow and f"Edit({root}/.talos/hypothesis.json)" in allow
@@ -99,7 +99,8 @@ def test_every_file_rule_is_absolute_to_the_worktree(tmp_path):
     s = sandbox_settings(tmp_path)
     file_rules = [r for r in s["permissions"]["allow"] if r.startswith(("Read(", "Edit("))]
     assert file_rules
-    root = "/" + tmp_path.as_posix()
+    root = rule_root(str(tmp_path))
+    assert root.startswith("//")
     for r in file_rules:
         inner = r[r.index("(") + 1:-1]
         assert inner.startswith(root + "/"), r
@@ -130,8 +131,8 @@ def test_symlinked_worktree_gets_rules_for_both_paths(tmp_path):
     except OSError:
         pytest.skip("this account cannot create symlinks (Windows without developer mode)")
     allow = sandbox_settings(link)["permissions"]["allow"]
-    assert f"Edit(/{link.as_posix()}/algorithm/**)" in allow
-    assert f"Edit(/{real.resolve().as_posix()}/algorithm/**)" in allow
+    assert f"Edit({rule_root(str(link))}/algorithm/**)" in allow
+    assert f"Edit({rule_root(str(real.resolve()))}/algorithm/**)" in allow
 
 
 def test_claude_is_pointed_at_the_worktree_settings_file(tmp_path):

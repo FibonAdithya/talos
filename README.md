@@ -625,7 +625,15 @@ everything in place and takes only the job (MEASURED 2026-09-25: knapsack `1 pas
 TALOS_LIVE_BACKEND=local .venv/bin/pytest -m live tests/test_live.py -k local -s
 ```
 
-Both need `pytest`: install it with `uv pip install --python .venv/bin/python pytest`, or use
+For agentic mode, a fourth test makes one real `claude-cli` call on the smallest model, so it
+spends LLM tokens, not compute. The agent changes directory into its worktree's algorithm
+folder and must still be allowed to edit there (MEASURED 2026-09-29: `1 passed` in 12.2 s):
+
+```bash
+TALOS_LIVE_AGENT=claude-cli .venv/bin/pytest -m live tests/test_live.py -k claude_agent -s
+```
+
+All of them need `pytest`: install it with `uv pip install --python .venv/bin/python pytest`, or use
 the development install below.
 
 Run the one for your backend once after `talos setup`, before trusting a real run. The
