@@ -51,6 +51,33 @@ def test_a_nonce_pairs_only_with_its_own_track_and_nonce():
     assert calibration.track_ratios(metered, native) == {"a": 2.0}
 
 
+def test_a_pair_whose_metered_run_hit_the_fuel_limit_is_ignored():
+    # The metered run saved q=100 at fuel 1000 and was cut off; the unbudgeted native run kept
+    # going and saved q=150 at 9000 us. The two numbers are from different saves.
+    # mutation: pairing them anyway gives a ratio of 9.0 for this track
+    metered = [NonceResult("a", 0, True, 100, 1, None, fuel_consumed=1000, limit_hit=True)]
+    native = [NonceResult("a", 0, True, 150, 1, None, solve_us=9000)]
+    assert calibration.track_ratios(metered, native) == {}
+
+
+def test_only_clean_pairs_with_equal_quality_are_kept():
+    metered = [NonceResult("a", 0, True, 100, 1, None, fuel_consumed=1000),
+               NonceResult("a", 1, True, 100, 1, None, fuel_consumed=1000),
+               NonceResult("a", 2, True, 100, 1, None, fuel_consumed=1000),
+               NonceResult("a", 3, False, None, 1, "no_solution", fuel_consumed=1000),
+               NonceResult("a", 4, True, 100, 1, None, fuel_consumed=1000, limit_hit=True)]
+    native = [NonceResult("a", 0, True, 100, 1, None, solve_us=5000),
+              NonceResult("a", 1, True, 101, 1, None, solve_us=9000),
+              NonceResult("a", 2, True, 100, 1, None, solve_us=9000, limit_hit=True),
+              NonceResult("a", 3, False, None, 1, "no_solution", solve_us=9000),
+              NonceResult("a", 4, True, 100, 1, None, solve_us=9000)]
+    # nonce 0 alone is clean: 5000 / 1000 = 5.0. Nonce 1 drifted in quality, nonce 2 hit the
+    # native limit, nonce 3 failed on both (equal None qualities), nonce 4 hit the metered
+    # limit at the same quality.
+    # mutation: dropping any one condition adds a 9.0 and moves the median off 5.0
+    assert calibration.track_ratios(metered, native) == {"a": 5.0}
+
+
 def test_three_misses_lower_the_margin_once_and_the_floor_holds():
     rec = calibration.new_record({"a": 1.0})
     # mutation: `>` instead of `>=` needs a fourth miss

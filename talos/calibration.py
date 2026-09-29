@@ -42,14 +42,21 @@ def calibration_key(challenge: str, hardware_class: str, baseline_files: dict[st
 
 def track_ratios(metered: list[NonceResult], native: list[NonceResult]) -> dict[str, float]:
     """Median microseconds of native solve per unit of fuel, per track, over nonces that have
-    both numbers. Both were taken at the algorithm's last save_solution call. A zero or
-    missing fuel_consumed is skipped: `if f` below is meant to drop 0 as well as None."""
-    fuel = {(r.track, r.nonce): r.fuel_consumed for r in metered}
+    both numbers from the same save. Each is taken at the algorithm's last save_solution call,
+    which is the same save only when both runs are ok, neither hit its limit and both reached
+    the same quality: a metered run cut off by fuel saved earlier than the unbudgeted native
+    run did (metered q=100 at fuel 1000 against native q=150 at 9000 us gave 9.0). A zero or
+    missing fuel_consumed is skipped: `if m.fuel_consumed` is meant to drop 0 as well as
+    None."""
+    by_nonce = {(r.track, r.nonce): r for r in metered}
     per: dict[str, list[float]] = {}
     for r in native:
-        f = fuel.get((r.track, r.nonce))
-        if f and r.solve_us is not None:
-            per.setdefault(r.track, []).append(r.solve_us / f)
+        m = by_nonce.get((r.track, r.nonce))
+        if (m is None or not (m.ok and r.ok) or m.limit_hit or r.limit_hit
+                or m.quality != r.quality):
+            continue
+        if m.fuel_consumed and r.solve_us is not None:
+            per.setdefault(r.track, []).append(r.solve_us / m.fuel_consumed)
     return {t: median(v) for t, v in per.items()}
 
 
