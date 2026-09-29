@@ -83,8 +83,12 @@ def test_sandbox_denies_network_and_scopes_edits(tmp_path):
     assert "Bash(talos compile:*)" in allow
     assert f"Edit({root}/algorithm/**)" in allow and f"Edit({root}/.talos/hypothesis.json)" in allow
     assert f"Read({root}/algorithm/**)" in allow  # Read rules also cover Glob and Grep
-    # mutation: an edit rule over .talos/** would let the agent rewrite its own settings file
-    assert not any(r.startswith("Edit(") and r.endswith("/.talos/**)") for r in allow)
+    # Edit rules also grant Write, so the edit scope is exactly these two paths per root.
+    # mutation: any wider edit rule (<wt>/**, <wt>/*, <wt>/.talos/*, or the settings file
+    # itself) would let the agent rewrite its own permissions
+    roots = {rule_root(str(tmp_path)), rule_root(str(tmp_path.resolve()))}
+    assert {r for r in allow if r.startswith("Edit(")} == {
+        f"Edit({r}/{p})" for r in roots for p in ("algorithm/**", ".talos/hypothesis.json")}
     assert "WebFetch" in deny and "WebSearch" in deny
     assert {"Bash(curl:*)", "Bash(wget:*)", "Bash(git:*)", "Bash(ssh:*)", "Bash(python:*)"} <= set(deny)
     assert "Edit(**)" not in deny and "Bash(*)" not in deny and "Bash(*:*)" not in deny
