@@ -1026,3 +1026,52 @@ def test_a_focused_native_job_needs_a_budget_only_for_its_track(tmp_path):
     # the guard track u is scored only in the metered validation, so it needs no budget
     # mutation: requiring every track's ratio sends a focused job to the metered fallback
     assert loop.state.scoring == "native"
+
+
+def test_a_resumed_calibration_reuses_its_stored_metered_rows(tmp_path):
+    loop, fp, fb, store = native(tmp_path, [], fuel=10_000_000)
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    # killed during the native call: the metered rows (fuel 2000) were stored before it
+    rows = [NonceResult("t", n, True, 100, 1, None, fuel_consumed=2000) for n in range(4)]
+    loop.state.pending_job = {"purpose": "calibration",
+                              "calibration_metered": [r.to_dict() for r in rows]}
+    loop.calibrate(tmp_path / "cal", "hw")
+    # mutation: re-running the metered call on resume, whose request hash differs from the
+    # in-flight native job's, so C3 submits a new job and the native one is orphaned
+    assert [c.mode for c in fb.calls] == ["native"]
+    # 500 us / 2000 fuel = 0.25 (the stored rows, not FakeBench's 1000); x 1e7 x 0.8
+    assert loop.state.fuel_budgets_us == {"t": 2_000_000}
+    assert loop.state.pending_job is None
+
+
+def test_a_calibration_stores_its_metered_rows_before_the_native_call(tmp_path):
+    seen = []
+
+    class Recording(FakeBench):
+        def evaluate(self, request):
+            if request.mode == "native":
+                seen.append(store.load().pending_job)  # what a kill here would leave
+            return super().evaluate(request)
+
+    loop, fp, _, store = native(tmp_path, [], fuel=10_000_000,
+                                bench=Recording(quality_from_files))
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    loop.calibrate(tmp_path / "cal", "hw")
+    # mutation: keeping the metered rows only in a local, so a kill here loses them
+    assert seen[0]["purpose"] == "calibration"
+    assert [r["fuel_consumed"] for r in seen[0]["calibration_metered"]] == [1000] * 4
+    assert store.load().pending_job is None  # cleared once the native call is back
+
+
+def test_a_metered_calibration_build_failure_falls_back_with_its_output(tmp_path):
+    fb = FakeBench(quality_from_files, metered_compile_ok=lambda files: False)
+    loop, fp, _, store = native(tmp_path, [], bench=fb)
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    loop.calibrate(tmp_path / "cal", "hw")
+    events = [json.loads(x) for x in
+              (store.run_dir / "timeline.jsonl").read_text().splitlines()]
+    fallback = [e for e in events if e["kind"] == "calibration_fallback"]
+    # mutation: a failed metered build silently becomes "no fuel", and the event hides why
+    assert any("metered build" in e["reason"] and "E0308" in e.get("output", "")
+               for e in fallback)
+    assert loop.state.scoring == "metered" and [c.mode for c in fb.calls] == ["metered"]

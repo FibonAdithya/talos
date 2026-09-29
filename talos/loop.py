@@ -269,7 +269,8 @@ class Loop:
     def _measure_calibration(self) -> dict | None:
         """The baseline on the training nonces: metered only if its stored rows carry no fuel
         (every baseline cached before fuel was recorded), then native with no budget. Both go
-        through the budgeted bench. None when no track yields a ratio."""
+        through the budgeted bench. The metered rows are kept in pending_job until the native
+        call returns. None when either build fails or no track yields a ratio."""
         bench = _BudgetedBench(self)
         pend = self.state.pending_job
         self.state.pending_job = (pend if pend and pend.get("purpose") == "calibration"
@@ -284,9 +285,27 @@ class Loop:
                 hyperparameters=self.spec.hyperparameters, mode=mode))
 
         metered = self.state.baseline.training
-        if all(r.fuel_consumed is None for r in metered):
+        stored = self.state.pending_job.get("calibration_metered")
+        if stored is not None:
+            # A resume after a kill during the native call. Re-running the metered call would
+            # not match the native job's request_hash, so C3 would submit a new job and orphan
+            # the native one, still billing.
+            metered = [NonceResult.from_dict(r) for r in stored]
+        elif all(r.fuel_consumed is None for r in metered):
             res = score("metered")
-            metered = res.training if res.compile.ok else []
+            if not res.compile.ok:
+                self.state.pending_job = None
+                self._save()
+                self._event("calibration_fallback",
+                            reason="the baseline failed the metered build",
+                            output=res.compile.output[-2000:])
+                return None
+            metered = res.training
+            # Saved before the native call, so a kill during it resumes at the native call.
+            # The metered job is collected, so its reattach keys are dropped.
+            self.state.pending_job = {"purpose": "calibration",
+                                      "calibration_metered": [r.to_dict() for r in metered]}
+            self._save()
         res = score("native")
         self.state.pending_job = None
         self._save()
