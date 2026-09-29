@@ -209,6 +209,25 @@ def test_a_metered_run_out_of_fuel_with_a_verified_solution_is_a_proxy_miss():
     assert [(r.track, r.nonce) for r in fuel_proxy_misses(metered, native)] == [("t", 0)]
 
 
+def test_an_out_of_fuel_row_without_limit_hit_is_still_a_proxy_miss():
+    # A Modal app deployed before limit_hit existed sends error="out_of_fuel", limit_hit False.
+    metered = vrows([None, 110, 110, 110], error="out_of_fuel")
+    native = vrows([110, 110, 110, 110])
+    assert not metered[0].limit_hit
+    # mutation: detecting misses by limit_hit alone reads this as an ordinary error, which
+    # the 0.05 ceiling then reports as "error_ceiling" and the margin never adapts
+    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+
+
+def test_a_proxy_miss_is_reported_before_a_quality_drift_on_another_nonce():
+    # nonce 0 hit the metered limit (native had budget left); nonce 1 drifted 110 -> 111
+    metered = vrows([108, 110, 110, 110], limit=(0,))
+    native = vrows([110, 111, 110, 110])
+    # mutation: checking quality before fuel reports "nondeterministic", which records no
+    # miss, so the track's margin never drops
+    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+
+
 def test_a_nonce_where_both_runs_hit_their_limit_is_neither_a_miss_nor_a_mismatch():
     # the native budget stopped nonce 0 early (margin < 1 by design) and the metered run used
     # its whole fuel: consistent, and the two qualities are expected to differ

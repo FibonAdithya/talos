@@ -400,6 +400,37 @@ def test_a_stale_deploy_is_reported_at_once_not_retried_as_an_outage(monkeypatch
     assert sleeps == []
 
 
+def test_a_native_compile_against_an_app_without_mode_asks_for_setup_at_once(monkeypatch):
+    # An app deployed before native scoring has a compile function with no `mode` keyword.
+    # mutation: treating that TypeError as an outage retries it for 900 s and then reports
+    # "Modal unreachable" instead of asking for `talos setup`
+    class Fn:
+        def hydrate(self):
+            pass
+
+        def remote(self, files, **kwargs):
+            raise TypeError("compile_fn() got an unexpected keyword argument 'mode'")
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    clock, sleeps = FakeClock(), []
+    b = ModalBench(clock=clock, sleep=recording_sleep(clock, sleeps))
+    with pytest.raises(BenchUnavailable, match="talos setup"):
+        b.evaluate(EvalRequest(challenge="knapsack", files={"mod.rs": "x"}, training=TR,
+                               holdout=[], fuel=1, baseline_training=None, rule=BeatRule(),
+                               mode="native", fuel_budgets_us={"t": 900}))
+    assert sleeps == []
+
+
+def test_an_unknown_scoring_mode_is_refused():
+    # mutation: a typo'd mode falls through to the metered branch of every backend
+    with pytest.raises(ValueError, match="bogus"):
+        EvalRequest(challenge="knapsack", files={"mod.rs": "x"}, training=TR, holdout=[],
+                    fuel=1, baseline_training=None, rule=BeatRule(), mode="bogus")
+
+
 def test_hyperparameters_for_a_track():
     from talos.bench import hyperparameters_for
     hp = {"t": {"x": 1}, "u": None, "e": {}}
