@@ -414,6 +414,12 @@ A resumed job keeps the provider, model, mode, track, hyperparameters and nonces
 with, whatever `talos.config.json` says now. A C3 job that was still running when Talos
 stopped is reattached rather than paid for twice.
 
+Talos now pins TIG dev image `0.0.8` and source with the upstream seed-obfuscation fix.
+After upgrading from `0.0.7`, start a new job: saved runs from the old build cannot resume
+against the new runtime. Baselines are measured again automatically. Modal users must
+rerun `talos setup` to redeploy before starting; C3 and local Docker use the new image on
+the next job. Run your backend's [live smoke test](#live-smoke-test) after upgrading.
+
 ### Submit
 
 When a job ends with `Status: won`, open `runs/<job_id>/package/README.md`. It explains how

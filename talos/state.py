@@ -40,6 +40,9 @@ class JobSpec:
     baseline_algorithm: dict | None = None  # {"name", "id", "adoption"}
     hyperparameters: dict[str, dict | None] | None = None  # track -> map passed to tig-runtime
     hyperparameters_source: dict[str, dict] | None = None  # track -> benchmark it came from
+    # None identifies jobs written before the image pin was recorded. Their saved scores
+    # cannot be reused with a newer runtime, even when the monorepo pin is unchanged.
+    dev_image_tag: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)

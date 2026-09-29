@@ -55,6 +55,17 @@ def test_cache_hit_skips_bench(tmp_path):
     assert len(fb.calls) == 1
 
 
+def test_image_upgrade_remeasures_cached_baseline(tmp_path, monkeypatch):
+    # An image-only update must never compare new candidates with old runtime measurements.
+    fb = FakeBench(lambda ch, files, ns: [1 for _ in ns.nonces()])
+    for tag in ("0.0.7", "0.0.8", "0.0.8"):
+        monkeypatch.setattr("talos.baseline.DEV_IMAGE_TAG", tag)
+        resolve_baseline("knapsack", TR, HO, 5, fb, tmp_path, "cpu4-mem8192",
+                         rule=BeatRule(), mainnet=fake_mainnet())
+    assert len(fb.calls) == 2
+    assert fb.holdout_runs == 2
+
+
 def test_cache_key_changes_with_fuel_and_hardware():
     # mutation: cache_key ignoring fuel or hardware_class would collide keys across
     # different measurement conditions and serve a stale/mismatched cached baseline
@@ -136,13 +147,13 @@ def test_baseline_forces_the_holdout_run(tmp_path):
     assert fb.calls[0].baseline_training is None and len(rec.holdout) == 2
 
 
-def test_cache_key_without_hyperparameters_omits_them_from_the_payload():
-    # Value computed with CRATE_LAYOUT "pruned-1" in the payload. Baselines cached before the
-    # crate layout entered the key (776fde051d7068800fc50361 for these inputs) are deliberate
-    # misses: they were measured beside every shipped algorithm.
+def test_cache_key_without_hyperparameters_omits_them_from_the_payload(monkeypatch):
+    # Fix the image here so future pin bumps do not require another golden value.
+    monkeypatch.setattr("talos.baseline.DEV_IMAGE_TAG", "0.0.8")
+    # Baselines cached without the image (10f760b979fa855a984c6498 for these inputs) miss.
     # mutation: always putting "hyperparameters": None in the hashed payload changes this key
     key = cache_key("knapsack", "ref", "algo", TR, HO, 5, "cpu4-mem8192")
-    assert key == "10f760b979fa855a984c6498"
+    assert key == "4d81b60c4370ff76982312fb"
 
 
 def test_cache_key_follows_what_the_hyperparameters_change_at_runtime():

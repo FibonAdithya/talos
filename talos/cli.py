@@ -26,7 +26,8 @@ from talos.budget import Budget, BudgetExhausted, Spend, exhausted
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
-from talos.challenges import (CHALLENGES, MONOREPO_REF, c3_hardware_options, c3_hardware_class,
+from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF,
+                              c3_hardware_options, c3_hardware_class,
                               c3_image, hardware_options, hardware_class, local_hardware_class)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
@@ -559,6 +560,12 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
             print(f"job {spec.job_id} already {state.status}; nothing to resume")
             print(f"Package: {build_package(spec, state, store)}")
             return 1
+        if spec.monorepo_ref != MONOREPO_REF or spec.dev_image_tag != DEV_IMAGE_TAG:
+            print(f"job {spec.job_id} was created with a different or unrecorded TIG build "
+                  f"(monorepo {spec.monorepo_ref}, dev image {spec.dev_image_tag or 'unknown'}); "
+                  f"start a new job with dev image {DEV_IMAGE_TAG} to remeasure the baseline "
+                  "and candidates together", file=sys.stderr)
+            return 2
         if state.status in ("cancelled", "failed", "paused"):
             previous = state.status
             # The wall-clock budget measures time the job was WORKING. started_at is shifted
@@ -898,7 +905,7 @@ def cmd_run(args, ask) -> int:
                    tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
                    created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
                    track=track, baseline_algorithm=algorithm, hyperparameters=hyperparameters,
-                   hyperparameters_source=hp_source)
+                   hyperparameters_source=hp_source, dev_image_tag=DEV_IMAGE_TAG)
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
     (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n",

@@ -336,6 +336,36 @@ def test_resume_restarts_a_cancelled_job(tmp_path, monkeypatch, capsys):
     assert "resumed" in events
 
 
+@pytest.mark.parametrize("changed", [
+    {"dev_image_tag": "0.0.7"},
+    {"dev_image_tag": None},
+    {"monorepo_ref": "old-ref"},
+])
+def test_resume_refuses_changed_build_before_spending_or_mutating_state(
+        tmp_path, monkeypatch, capsys, changed):
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    spec = json.loads((run_dir / "job.json").read_text())
+    assert spec["dev_image_tag"] == DEV_IMAGE_TAG
+    spec.update(changed)
+    if spec["dev_image_tag"] is None:
+        del spec["dev_image_tag"]  # a real job written before the field existed
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    state = json.loads((run_dir / "state.json").read_text())
+    state["status"] = "paused"
+    state["pending_job"] = {"purpose": 1, "job_id": "old-image-job"}
+    (run_dir / "state.json").write_text(json.dumps(state))
+    before = {name: (run_dir / name).read_bytes()
+              for name in ("job.json", "state.json", "timeline.jsonl")}
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **kw: pytest.fail("must not start compute"))
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **kw: pytest.fail("must not call LLM"))
+    assert cli.main(["run", "--resume", run_dir.name]) == 2
+    assert "start a new job" in capsys.readouterr().err
+    assert before == {name: (run_dir / name).read_bytes() for name in before}
+
+
 def test_resume_after_the_hours_window_shifts_the_clock(tmp_path, monkeypatch, capsys):
     # mutation: keeping the original started_at makes every late resume exhausted — a job with
     # --budget-hours 4 that is resumed five hours later exits "exhausted (hours)" at once and can

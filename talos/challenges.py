@@ -4,8 +4,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-MONOREPO_REF = "84a5787f5b14a630bdf40f52bccf37887d3d8464"
-DEV_IMAGE_TAG = "0.0.7"
+# Keep the challenge sources in sync with the image's seed-obfuscation fix (2703c9af).
+MONOREPO_REF = "839c7184afda9b64c4a9dca18bca5a647a1bb867"
+DEV_IMAGE_TAG = "0.0.8"
 
 C3_CPU_WORKERS = 4
 # Hardware preference order, tried in turn at job start until one has capacity
