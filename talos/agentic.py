@@ -20,7 +20,7 @@ class AgenticError(ValueError):
     """A ValueError so Loop.iterate records it as a failed iteration instead of crashing the run."""
 
 
-# codex ignores .claude/settings.json, and its own `--sandbox workspace-write` restricts writes
+# codex ignores claude-cli's settings file, and its own `--sandbox workspace-write` restricts writes
 # only: the agent can execute arbitrary commands on this machine and read any file it can reach.
 # claude-cli enforces the allow/deny list in sandbox_settings; codex cannot, so it is opt-in.
 CODEX_AGENTIC_ENV = "TALOS_ALLOW_CODEX_AGENTIC"
@@ -34,22 +34,40 @@ def codex_agentic_refused(provider_kind: str, mode: str) -> bool:
             and os.environ.get(CODEX_AGENTIC_ENV) != "1")
 
 
+# Passed with --settings. Not .claude/settings.json: Claude Code also reads that path as project
+# settings, ignores its allow list in an untrusted directory, and warns about it on every run.
+# Outside every Edit rule, so the agent cannot rewrite its own permissions.
+SETTINGS_REL = Path(".talos") / "claude-settings.json"
+
+
+def rule_root(path: str) -> str:
+    """`path` as the root of an absolute Claude Code permission rule: `//abs/path`, with a
+    Windows path in the POSIX form Claude Code matches against (C:\\Users\\a -> //c/Users/a)."""
+    p = path.replace("\\", "/")
+    if len(p) >= 2 and p[1] == ":" and p[0].isalpha():
+        p = "/" + p[0].lower() + p[2:]
+    return "/" + p
+
+
 def sandbox_settings(worktree: Path) -> dict:
     """Deny is evaluated before allow in Claude Code, so never deny a glob that covers an
     allowed path. Unlisted tools are refused by `dontAsk` mode rather than prompted for.
 
-    Reads alone do not let a `dontAsk` agent discover file names under `algorithm/`: Glob and
-    Grep are separate tools from Read and need their own allow entries over the same read
-    scope (mirrors Prometheus's `_build_sandbox_settings`)."""
+    File rules are absolute. Claude Code resolves a relative rule against the shell's current
+    directory, which moves with every `cd`; agents habitually `cd <wt>/algorithm` before editing,
+    after which `Edit(algorithm/**)` matched nothing (34 of 37 such sessions on tig-adi had Edit
+    denied, 2026-09-26..29). A symlinked worktree (macOS temp dirs) gets rules for both paths.
+    Edit rules cover Write, so it needs no rule of its own. CLI 2.1.284 has no Glob or Grep
+    tool (agents search with Bash grep/ls), so there are no rules for them either."""
+    roots = list(dict.fromkeys([rule_root(str(worktree)), rule_root(str(worktree.resolve()))]))
     read_scope = ["algorithm/**", "CHALLENGE.md", "tacit.md", "AGENTS.md",
                   ".talos/hypothesis.json"]
-    allow = []
-    for tool in ("Read", "Glob", "Grep"):
-        allow += [f"{tool}({p})" for p in read_scope]
-    allow += ["Edit(algorithm/**)", "Edit(.talos/hypothesis.json)", "Bash(talos compile:*)"]
+    allow = [f"Read({r}/{p})" for r in roots for p in read_scope]
+    allow += [f"Edit({r}/{p})" for r in roots for p in ("algorithm/**", ".talos/hypothesis.json")]
+    allow.append("Bash(talos compile:*)")
     return {"permissions": {
         "allow": allow,
-        "deny": ["WebFetch", "WebSearch", "Write(**)", "Bash(curl:*)", "Bash(wget:*)", "Bash(git:*)",
+        "deny": ["WebFetch", "WebSearch", "Bash(curl:*)", "Bash(wget:*)", "Bash(git:*)",
                  "Bash(ssh:*)", "Bash(python:*)", "Bash(pip:*)", "Bash(nc:*)", "Bash(rm:*)"],
         "defaultMode": "dontAsk"}}
 
@@ -94,9 +112,8 @@ def prepare_worktree(ctx: PromptContext, parent: Path | None = None) -> Path:
     wt = Path(tempfile.mkdtemp(prefix="talos-agentic-", dir=parent))
     (wt / "algorithm").mkdir(parents=True)
     (wt / ".talos").mkdir()
-    # agent must Edit, Write is denied
+    # pre-created so the agent fills it with Edit, the tool its allow rule names
     (wt / ".talos" / "hypothesis.json").write_text("{}\n", encoding="utf-8", newline="\n")
-    (wt / ".claude").mkdir()
     for name, text in ctx.files.items():
         p = wt / "algorithm" / name
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -108,14 +125,15 @@ def prepare_worktree(ctx: PromptContext, parent: Path | None = None) -> Path:
     md = claude_md(ctx)
     (wt / "CLAUDE.md").write_text(md, encoding="utf-8", newline="\n")
     (wt / "AGENTS.md").write_text(md, encoding="utf-8", newline="\n")
-    (wt / ".claude" / "settings.json").write_text(json.dumps(sandbox_settings(wt), indent=1),
-                                                  encoding="utf-8", newline="\n")
+    (wt / SETTINGS_REL).write_text(json.dumps(sandbox_settings(wt), indent=1),
+                                   encoding="utf-8", newline="\n")
     return wt
 
 
 def read_back(worktree: Path, ctx: PromptContext) -> tuple[dict, dict[str, str]]:
     """spec §9: an edit outside the algorithm files fails the iteration in both modes. For codex,
-    which ignores .claude/settings.json, this scope check is the ONLY enforcement of that rule."""
+    which ignores claude-cli's settings file, this scope check is the ONLY enforcement of that
+    rule."""
     hp = worktree / ".talos" / "hypothesis.json"
     if not hp.exists() or hp.read_text(encoding="utf-8").strip() in ("", "{}"):
         raise AgenticError("agent did not fill in .talos/hypothesis.json")
@@ -200,7 +218,7 @@ def _run_agent(cmd: list[str], wt: Path, prompt: str, timeout_s: int, run) -> No
 
 def _run_claude(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
     _run_agent([argv0("claude"), "-p", "--model", model,
-                "--settings", str(wt / ".claude" / "settings.json"),
+                "--settings", str(wt / SETTINGS_REL),
                 "--permission-mode", "dontAsk"], wt, prompt, timeout_s, run)
 
 

@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from talos.agentic import (AgenticError, CODEX_AGENTIC_ENV, attach_agentic, claude_md,
-                           prepare_worktree, read_back, sandbox_settings)
+from talos.agentic import (AgenticError, CODEX_AGENTIC_ENV, SETTINGS_REL, attach_agentic,
+                           claude_md, prepare_worktree, read_back, rule_root, sandbox_settings)
 from talos.prompts import PromptContext
 from talos.state import JobStore
 
@@ -25,7 +25,10 @@ def test_prepare_worktree_layout(tmp_path):
     wt = prepare_worktree(ctx(), parent=tmp_path)
     assert (wt / "algorithm" / "mod.rs").read_text() == "fn a(){}"
     assert (wt / "CHALLENGE.md").exists() and (wt / "tacit.md").read_text() == "- USER: go"
-    assert (wt / ".claude" / "settings.json").exists()
+    assert json.loads((wt / SETTINGS_REL).read_text()) == sandbox_settings(wt)
+    # mutation: a copy at .claude/settings.json is read as project settings, whose allow list
+    # Claude Code ignores in an untrusted directory (and says so on every run)
+    assert not (wt / ".claude").exists()
     assert (wt / "AGENTS.md").exists()
     # mutation: reusing one fixed path means a second iteration inherits the first one's files
     assert prepare_worktree(ctx(), parent=tmp_path) != wt
@@ -75,16 +78,84 @@ def test_sandbox_denies_network_and_scopes_edits(tmp_path):
     # mutation: adding "Edit(**)" or "Bash(*)" to deny breaks agentic mode entirely
     s = sandbox_settings(tmp_path)
     allow, deny = s["permissions"]["allow"], s["permissions"]["deny"]
+    root = rule_root(str(tmp_path))  # its exact form is pinned by the literal cases below
     # Claude Code's documented prefix form is `Bash(cmd:*)`; a bare `*` is not a prefix match
     assert "Bash(talos compile:*)" in allow
-    assert "Edit(algorithm/**)" in allow and "Edit(.talos/hypothesis.json)" in allow
-    # mutation: dropping Glob/Grep entries leaves a dontAsk agent unable to discover file names
-    # under algorithm/ (Read alone does not grant Glob/Grep access)
-    assert "Glob(algorithm/**)" in allow and "Grep(algorithm/**)" in allow
-    assert "WebFetch" in deny and "WebSearch" in deny and "Write(**)" in deny
+    assert f"Edit({root}/algorithm/**)" in allow and f"Edit({root}/.talos/hypothesis.json)" in allow
+    assert f"Read({root}/algorithm/**)" in allow
+    # Edit rules also grant Write, so the edit scope is exactly these two paths per root.
+    # mutation: any wider edit rule (<wt>/**, <wt>/*, <wt>/.talos/*, or the settings file
+    # itself) would let the agent rewrite its own permissions
+    roots = {rule_root(str(tmp_path)), rule_root(str(tmp_path.resolve()))}
+    assert {r for r in allow if r.startswith("Edit(")} == {
+        f"Edit({r}/{p})" for r in roots for p in ("algorithm/**", ".talos/hypothesis.json")}
+    assert "WebFetch" in deny and "WebSearch" in deny
     assert {"Bash(curl:*)", "Bash(wget:*)", "Bash(git:*)", "Bash(ssh:*)", "Bash(python:*)"} <= set(deny)
     assert "Edit(**)" not in deny and "Bash(*)" not in deny and "Bash(*:*)" not in deny
     assert s["permissions"]["defaultMode"] == "dontAsk"  # unlisted tools are refused, not prompted
+
+
+def test_every_file_rule_is_absolute_to_the_worktree(tmp_path):
+    # Claude Code resolves a relative rule against the shell's current directory, which moves
+    # with every `cd`. Agents run `cd <wt>/algorithm && grep ...` before editing; afterwards
+    # `Edit(algorithm/**)` matched nothing and 34 of 37 such sessions on tig-adi had Edit denied.
+    # mutation: going back to relative rules (`Edit(algorithm/**)`) fails this test
+    s = sandbox_settings(tmp_path)
+    file_rules = [r for r in s["permissions"]["allow"] if r.startswith(("Read(", "Edit("))]
+    assert file_rules
+    root = rule_root(str(tmp_path))
+    assert root.startswith("//")
+    for r in file_rules:
+        inner = r[r.index("(") + 1:-1]
+        assert inner.startswith(root + "/"), r
+
+
+@pytest.mark.parametrize("given, expected", [
+    ("/tmp/talos-agentic-x", "//tmp/talos-agentic-x"),
+    ("C:\\Users\\adi\\AppData\\Local\\Temp\\talos-agentic-x",
+     "//c/Users/adi/AppData/Local/Temp/talos-agentic-x"),
+    ("D:/work/wt", "//d/work/wt"),
+])
+def test_rule_root_uses_claude_codes_absolute_form(given, expected):
+    # Claude Code writes an absolute rule path as `//path`, and matches Windows paths in their
+    # POSIX form (C:\Users\a -> /c/Users/a).
+    # mutation: leaving the backslashes or the `C:` drive in place yields a rule that never matches
+    assert rule_root(given) == expected
+
+
+def test_symlinked_worktree_gets_rules_for_both_paths(tmp_path):
+    # macOS hands out /var/folders/... temp dirs that resolve to /private/var/...; the agent
+    # may see either form, so a rule for only one of them fails on the other.
+    # mutation: emitting rules for the given path alone fails the resolved-path assertion
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("this account cannot create symlinks (Windows without developer mode)")
+    allow = sandbox_settings(link)["permissions"]["allow"]
+    assert f"Edit({rule_root(str(link))}/algorithm/**)" in allow
+    assert f"Edit({rule_root(str(real.resolve()))}/algorithm/**)" in allow
+
+
+def test_claude_is_pointed_at_the_worktree_settings_file(tmp_path):
+    # mutation: passing the old .claude/settings.json path gives --settings a missing file, and
+    # claude-cli then runs with no allow list at all
+    seen = {}
+
+    def run(cmd, **kw):
+        path = Path(cmd[cmd.index("--settings") + 1])
+        seen.update(path=path, cwd=Path(kw["cwd"]), exists=path.exists())
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    loop = types.SimpleNamespace(store=JobStore(tmp_path), propose_and_edit=None,
+                                 _check_budget=lambda: None, _event=lambda *a, **k: None)
+    attach_agentic(loop, "claude-cli", "m", timeout_s=1, run=run)
+    with pytest.raises(AgenticError):
+        loop.propose_and_edit(ctx())
+    assert seen["exists"] and seen["path"] == seen["cwd"] / SETTINGS_REL
+    shutil.rmtree(seen["cwd"], ignore_errors=True)
 
 
 def test_read_back_requires_hypothesis_and_returns_files(tmp_path):

@@ -78,21 +78,32 @@ disables it.
 throwaway worktree outside `runs/`. See [Agentic mode](../README.md#agentic-mode) for when to
 use it.
 
-With `claude-cli`, Talos writes a `.claude/settings.json` that the CLI enforces:
+With `claude-cli`, Talos writes `.talos/claude-settings.json` in the worktree and passes it
+with `--settings`; the CLI enforces it:
 
-- Reads, `Glob` and `Grep` are allowed only over `algorithm/**`, `CHALLENGE.md`, `tacit.md`,
-  `AGENTS.md` and `.talos/hypothesis.json`.
-- The only writes allowed are `Edit` on the algorithm files and on the hypothesis file.
-- The only command allowed is `talos compile`.
-- `WebFetch`, `WebSearch`, `Write` and the usual network and shell escapes are denied, so
-  there is no network access at the tool level.
+- Read rules name `algorithm/**`, `CHALLENGE.md`, `tacit.md`, `AGENTS.md` and
+  `.talos/hypothesis.json`. Claude Code also lets the agent read any other file in its working
+  directory, so in practice reads are confined to the worktree, settings file included; reads
+  outside it are denied. There are no `Glob` or `Grep` rules: CLI 2.1.284 has no such tools,
+  and agents search with Bash `grep` and `ls`.
+- The only writes allowed are edits (which also cover `Write`) to the algorithm files and to
+  the hypothesis file. The settings file itself is outside that scope.
+- The only command on the allow list is `talos compile`. Claude Code runs read-only commands
+  such as `ls` and `grep` inside the working directory without a rule.
+- `WebFetch`, `WebSearch` and the usual network and shell escapes are denied, so there is no
+  network access at the tool level.
 - `defaultMode` is `dontAsk`, so any tool not on the allow list is refused outright rather
   than prompted for.
+- Every file rule is an absolute path to the worktree. Claude Code resolves a relative rule
+  against the shell's current directory, so after an agent ran `cd algorithm` a relative
+  `Edit(algorithm/**)` matched nothing and its edits were refused.
+- The file is not `.claude/settings.json`: Claude Code also reads that path as project
+  settings and ignores their allow list in a directory nobody has trusted.
 
 The child process gets an environment allowlist rather than your environment: no LLM keys,
 no Modal tokens.
 
-`codex-cli` is opt-in. Codex ignores `.claude/settings.json`, and its own `--sandbox
+`codex-cli` is opt-in. Codex ignores that settings file, and its own `--sandbox
 workspace-write` restricts writes only: under it the agent can execute arbitrary
 agent-authored commands on your machine and read any file you can read. Talos therefore
 refuses to start an agentic codex run unless you set `TALOS_ALLOW_CODEX_AGENTIC=1`.

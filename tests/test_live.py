@@ -2,6 +2,7 @@
 Run: TALOS_LIVE_CHALLENGE=knapsack .venv/bin/pytest -m live tests/test_live.py -s
 Needs `talos setup` done (Modal deployed) and network."""
 import os
+import subprocess
 
 import pytest
 
@@ -158,3 +159,30 @@ def test_modal_gpu_probe():
     assert 0 < b.cost_mark() < 0.20
     print({"gpu": gpu, "probe_s": round(time.monotonic() - t0),
            "cost_usd_estimate": round(b.cost_mark(), 4)})
+
+
+def test_claude_agent_can_edit_after_cd(tmp_path):
+    """Manual: one real claude-cli call, which spends LLM tokens (the smallest model). Run:
+    TALOS_LIVE_AGENT=claude-cli .venv/bin/pytest -m live tests/test_live.py -k claude_agent -s
+    Agents `cd <wt>/algorithm` before editing; with relative permission rules every Edit after
+    that was denied (tig-adi, 2026-09-26..29). The worktree's own settings must survive it."""
+    import shutil as _shutil
+
+    from talos.agentic import _run_claude, prepare_worktree
+    from talos.prompts import PromptContext
+
+    if os.environ.get("TALOS_LIVE_AGENT") != "claude-cli":
+        pytest.skip("set TALOS_LIVE_AGENT=claude-cli")
+    if _shutil.which("claude") is None:
+        pytest.skip("claude CLI not on PATH")
+    ctx = PromptContext(challenge="knapsack", template_rs="", direction="go", tacit="",
+                        files={"mod.rs": "// hello\n"}, baseline_name="b", best_delta=0.0)
+    wt = prepare_worktree(ctx, parent=tmp_path)
+    mod = wt / "algorithm" / "mod.rs"
+    prompt = (f"Step 1: run exactly this Bash command: cd {wt / 'algorithm'} && ls . "
+              f"Step 2: use the Edit tool to replace the word hello with bye in {mod}. "
+              "Use no other tools except Read. Then say DONE, or DENIED if the edit was refused.")
+    model = os.environ.get("TALOS_LIVE_CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+    _run_claude(wt, model, prompt, 300, subprocess.run)
+    out = (wt / ".talos" / "agent_stdout.txt").read_text()
+    assert mod.read_text() == "// bye\n", out
