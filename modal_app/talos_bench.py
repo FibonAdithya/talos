@@ -93,7 +93,8 @@ def _compile_impl(name: str, files: dict[str, str], mode: str = "metered") -> di
 
 
 def _score_batch_impl(name: str, challenge_id: str, artifact_id: str, tasks: list[dict],
-                      workers: int, mode: str = "metered", pool_factory=None, clock=time.monotonic) -> dict:
+                      workers: int, mode: str = "metered", pool_factory=None,
+                      clock=time.monotonic) -> dict:
     """Scores `tasks` (one dict each: track, rand_hash, nonce, fuel, timeout_s,
     hyperparameters) on `workers` processes at once. The client sends at most `workers`
     tasks per call, so the batch's wall time is bounded by its slowest nonce and fits the
