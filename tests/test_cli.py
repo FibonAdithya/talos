@@ -277,7 +277,9 @@ def test_fake_run_end_to_end_wins_and_packages(tmp_path, monkeypatch, capsys):
     # mutation: dropping the delta line, the status line or build_package fails these asserts
     monkeypatch.chdir(tmp_path)
     fake_config(tmp_path)
-    rc = fake_run(monkeypatch)
+    # metered: the spend below counts the metered path's calls (native adds calibration and
+    # validation; test_fake_native_run_validates_its_best_and_wins covers that path)
+    rc = fake_run(monkeypatch, ["--scoring", "metered"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "Status: won" in out
@@ -2428,15 +2430,17 @@ def test_fake_native_run_validates_its_best_and_wins(tmp_path, monkeypatch, caps
     assert list((run_dir / "calibration_cache").rglob("*.json"))
 
 
-def test_run_defaults_to_metered_scoring(tmp_path, monkeypatch):
+def test_run_defaults_to_native_scoring_and_metered_is_the_flag(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     fake_config(tmp_path)
-    seen = {}
+    seen = []
     monkeypatch.setattr(cli, "execute_job",
-                        lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
+                        lambda spec, store, cfg, resume: seen.append(spec.scoring) or 0)
     fake_run(monkeypatch)
-    # mutation: a native default before the rollout's live checks
-    assert seen["spec"].scoring == "metered"
+    fake_run(monkeypatch, ["--scoring", "metered"])
+    # mutation: a metered default (`args.scoring or "metered"`) gives metered first; ignoring
+    # the flag gives native second
+    assert seen == ["native", "metered"]
 
 
 def test_resume_refuses_a_different_scoring_mode(tmp_path, monkeypatch, capsys):
@@ -2447,10 +2451,10 @@ def test_resume_refuses_a_different_scoring_mode(tmp_path, monkeypatch, capsys):
     job_id = next((tmp_path / "runs").glob("*/job.json")).parent.name
     run_dir = tmp_path / "runs" / job_id
     (run_dir / "state.json").write_text("{}", encoding="utf-8")
-    rc = cli.main(["run", "--resume", job_id, "--scoring", "native"])
+    rc = cli.main(["run", "--resume", job_id, "--scoring", "metered"])
     assert rc == 2
-    # mutation: dropping the resume check lets a metered job continue as native
-    assert "started with metered scoring; start a new job" in capsys.readouterr().err
+    # mutation: dropping the resume check lets a native job continue as metered
+    assert "started with native scoring; start a new job" in capsys.readouterr().err
 
 
 def test_compile_is_metered_by_default_and_native_on_the_flag(tmp_path, monkeypatch):

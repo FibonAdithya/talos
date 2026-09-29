@@ -929,7 +929,7 @@ def cmd_run(args, ask) -> int:
                    created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
                    track=track, baseline_algorithm=algorithm, hyperparameters=hyperparameters,
                    hyperparameters_source=hp_source, dev_image_tag=DEV_IMAGE_TAG,
-                   scoring=args.scoring or "metered")
+                   scoring=args.scoring or "native")
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
     (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n",
@@ -1083,8 +1083,8 @@ def main(argv=None, ask=default_ask) -> int:
                         "benchmark (mainnet, the default) or none")
     r.add_argument("--mode", choices=["single-shot", "agentic"])
     r.add_argument("--scoring", choices=["metered", "native"],
-                   help="research scoring: metered (TIG's runtime, the default) or native "
-                        "(fast, validated on metered)")
+                   help="research scoring: native (fast, validated on metered; the default) or "
+                        "metered (TIG's runtime for every candidate)")
     r.add_argument("--budget-usd", type=float)
     r.add_argument("--budget-hours", type=float)
     r.add_argument("--budget-iterations", type=int)

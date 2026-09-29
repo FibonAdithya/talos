@@ -1063,6 +1063,25 @@ def test_a_calibration_stores_its_metered_rows_before_the_native_call(tmp_path):
     assert store.load().pending_job is None  # cleared once the native call is back
 
 
+def test_a_native_calibration_build_failure_scores_the_job_metered(tmp_path):
+    # The GPU runner template has never been compiled live; if it fails, the job still runs.
+    fb = FakeBench(quality_from_files, compile_ok=lambda files: False,
+                   metered_compile_ok=lambda files: True)
+    loop, fp, _, store = native(tmp_path, [], bench=fb)
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    loop.calibrate(tmp_path / "cal", "hw")
+    assert loop.state.scoring == "metered" and loop.state.fuel_budgets_us is None
+    assert [c.mode for c in fb.calls][-1] == "native"
+    events = [json.loads(x) for x in
+              (store.run_dir / "timeline.jsonl").read_text().splitlines()]
+    fallback = [e for e in events if e["kind"] == "calibration_fallback"]
+    # mutation: dropping the native compile check reports "no native budget" with no build
+    # output, so the user cannot tell a broken runner from a baseline without ratios
+    assert any("native build" in e["reason"] and "E0308" in e.get("output", "")
+               for e in fallback)
+    assert list((tmp_path / "cal").rglob("*.json")) == []  # a failed build caches nothing
+
+
 def test_a_metered_calibration_build_failure_falls_back_with_its_output(tmp_path):
     fb = FakeBench(quality_from_files, metered_compile_ok=lambda files: False)
     loop, fp, _, store = native(tmp_path, [], bench=fb)

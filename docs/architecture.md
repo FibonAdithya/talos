@@ -60,8 +60,8 @@ nonces it is scored on.
 
 ## Native research scoring
 
-`talos run --scoring native` changes how research candidates are scored, not how a winner is
-decided. The default is `--scoring metered`: every nonce of every candidate runs under
+`talos run --scoring native` (the default) changes how research candidates are scored, not how
+a winner is decided. With `--scoring metered` every nonce of every candidate runs under
 `tig-runtime` with TIG's fuel counter, as the baseline did. It is slow because the build
 instruments every dependency's IR and the runtime meters every instruction. In native mode a
 candidate is built into the `talos-native` runner (`talos/native_runner.py::render` writes it,
@@ -96,7 +96,8 @@ budget is computed from it and the job's fuel each time.
 metered runtime, on the job's training nonces, by `talos/loop.py::Loop._validate_and_finish`.
 `talos/scoring.py::validation_failure` checks, in this order, and the first failure is the
 demotion reason: the candidate builds metered (`native_metered_build_mismatch`); no metered
-nonce ran out of fuel where the native run still had budget (`fuel_proxy_miss`,
+nonce ran out of fuel where the native run stopped at neither its budget nor the per-nonce
+timeout (`fuel_proxy_miss`,
 `talos/scoring.py::fuel_proxy_misses`); every nonce both paths solved within their limits
 has the same quality (`nondeterministic`, `talos/scoring.py::quality_mismatches`; a row
 carries `limit_hit` when the solver exited 87, and a limit-cut nonce is never a quality
