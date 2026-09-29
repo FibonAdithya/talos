@@ -168,7 +168,10 @@ def test_payload_carries_the_hyperparameters(tmp_path):
     assert "hyperparameters" not in c3_jobdir.payload(req())
 
 
-def test_request_hash_is_unchanged_from_before_hyperparameters_existed():
+def test_request_hash_is_unchanged_from_before_hyperparameters_existed(monkeypatch):
+    # Freeze the historical pins: an actual build upgrade must change the request hash.
+    monkeypatch.setattr(c3_jobdir, "MONOREPO_REF", "84a5787f5b14a630bdf40f52bccf37887d3d8464")
+    monkeypatch.setattr(c3_jobdir, "DEV_IMAGE_TAG", "0.0.7")
     # mutation: always writing the "hyperparameters" key changes this request's hash, so a
     # resume against a job that was submitted before the upgrade orphans it instead of
     # reattaching, leaving it to keep billing

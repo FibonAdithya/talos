@@ -9,7 +9,7 @@ from pathlib import Path
 from talos import inside
 from talos import mainnet as _mainnet
 from talos.bench import EvalRequest
-from talos.challenges import MONOREPO_REF
+from talos.challenges import DEV_IMAGE_TAG, MONOREPO_REF
 from talos.state import BaselineRecord, _atomic_write
 from talos.types import NonceResult, NonceSet
 
@@ -33,7 +33,7 @@ def cache_key(challenge: str, monorepo_ref: str, name: str, training: list[Nonce
               hyperparameters: dict[str, dict | None] | None = None) -> str:
     h = hashlib.sha256()
     payload = {"challenge": challenge, "ref": monorepo_ref, "name": name, "fuel": fuel,
-               "hw": hardware_class, "layout": inside.CRATE_LAYOUT,
+               "hw": hardware_class, "layout": inside.CRATE_LAYOUT, "image": DEV_IMAGE_TAG,
                "training": [(n.track, n.rand_hash, n.start, n.count) for n in training],
                "holdout": [(n.track, n.rand_hash, n.start, n.count) for n in holdout]}
     effective = effective_hyperparameters(hyperparameters)

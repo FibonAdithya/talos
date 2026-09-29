@@ -113,6 +113,12 @@ With either CLI, an edit outside the algorithm files fails the iteration.
 ## The baseline cache
 
 The measured baseline is cached outside the run directory, keyed by challenge, monorepo ref,
-algorithm, nonce sets, fuel, hardware class and hyperparameters. Real runs share
+dev image tag, crate layout, algorithm, nonce sets, fuel, hardware class and hyperparameters. Real runs share
 `~/.talos/baselines/<challenge>/<key>.json` across jobs. `--fake` runs keep theirs under
 `runs/<job_id>/baseline_cache/<challenge>/<key>.json`.
+
+`job.json` records the dev image tag as well as the monorepo ref. A resume refuses a
+different ref, a different image or a legacy job without a recorded image before starting
+compute or changing saved state. Start a new job after a pin bump so its baseline and
+candidates are measured with the same build. Finished jobs can still be inspected and
+their packages regenerated.

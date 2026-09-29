@@ -90,15 +90,16 @@ def test_fetch_algorithm_files_relative_paths():
     assert files["mod.rs"].startswith("// contents of mod.rs")
 
 
-def test_fetch_template_url():
+def test_fetch_template_url(monkeypatch):
     # mutation: fetching from `main` instead of MONOREPO_REF drifts the template
+    monkeypatch.setattr(mainnet, "MONOREPO_REF", "pinned-ref")
     seen = []
     def gt(url):
         seen.append(url)
         return "pub fn solve_challenge"
     assert "solve_challenge" in mainnet.fetch_template("knapsack", get_text=gt)
     assert seen == ["https://raw.githubusercontent.com/tig-foundation/tig-monorepo/"
-                    "84a5787f5b14a630bdf40f52bccf37887d3d8464/tig-algorithms/src/knapsack/template.rs"]
+                    "pinned-ref/tig-algorithms/src/knapsack/template.rs"]
 
 
 def test_fetch_algorithm_files_404_falls_back_to_single_file():

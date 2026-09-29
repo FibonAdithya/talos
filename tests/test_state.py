@@ -39,6 +39,16 @@ def test_write_spec_refuses_to_overwrite(tmp_path):
     assert (tmp_path / "job.json").read_text() == before
 
 
+def test_spec_image_pin_roundtrips_and_legacy_jobs_remain_readable(tmp_path):
+    pinned = replace(spec(), dev_image_tag="0.0.8")
+    store = JobStore(tmp_path)
+    store.write_spec(pinned)
+    assert store.read_spec() == pinned
+    old = pinned.to_dict()
+    del old["dev_image_tag"]
+    assert JobSpec.from_dict(old).dev_image_tag is None
+
+
 def test_state_roundtrip_atomic(tmp_path):
     store = JobStore(tmp_path)
     st = JobState.fresh(Spend(started_at=1.0))

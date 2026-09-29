@@ -139,6 +139,21 @@ C3 checks that the tag exists on GHCR (an anonymous pull-scoped token, then a ma
 before the baseline is measured, and fails with a `DEV_IMAGE_TAG` hint if it is missing. The
 local backend pulls the same image with `docker pull` the first time a challenge is run.
 
+The current pin is `0.0.8`, which includes TIG's [seed-obfuscation fix](https://github.com/tig-foundation/tig-monorepo/commit/2703c9af12df835fcf08112722b915e34cd1c035).
+The monorepo pin includes the same fix: compiling against the old energy-arbitrage
+sources would still expose its hidden seed through serialization and debug formatting.
+Keep both pins fixed for a run; a moving `latest` tag would let image contents change
+without invalidating cached artifacts or measurements. An upgrade gets new baseline
+cache keys and local volumes; existing runs with different or unrecorded pins must be
+restarted as new jobs. Redeploy Modal with `talos setup` and run the backend's live smoke
+test after upgrading.
+
+`talos check-updates` compares the configured tag with the newest published stable numeric
+tag for each challenge, using GHCR metadata without pulling image layers. New real jobs
+make the same advisory check for their challenge. It never changes either pin or redeploys
+anything; newer tags still need a source compatibility review. Failed automatic lookups
+do not stop jobs, and the manual command explicitly reports an unknown update status.
+
 ## Local backend
 
 The local backend is the C3 bench with a Docker transport. One evaluate call is one detached
@@ -155,10 +170,10 @@ reuses a target directory built against another monorepo:
 | Volume | Mounted at | Holds |
 |---|---|---|
 | `talos-app-<challenge>-<key>` | `/app` | The monorepo checkout at `MONOREPO_REF` and its cargo target directory. |
-| `talos-cargo-<challenge>-<key>` | the image's cargo home (`/root/.cargo` in the 0.0.7 images) | The crate registry, so builds work with networking off. |
+| `talos-cargo-<challenge>-<key>` | the image's cargo home (`/root/.cargo` in the 0.0.8 images) | The crate registry, so builds work with networking off. |
 
 What the volumes buy is the clone, the dependency compile and `--network none`; they do not
-make a build incremental. The 0.0.7 image's `build_so` runs an LLVM fuel-instrumentation pass
+make a build incremental. The 0.0.8 image's `build_so` runs an LLVM fuel-instrumentation pass
 (`opt`, `llc`, `clang`) over every dependency's IR, standard library included, on every
 build, and that pass is most of the build time (see [Local timings](#local-timings)).
 
