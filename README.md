@@ -637,7 +637,7 @@ All of them need `pytest`: install it with `uv pip install --python .venv/bin/py
 the development install below.
 
 Run the one for your backend once after `talos setup`, before trusting a real run. The
-maintainers ran the C3 test on 2026-09-15. They have not run the Modal test: no Modal or LLM
+maintainers ran the C3 test on 2026-09-15. They have not run the Modal test: no Modal
 credentials were available in the development environment.
 
 ## Development

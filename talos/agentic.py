@@ -57,7 +57,8 @@ def sandbox_settings(worktree: Path) -> dict:
     directory, which moves with every `cd`; agents habitually `cd <wt>/algorithm` before editing,
     after which `Edit(algorithm/**)` matched nothing (34 of 37 such sessions on tig-adi had Edit
     denied, 2026-09-26..29). A symlinked worktree (macOS temp dirs) gets rules for both paths.
-    Read rules cover Glob and Grep too, and Edit rules cover Write, so neither needs its own."""
+    Edit rules cover Write, so it needs no rule of its own. CLI 2.1.284 has no Glob or Grep
+    tool (agents search with Bash grep/ls), so there are no rules for them either."""
     roots = list(dict.fromkeys([rule_root(str(worktree)), rule_root(str(worktree.resolve()))]))
     read_scope = ["algorithm/**", "CHALLENGE.md", "tacit.md", "AGENTS.md",
                   ".talos/hypothesis.json"]

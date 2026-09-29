@@ -82,7 +82,7 @@ def test_sandbox_denies_network_and_scopes_edits(tmp_path):
     # Claude Code's documented prefix form is `Bash(cmd:*)`; a bare `*` is not a prefix match
     assert "Bash(talos compile:*)" in allow
     assert f"Edit({root}/algorithm/**)" in allow and f"Edit({root}/.talos/hypothesis.json)" in allow
-    assert f"Read({root}/algorithm/**)" in allow  # Read rules also cover Glob and Grep
+    assert f"Read({root}/algorithm/**)" in allow
     # Edit rules also grant Write, so the edit scope is exactly these two paths per root.
     # mutation: any wider edit rule (<wt>/**, <wt>/*, <wt>/.talos/*, or the settings file
     # itself) would let the agent rewrite its own permissions

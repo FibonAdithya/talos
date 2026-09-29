@@ -81,11 +81,15 @@ use it.
 With `claude-cli`, Talos writes `.talos/claude-settings.json` in the worktree and passes it
 with `--settings`; the CLI enforces it:
 
-- Reads (which in Claude Code also cover `Glob` and `Grep`) are allowed only over
-  `algorithm/**`, `CHALLENGE.md`, `tacit.md`, `AGENTS.md` and `.talos/hypothesis.json`.
+- Read rules name `algorithm/**`, `CHALLENGE.md`, `tacit.md`, `AGENTS.md` and
+  `.talos/hypothesis.json`. Claude Code also lets the agent read any other file in its working
+  directory, so in practice reads are confined to the worktree, settings file included; reads
+  outside it are denied. There are no `Glob` or `Grep` rules: CLI 2.1.284 has no such tools,
+  and agents search with Bash `grep` and `ls`.
 - The only writes allowed are edits (which also cover `Write`) to the algorithm files and to
   the hypothesis file. The settings file itself is outside that scope.
-- The only command allowed is `talos compile`.
+- The only command on the allow list is `talos compile`. Claude Code runs read-only commands
+  such as `ls` and `grep` inside the working directory without a rule.
 - `WebFetch`, `WebSearch` and the usual network and shell escapes are denied, so there is no
   network access at the tool level.
 - `defaultMode` is `dontAsk`, so any tool not on the allow list is refused outright rather
