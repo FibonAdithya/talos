@@ -198,9 +198,9 @@ Do not decide these yourself. Raise them and stop.
 - Running `tests/test_live.py`. It spends the user's Modal budget, C3 credit or, for
   the agentic test, LLM tokens.
 - Changing the calibration constants in `talos/calibration.py` (`MARGIN_START`,
-  `MARGIN_STEP`, `MARGIN_FLOOR`, `MISS_LIMIT`, `BUDGET_FLOOR_US`), or switching the default
-  of `talos run --scoring` to `native`. Together they decide how close a native budget is to
-  TIG's fuel limit.
+  `MARGIN_STEP`, `MARGIN_FLOOR`, `MISS_LIMIT`, `BUDGET_FLOOR_US`), or changing the default
+  of `talos run --scoring` (`native` since 2026-09-29, the repo owner's decision). Together
+  they decide how close a native budget is to TIG's fuel limit.
 - Running the native parity live tests (`tests/test_live.py::test_native_parity`). They
   spend Modal budget or C3 credit.
 - Changing the C3 prices in `talos/c3_bench.py::GBP_PER_HOUR`. They are the
