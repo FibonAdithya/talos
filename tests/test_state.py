@@ -139,3 +139,39 @@ def test_state_hardware_round_trips_and_defaults_to_none(tmp_path):
     # mutation: dropping the old key re-freezes a job whose state.json still says `gpu` to
     # the first option, which need not be the GPU its baseline ran on
     assert JobState.from_dict({**old, "gpu": "H100"}).hardware == "H100"
+
+
+def test_scoring_fields_default_to_metered_and_round_trip():
+    from talos.budget import Spend
+    from talos.state import JobState
+    st = JobState.fresh(Spend(started_at=0.0))
+    # mutation: a default of "native" would switch every existing job's scoring on resume
+    assert st.scoring is None and st.fuel_budgets_us is None and st.validations == []
+    st.scoring, st.fuel_budgets_us = "native", {"t": 1_200_000}
+    st.validations.append({"iteration": 1, "outcome": "validated", "reason": None})
+    back = JobState.from_dict(st.to_dict())
+    assert back.scoring == "native" and back.fuel_budgets_us == {"t": 1_200_000}
+    assert back.validations == [{"iteration": 1, "outcome": "validated", "reason": None}]
+    # a state.json written before this change loads with the defaults
+    d = st.to_dict()
+    for k in ("scoring", "fuel_budgets_us", "validations"):
+        d.pop(k)
+    old = JobState.from_dict(d)
+    assert old.scoring is None and old.fuel_budgets_us is None and old.validations == []
+
+
+def test_job_spec_scoring_defaults_to_metered_for_an_old_job_json():
+    from talos.state import JobSpec
+    from talos.budget import Budget
+    from talos.types import NonceSet
+    sp = JobSpec(job_id="j", challenge="knapsack", direction="d", provider="fake", model="m",
+                 mode="single-shot", budget=Budget(usd=None, hours=None, iterations=1,
+                                                   compute_usd=None),
+                 rand_hash="ab" * 32, tracks=["t"], training=[NonceSet("t", "ab" * 32, 0, 1)],
+                 holdout=[NonceSet("t", "ab" * 32, 1_000_000, 1)], fuel=1, created_at=0.0,
+                 monorepo_ref="r", challenge_id="c003")
+    d = sp.to_dict()
+    assert d["scoring"] == "metered"
+    d.pop("scoring")
+    # mutation: a required field would make every job.json written before this unreadable
+    assert JobSpec.from_dict(d).scoring == "metered"

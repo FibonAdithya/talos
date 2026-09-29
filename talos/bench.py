@@ -12,7 +12,7 @@ from talos.challenges import CHALLENGES, BeatRule, hardware_options, gpu_slug, m
 from talos.diagnostics import dead_new_functions
 from talos.inside import NONCE_TIMEOUT_S
 from talos.scoring import holdout_decision
-from talos.types import CompileResult, NonceResult, NonceSet
+from talos.types import CompileResult, NonceResult, NonceSet, SCORING_MODES
 
 # Rough Modal list prices, $/second, used only for budget accounting (marked estimated).
 CPU_USD_PER_CORE_SECOND = 0.0000131
@@ -89,6 +89,15 @@ class EvalRequest:
     # track mapped to None, or absent, runs without the flag. None = no track gets any. The loop
     # and the baseline both take it from JobSpec.hyperparameters, never per request.
     hyperparameters: dict[str, dict | None] | None = None
+    # "metered" builds with TIG's build_algorithm and runs tig-runtime under `fuel`; "native"
+    # builds the talos-native runner and runs it under the per-track budget in
+    # fuel_budgets_us (microseconds of solve time; a track absent from it runs without one).
+    mode: str = "metered"
+    fuel_budgets_us: dict[str, int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in SCORING_MODES:
+            raise ValueError(f"unknown scoring mode {self.mode!r}")
 
 
 @dataclass
