@@ -578,6 +578,17 @@ def test_build_native_ptx_concatenates_like_build_ptx_and_skips_fuel_injection(t
     assert dest.name == "talos_cand.native.ptx"
 
 
+def test_build_native_ptx_fails_without_challenge_kernels(tmp_path):
+    # build_ptx raises FileNotFoundError when the challenge glob is empty
+    mono = _gpu_monorepo(tmp_path)
+    (mono / "tig-challenges" / "src" / "hypergraph" / "kernels.cu").unlink()
+    calls = []
+    ok, out = inside.build_native_ptx(mono, "hypergraph", "talos_cand",
+                                      lambda cmd, **kw: calls.append(cmd) or Result(0, "", ""))
+    # mutation: building without them compiles a PTX that lacks the challenge's kernels
+    assert not ok and "hypergraph" in out and calls == []
+
+
 def test_build_native_runs_cargo_with_the_pinned_toolchain_and_fast_profile(tmp_path):
     mono = _gpu_monorepo(tmp_path)
     seen = []

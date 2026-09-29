@@ -131,10 +131,13 @@ def build_native_ptx(monorepo: Path, challenge: str, name: str,
                      run=subprocess.run) -> tuple[bool, str]:
     """tig-binary/scripts/build_ptx at MONOREPO_REF without inject_fuel_and_runtime_sig: the
     same files in the same order (framework, the challenge's .cu by the same recursive glob,
-    the algorithm's), the same nvcc flags, written beside the metered PTX, never over it."""
+    the algorithm's), the same nvcc flags, written beside the metered PTX, never over it. An
+    empty challenge or algorithm glob fails the build, as build_ptx's FileNotFoundError does."""
     framework = monorepo / "tig-binary" / "src" / "framework.cu"
     challenge_cus = glob.glob(str(monorepo / "tig-challenges" / "src" / challenge / "**" / "*.cu"),
                               recursive=True)
+    if not challenge_cus:  # build_ptx raises FileNotFoundError here
+        return False, f"no .cu files in tig-challenges/src/{challenge}; is the challenge right?"
     algo_cus = glob.glob(str(_algo_root(monorepo, challenge) / name / "*.cu"))
     if not algo_cus:
         return False, f"no .cu files in the {name} algorithm; a GPU algorithm needs its kernels"

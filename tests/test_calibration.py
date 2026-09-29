@@ -137,6 +137,30 @@ def test_load_treats_a_corrupt_record_as_missing(tmp_path):
     assert calibration.load(tmp_path, "knapsack", "k1") is None
 
 
+@pytest.mark.parametrize("field,value", [("ratio", "NaN"), ("ratio", "Infinity"),
+                                         ("ratio", "0.0"), ("ratio", "-1.0"),
+                                         ("margin", "NaN"), ("margin", "0"), ("margin", "-0.5")])
+def test_load_treats_a_non_positive_or_non_finite_ratio_or_margin_as_missing(tmp_path, field,
+                                                                            value):
+    # json.loads accepts NaN and Infinity; float() accepts both and every non-positive value
+    # mutation: keeping the record gives a zero, negative or NaN budget (NaN raises in round)
+    rec = {"ratio": "1.5", "margin": "0.8"}
+    rec[field] = value
+    p = tmp_path / "knapsack" / "k1.json"
+    p.parent.mkdir(parents=True)
+    p.write_text('{"version": 1, "demotions": {}, "tracks": {"a": {"ratio": %s, "margin": %s, '
+                 '"misses": 0}}}' % (rec["ratio"], rec["margin"]), encoding="utf-8")
+    assert calibration.load(tmp_path, "knapsack", "k1") is None
+
+
+def test_load_keeps_a_valid_record(tmp_path):
+    p = tmp_path / "knapsack" / "k1.json"
+    p.parent.mkdir(parents=True)
+    p.write_text('{"version": 1, "demotions": {}, "tracks": {"a": {"ratio": 1.5, "margin": 0.8, '
+                 '"misses": 0}}}', encoding="utf-8")
+    assert calibration.load(tmp_path, "knapsack", "k1")["tracks"]["a"]["ratio"] == 1.5
+
+
 def test_note_demotion_counts_by_reason():
     rec = calibration.new_record({"a": 1.0})
     calibration.note_demotion(rec, "nondeterministic")

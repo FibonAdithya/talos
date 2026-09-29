@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from statistics import median
 
@@ -98,14 +99,19 @@ def _path(cache_dir: Path, challenge: str, key: str) -> Path:
 
 
 def load(cache_dir: Path, challenge: str, key: str) -> dict | None:
-    """None for a missing, unreadable or malformed record: it is then measured again."""
+    """None for a missing, unreadable or malformed record: it is then measured again. A ratio
+    or margin that is not a finite positive number is malformed (json reads NaN and
+    Infinity): it would give a zero, negative or NaN budget."""
     p = _path(cache_dir, challenge, key)
     if not p.exists():
         return None
     try:
         rec = json.loads(p.read_text(encoding="utf-8"))
         for v in rec["tracks"].values():
-            float(v["ratio"]), float(v["margin"]), int(v["misses"])
+            ratio, margin = float(v["ratio"]), float(v["margin"])
+            int(v["misses"])
+            if not all(math.isfinite(x) and x > 0 for x in (ratio, margin)):
+                return None
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
     return rec
