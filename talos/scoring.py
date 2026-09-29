@@ -138,3 +138,65 @@ def beats_focused(baseline: list[NonceResult], candidate: list[NonceResult], rul
     return (focus.rel_delta >= rule.margin
             and focus.cand_errors / focus.n <= rule.error_ceiling
             and guards_ok)
+
+
+VALIDATION_REASONS = ("native_metered_build_mismatch", "fuel_proxy_miss", "nondeterministic",
+                      "unscoreable", "error_ceiling", "not_improved")
+
+
+def fuel_proxy_misses(metered: list[NonceResult],
+                      native: list[NonceResult]) -> list[NonceResult]:
+    """Metered rows whose fuel ran out (with or without a saved solution) where the same
+    nonce's native run did not reach its budget: the budget stood in for more fuel than TIG
+    gives. A nonce that hit its limit on both paths is consistent, not a miss."""
+    nat = {(r.track, r.nonce): r for r in native}
+    out = []
+    for r in metered:
+        if r.error == "out_of_fuel" or r.limit_hit:
+            o = nat.get((r.track, r.nonce))
+            if o is None or not o.limit_hit:
+                out.append(r)
+    return out
+
+
+def quality_mismatches(metered: list[NonceResult], native: list[NonceResult]) -> list[dict]:
+    """Nonces both paths solved, neither cut off at its limit, with different qualities, in
+    metered order. Scoring is deterministic per instance (MEASURED, spec §1), so any entry
+    means the two paths ran different code or the algorithm depends on something other than
+    its seed. A run stopped at its fuel or budget saved an earlier solution, so its quality
+    is expected to differ and says nothing about determinism."""
+    nat = {(r.track, r.nonce): r for r in native}
+    out = []
+    for r in metered:
+        o = nat.get((r.track, r.nonce))
+        if (o is not None and r.ok and o.ok and not r.limit_hit and not o.limit_hit
+                and r.quality != o.quality):
+            out.append({"track": r.track, "nonce": r.nonce, "native": o.quality,
+                        "metered": r.quality})
+    return out
+
+
+def validation_failure(compiled: bool, metered: list[NonceResult], native: list[NonceResult],
+                       baseline: list[NonceResult], best_delta: float,
+                       rule: BeatRule) -> tuple[str | None, BundleDelta | None]:
+    """Whether a candidate that improved natively still stands on TIG's metered runtime, and
+    why not. It must build metered, run out of fuel on no nonce whose native run had budget
+    left, give the native quality on every nonce both paths solved within their limits, stay
+    under the error ceiling, and still count as improved by the loop's own rule (mean over
+    the current best, or beats). beats() alone is not required: that would demote every
+    stepping stone (user decision 2026-09-29)."""
+    if not compiled:
+        return "native_metered_build_mismatch", None
+    if fuel_proxy_misses(metered, native):
+        return "fuel_proxy_miss", None
+    if quality_mismatches(metered, native):
+        return "nondeterministic", None
+    try:
+        d = bundle_delta(baseline, metered)
+    except ScoringError:
+        return "unscoreable", None
+    if d.error_rate > rule.error_ceiling:
+        return "error_ceiling", d
+    if not (d.mean_rel_delta > best_delta or beats(baseline, metered, rule)):
+        return "not_improved", d
+    return None, d
