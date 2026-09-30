@@ -41,6 +41,32 @@ def test_failed_hypotheses_and_forced_tag_appear_when_given():
     assert "Bigger tabu tenure" in user and "decomposition" in user
 
 
+def test_recall_separates_the_current_code_from_earlier_bests():
+    # issue #33. mutation: listing every failure under "this exact code", or dropping the label
+    # naming the best it failed against, tells the model an old failure was on today's code
+    c = ctx(anchor=5, failed_hypotheses=[
+        {"title": "Current fail", "outcome": "failed:score", "against": 5},
+        {"title": "Baseline fail", "outcome": "failed:score", "against": 0},
+        {"title": "Middle fail", "outcome": "failed:compile", "against": 3},
+        {"title": "Unanchored", "outcome": "failed:edit"}])
+    _, user = hypothesis_prompts(c)
+    current, _, earlier = user.partition("against an earlier best")
+    assert "Current fail" in current and "Unanchored" in current
+    assert "Baseline fail" not in current and "Middle fail" not in current
+    assert "- Baseline fail [failed:score, against the baseline]" in earlier
+    assert "- Middle fail [failed:compile, against best #3]" in earlier
+
+
+def test_distill_prompt_names_the_best_each_attempt_failed_against():
+    # mutation: distilling the whole job without the parent label merges attempts on different
+    # code into one list with nothing to tell them apart
+    _, user = distill_prompts(ctx(anchor=4), [
+        {"title": "A", "outcome": "failed:score", "against": 0},
+        {"title": "B", "outcome": "failed:score", "against": 4}])
+    assert "- A [failed:score, against the baseline]" in user
+    assert "- B [failed:score, against best #4]" in user
+
+
 def test_edit_prompt_shows_files_and_format():
     hyp = {"title": "Bitset tabu", "description": "Use a bitset for the tabu list",
            "strategy_tag": "local_search"}

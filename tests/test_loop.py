@@ -288,6 +288,32 @@ def test_recall_starts_exactly_at_threshold(tmp_path):
     assert "do not repeat" in users[4]      # 3rd hypothesis: runs_since_improvement == 2
 
 
+def test_failures_against_an_earlier_best_survive_the_best_changing(tmp_path):
+    # issue #33: run 20260925-140701-knapsack retried #18's idea at #26 because the best changed
+    # at #23 and the recall list and the distillation only saw failures against the new best.
+    # mutation: filtering on `against == anchor` drops "Old idea" from both prompts; dropping the
+    # parent label, or putting the old failure under "this exact code", misleads the model
+    script = [hyp("Old idea"), edit(1), "NONE",   # 1: failed:score against the baseline
+              hyp("Winner"), edit(2),             # 2: improved, below the win margin
+              hyp("New idea"), edit(2, frm=2), "NONE",  # 3: failed:score against best #2
+              hyp("Next"), edit(2, frm=2)]
+    b = Budget(usd=None, hours=None, iterations=4, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, script, budget=b,
+                               scores=lambda ch, files, ns: [
+                                   q + 900 for q in quality_from_files(ch, files, ns)],
+                               thresholds=Thresholds(recall=1, distill=1, reset=99))
+    loop.state.baseline = baseline(q=1000)  # so k=2 is +0.1%: a new best, not a win
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == [
+        "failed:score", "improved", "failed:score", "failed:score"]
+    users = [u for _, u in fp.calls]
+    distill, proposal = users[7], users[8]
+    assert "Old idea" in distill and "New idea" in distill
+    current, _, earlier = proposal.partition("against an earlier best")
+    assert "New idea" in current and "Old idea" not in current
+    assert "Old idea" in earlier and "against the baseline" in earlier
+
+
 def test_rate_limit_wait_rechecks_the_budget(tmp_path):
     # mutation: not re-checking the budget after a rate-limit sleep ignores a stop request (or an
     # hours cap) for the whole retry storm

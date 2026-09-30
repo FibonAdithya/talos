@@ -41,6 +41,7 @@ class PromptContext:
     baseline_name: str
     best_delta: float
     failed_hypotheses: list[dict] = field(default_factory=list)
+    anchor: int = 0  # the iteration of the current best; 0 is the baseline
     forced_tag: str | None = None
     is_gpu: bool = False
     track: str | None = None
@@ -84,10 +85,18 @@ def hyperparameters_block(ctx: PromptContext) -> str:
     return text
 
 
-def describe_attempt(h: dict) -> str:
+def _parent(h: dict) -> str:
+    return "the baseline" if h["against"] == 0 else f"best #{h['against']}"
+
+
+def describe_attempt(h: dict, labelled: bool = False) -> str:
     """One line per failed attempt, with what the run measured: a title plus the outcome told
-    the model nothing about a +0.14% track, a -0.37% track and a 14x runtime."""
-    line = f"- {h.get('title', '')} [{h.get('outcome', '')}]"
+    the model nothing about a +0.14% track, a -0.37% track and a 14x runtime. `labelled` names
+    the best the attempt failed against."""
+    tag = h.get("outcome", "")
+    if labelled and "against" in h:
+        tag += f", against {_parent(h)}"
+    line = f"- {h.get('title', '')} [{tag}]"
     if "mean_rel_delta" in h:
         line += (f" mean {h['mean_rel_delta']:+.2%}, worst track {h.get('worst_track', '?')} "
                  f"{h.get('worst_rel_delta', 0.0):+.2%}")
@@ -96,6 +105,22 @@ def describe_attempt(h: dict) -> str:
     if h.get("error"):
         line += f": {str(h['error'])[:200]}"
     return line
+
+
+def recall_block(ctx: PromptContext) -> str:
+    """The failed attempts of the whole job. Issue #33: listing only those against the current
+    best let run 20260925-140701-knapsack retry an idea that failed before the best changed."""
+    current = [h for h in ctx.failed_hypotheses if h.get("against", ctx.anchor) == ctx.anchor]
+    earlier = [h for h in ctx.failed_hypotheses if h.get("against", ctx.anchor) != ctx.anchor]
+    parts = []
+    if current:
+        parts.append("Already tried against this exact code and did NOT help; do not repeat:\n"
+                     + "\n".join(describe_attempt(h) for h in current))
+    if earlier:
+        parts.append("Tried against an earlier best and did NOT help there; do not repeat "
+                     "unless the current code removes the reason it failed:\n"
+                     + "\n".join(describe_attempt(h, labelled=True) for h in earlier))
+    return "\n\n".join(parts)
 
 
 def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
@@ -116,10 +141,9 @@ def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
              f"Direction from the user:\n{ctx.direction}"]
     if ctx.tacit.strip():
         parts.append(f"Tacit knowledge (lessons so far):\n{ctx.tacit}")
-    if ctx.failed_hypotheses:
-        lines = "\n".join(describe_attempt(h) for h in ctx.failed_hypotheses)
-        parts.append("Already tried against this exact code and did NOT help; do not repeat:\n"
-                     + lines)
+    recall = recall_block(ctx)
+    if recall:
+        parts.append(recall)
     if ctx.forced_tag:
         parts.append(f"You have stagnated. Your strategy_tag MUST be \"{ctx.forced_tag}\" "
                      f"this time; change the approach, not the constants.")
@@ -190,7 +214,8 @@ def edit_repair_prompts(ctx: PromptContext, files: dict[str, str],
 def distill_prompts(ctx: PromptContext, failed: list[dict]) -> tuple[str, str]:
     system = ("You distill one reusable lesson from failed optimisation attempts. Reply with "
               "exactly one line starting with \"LESSON: \" or the single word NONE.")
-    lines = "\n".join(f"{describe_attempt(h)}\n  {h.get('description', '')}" for h in failed)
+    lines = "\n".join(f"{describe_attempt(h, labelled=True)}\n  {h.get('description', '')}"
+                      for h in failed)
     user = (f"Challenge: {ctx.challenge}. Direction: {ctx.direction}\n\nFailed attempts:\n"
             f"{lines}\n\nWhat general lesson, independent of these exact constants, should "
             f"guide the next attempts?")
