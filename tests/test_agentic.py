@@ -319,13 +319,16 @@ def test_agentic_prompt_describes_failed_attempts_with_their_numbers(tmp_path):
     attach_agentic(loop, "claude-cli", "m", timeout_s=1, run=run)
     failed = [{"title": "Dynamic greedy", "outcome": "failed:score", "mean_rel_delta": -0.0005,
                "worst_track": "n_items=5000,budget=10", "worst_rel_delta": -0.0037,
-               "runtime_ratio": 14.07}]
+               "runtime_ratio": 14.07},
+              {"title": "Old beam", "outcome": "failed:score", "against": 0}]
     with pytest.raises(AgenticError):
-        loop.propose_and_edit(ctx(failed_hypotheses=failed))
+        loop.propose_and_edit(ctx(anchor=3, failed_hypotheses=failed))
     shutil.rmtree(loop._agentic_wt, ignore_errors=True)
     # mutation: joining titles alone drops the per-track delta and the runtime ratio
     assert "Dynamic greedy" in seen["prompt"] and "14.1x" in seen["prompt"]
     assert "n_items=5000,budget=10" in seen["prompt"]
+    # issue #33. mutation: the agentic prompt keeping its own unlabelled list
+    assert "- Old beam [failed:score, against the baseline]" in seen["prompt"]
 
 
 def test_claude_md_shows_the_hyperparameters():

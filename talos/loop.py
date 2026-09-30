@@ -339,10 +339,12 @@ class Loop:
     def _best_delta(self) -> float:
         return self.state.best.delta["mean_rel_delta"] if self.state.best else 0.0
 
-    def _failed_for_current(self) -> list[dict]:
-        anchor = self.state.best.iteration if self.state.best else 0
-        return [h for h in self.state.hypotheses
-                if h.get("against") == anchor and h.get("outcome", "").startswith("failed")]
+    def _anchor(self) -> int:
+        return self.state.best.iteration if self.state.best else 0
+
+    def _failed(self) -> list[dict]:
+        """Every failure of the job, whichever best it was tried against (issue #33)."""
+        return [h for h in self.state.hypotheses if h.get("outcome", "").startswith("failed")]
 
     def _forced_tag(self) -> str | None:
         if self.state.runs_since_improvement < self.t.reset:
@@ -352,12 +354,13 @@ class Loop:
 
     def _context(self) -> PromptContext:
         recall = self.state.runs_since_improvement >= self.t.recall
-        failed = self._failed_for_current() if recall else []
+        failed = self._failed() if recall else []
         return PromptContext(challenge=self.spec.challenge, template_rs=self.template_rs,
                              direction=self.spec.direction, tacit=self.state.tacit,
                              files=self._current_files(),
                              baseline_name=self.state.baseline.name,
                              best_delta=self._best_delta(), failed_hypotheses=failed,
+                             anchor=self._anchor(),
                              forced_tag=self._forced_tag(),
                              is_gpu=CHALLENGES[self.spec.challenge].is_gpu,
                              track=self.spec.track,
@@ -407,7 +410,7 @@ class Loop:
         self._n = n
         it_dir = self.store.iteration_dir(n)
         ctx = self._context()
-        anchor = self.state.best.iteration if self.state.best else 0
+        anchor = self._anchor()
         record = {"iteration": n, "against": anchor, "title": "", "description": "",
                   "strategy_tag": "", "outcome": "started"}
         try:
@@ -653,7 +656,7 @@ class Loop:
             self._event("reset", forced_tag=self._forced_tag())
 
     def _distill(self) -> None:
-        failed = self._failed_for_current()
+        failed = self._failed()
         if not failed:
             return
         system, user = distill_prompts(self._context(), failed)
@@ -686,7 +689,7 @@ class Loop:
         n = pending["purpose"]
         self._n = n
         self._event("resumed_pending", job_id=pending.get("job_id"))
-        anchor = self.state.best.iteration if self.state.best else 0
+        anchor = self._anchor()
         hypothesis = pending["hypothesis"]
         record = {"iteration": n, "against": anchor, **hypothesis, "outcome": "started"}
         if pending.get("native_training"):
