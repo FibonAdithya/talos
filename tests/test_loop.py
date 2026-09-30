@@ -7,7 +7,8 @@ import pytest
 from talos.budget import Budget, BudgetExhausted, Spend
 from talos.bench import FakeBench
 from talos.loop import Loop, Thresholds
-from talos.providers import ProviderAuthError, ProviderRateLimited
+from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
+                             ProviderTimeout)
 from talos.providers.fake import FakeProvider
 from talos.state import BaselineRecord, JobSpec, JobState, JobStore
 from talos.types import NonceResult, NonceSet
@@ -1094,3 +1095,61 @@ def test_a_metered_calibration_build_failure_falls_back_with_its_output(tmp_path
     assert any("metered build" in e["reason"] and "E0308" in e.get("output", "")
                for e in fallback)
     assert loop.state.scoring == "metered" and [c.mode for c in fb.calls] == ["metered"]
+
+
+def raising(*items):
+    """A FakeProvider script that raises each exception instance in `items` and returns the rest."""
+    queue = list(items)
+
+    def script(system, user):
+        item = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(item, Exception):
+            raise item
+        return item
+    return script
+
+
+def test_provider_timeout_fails_one_iteration(tmp_path):
+    # issue #35: a claude CLI timeout ended the whole run. It must fail that iteration only.
+    # mutation: not catching ProviderTimeout in iterate() ends the run as "failed"
+    loop, fp, fb, store = make(tmp_path, raising(hyp("a"), ProviderTimeout("claude CLI timed out"),
+                                                 hyp("b"), edit(5)))
+    st = loop.run()
+    assert st.status == "won" and st.best.iteration == 2
+    assert st.hypotheses[0]["outcome"] == "failed:edit"
+    assert "timed out" in st.hypotheses[0]["error"]
+    assert st.pending_job is None
+
+
+def test_other_provider_errors_still_stop_the_run(tmp_path):
+    # mutation: catching every ProviderError in iterate() spins a broken provider through
+    # iterations that fail instantly instead of stopping with the error
+    loop, fp, fb, store = make(tmp_path, raising(ProviderError("claude CLI failed: boom"),
+                                                 hyp("b"), edit(5)))
+    st = loop.run()
+    assert st.status == "failed" and st.stop_reason == "provider: claude CLI failed: boom"
+    assert len(fp.calls) == 1
+
+
+def test_provider_timeout_in_a_repair_round_keeps_the_applied_blocks(tmp_path):
+    # mutation: letting the repair round's timeout escape fails an iteration that had an edit
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, raising(hyp("a"), edit(5) + NEVER_MATCHES,
+                                                 ProviderTimeout("claude CLI timed out")),
+                               budget=b)
+    st = loop.run()
+    assert st.status == "won" and "let k = 5;" in st.best.files["mod.rs"]
+    assert len(fp.calls) == 3
+
+
+def test_provider_timeout_in_a_compile_fix_is_a_compile_failure(tmp_path):
+    # mutation: letting the fix round's timeout escape stops the run with a pending job
+    bug = "<<<<<<< SEARCH mod.rs\nlet k = 1;\n=======\nlet k = BUG;\n>>>>>>> REPLACE\n"
+    loop, fp, fb, store = make(tmp_path, raising(hyp("a"), bug,
+                                                 ProviderTimeout("claude CLI timed out"),
+                                                 hyp("b"), edit(5)))
+    fb._compile_ok = lambda files: "BUG" not in files["mod.rs"]
+    st = loop.run()
+    assert st.status == "won" and st.best.iteration == 2
+    assert st.hypotheses[0]["outcome"] == "failed:compile"
+    assert len(fb.calls) == 2  # the broken edit once, no re-evaluation, then the winning edit

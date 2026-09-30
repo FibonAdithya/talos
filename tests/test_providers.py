@@ -8,7 +8,7 @@ import httpx2
 import pytest
 
 from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
-                             make_provider, validate_provider)
+                             ProviderTimeout, make_provider, validate_provider)
 from talos.providers.fake import FakeProvider
 from talos.providers.openai_compat import OpenAICompat
 from talos.providers.pricing import estimate_cost
@@ -111,6 +111,18 @@ def test_claude_cli_parses_json_result_and_cost():
     p = ClaudeCli(model="claude-opus-5", run=run)
     c = p.complete("SYS", "USER")
     assert c.text == "the code" and c.usage.cost_usd == 0.42 and not p.metered
+
+
+@pytest.mark.parametrize("cls", [ClaudeCli, CodexCli])
+def test_cli_timeout_raises_provider_timeout(cls):
+    # issue #35: the loop fails one iteration on a ProviderTimeout but stops the run on any other
+    # ProviderError. mutation: raising a plain ProviderError here stops the run on a timeout
+    import subprocess
+
+    def run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    with pytest.raises(ProviderTimeout, match="timed out after 7s"):
+        cls(model="m", run=run, timeout_s=7).complete("SYS", "USER")
 
 
 def test_codex_cli_reads_last_message_file(tmp_path):

@@ -18,6 +18,10 @@ class ProviderRateLimited(ProviderError):
     """429 or equivalent. The loop waits and retries."""
 
 
+class ProviderTimeout(ProviderError):
+    """A CLI call that ran past its timeout. The loop fails that iteration and carries on."""
+
+
 class Provider(Protocol):
     name: str
     metered: bool
