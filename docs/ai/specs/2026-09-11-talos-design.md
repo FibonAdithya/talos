@@ -320,7 +320,7 @@ interrupted before its `score` completed is discarded and re-run.
   not spend LLM budget on iterations it cannot score.
 - **Provider errors**: rate limits wait and retry; authentication and billing errors stop
   the run at once and name the credential to fix; malformed outputs (no edits, edits that
-  do not apply) count as a failed iteration.
+  do not apply) and a CLI provider timeout count as a failed iteration.
 - **Edit scope**: any edit outside the algorithm files is rejected and the iteration
   fails, in both modes.
 - **Seed hygiene**: the job seed appears in `job.json` only. Prompts, timeline, agent

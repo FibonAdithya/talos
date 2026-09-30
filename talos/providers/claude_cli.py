@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from talos.executables import argv0
-from talos.providers import ProviderAuthError, ProviderError
+from talos.providers import ProviderAuthError, ProviderError, ProviderTimeout
 from talos.types import Completion, Usage
 
 
@@ -35,7 +35,7 @@ class ClaudeCli:
             except FileNotFoundError:
                 raise ProviderAuthError("claude CLI not found on PATH; install Claude Code") from None
             except subprocess.TimeoutExpired:
-                raise ProviderError("claude CLI timed out") from None
+                raise ProviderTimeout(f"claude CLI timed out after {self.timeout_s}s") from None
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "")[-500:]
             if "login" in err.lower() or "auth" in err.lower():
