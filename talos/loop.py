@@ -22,7 +22,8 @@ from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
                            dead_code_fix_prompts, distill_prompts, edit_prompts,
                            edit_repair_prompts, hypothesis_prompts,
                            parse_distillation, parse_hypothesis)
-from talos.providers import ProviderAuthError, ProviderError, ProviderRateLimited
+from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
+                             ProviderTimeout)
 from talos.scoring import (ScoringError, beats, beats_focused, bundle_delta, focus_sets,
                            fuel_proxy_misses, quality_mismatches, runtime_ratio, select,
                            validation_failure)
@@ -384,8 +385,8 @@ class Loop:
             system, user = edit_repair_prompts(ctx, outcome.files, format_misses(outcome.misses))
             try:
                 repaired = apply_edit_response(outcome.files, self._llm(system, user).text)
-            except EditError:
-                break  # a repair reply with no blocks: keep what was applied, skip the misses
+            except (EditError, ProviderTimeout):
+                break  # no usable repair reply: keep what was applied, skip the misses
             # Accumulate, never replace: the repair round re-emits only the failed blocks, so its
             # own `applied` says nothing about the first response's blocks, and its `rejected`
             # would forget an out-of-scope block that the first response carried.
@@ -415,7 +416,9 @@ class Loop:
                   "strategy_tag": "", "outcome": "started"}
         try:
             hypothesis, files = self.propose_and_edit(ctx)
-        except (EditError, ValueError) as e:
+        # A CLI timeout fails this iteration only, as the agentic path's AgenticError does; every
+        # other ProviderError still stops the run in run().
+        except (EditError, ValueError, ProviderTimeout) as e:
             record.update(outcome="failed:edit", error=str(e))
             self._finish_iteration(n, record, improved=False)
             return
@@ -446,7 +449,7 @@ class Loop:
                 system, user = compile_fix_prompts(ctx, files, res.compile.output)
             try:
                 fixed = apply_edit_response(files, self._llm(system, user).text)
-            except EditError:
+            except (EditError, ProviderTimeout):
                 break
             if fixed.rejected:
                 # spec §9 holds for the fix response too: never apply its in-scope blocks either.
