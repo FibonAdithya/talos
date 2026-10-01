@@ -3,6 +3,9 @@
 runs/
 talos.config.json
 
+# Local benchmark measurements
+/benchmarks/
+
 # Python
 __pycache__/
 *.pyc

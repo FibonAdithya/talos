@@ -608,6 +608,7 @@ def test_build_native_runs_cargo_with_the_pinned_toolchain_and_fast_profile(tmp_
     # as slow as the metered one it replaces
     assert kw["env"]["CARGO_PROFILE_RELEASE_LTO"] == "false"
     assert kw["env"]["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] == "16"
+    assert kw["env"]["RUSTFLAGS"] == "-Z threads=8"
     assert (mono / "talos-native" / "src" / "main.rs").exists()
 
 

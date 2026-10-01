@@ -332,3 +332,54 @@ TALOS_LIVE_BACKEND=local TALOS_LIVE_CHALLENGE=vector_search .venv/bin/pytest -m 
 ```
 
 Record the printed `gpu`, `prepare_s` and `job_s` here when it passes.
+
+### Native compiler parallelism
+
+The native build sets `RUSTFLAGS="-Z threads=8"` for the pinned nightly compiler's
+frontend, alongside the existing 16 codegen units and `lto=false`. Cargo's `lto=false`
+still permits local ThinLTO; this change does not disable it. The flags are part of
+`native_runner.runner_digest`, so native artifacts and calibration are invalidated together.
+The metered `build_algorithm` path keeps its existing flags.
+
+MEASURED 2026-09-30 on this ARM64 host: 8 CPUs, container memory limit 12 GiB, official
+knapsack dev image 0.0.8, monorepo `839c7184afda9b64c4a9dca18bca5a647a1bb867`, and
+`knap_lean` staged alone as `talos_cand` (6 Rust files, 553,521 bytes). The compiler was
+`rustc 1.86.0-nightly (124cc9219 2025-02-09)`, LLVM 19.1.7.
+
+| Native build configuration | Cargo jobs | Codegen units | Frontend threads | Clean build, median | After source edit, median |
+|---|---:|---:|---:|---:|---:|
+| Serial control | 1 | 1 | 1 | 109.70 s | 36.91 s |
+| Previous native settings | 8 | 16 | 1 | 37.48 s | 15.00 s |
+| Parallel frontend | 8 | 16 | 8 | 35.53 s | 13.86 s |
+
+The frontend flag reduced elapsed time by 5.2% for clean builds and 7.6% after an edit
+relative to the previous native settings. Against the fully serial control, the parallel
+frontend configuration was 3.09 times as fast clean and 2.66 times as fast after an edit;
+most of that improvement was already provided by Cargo and codegen parallelism.
+All 18 builds succeeded, and all 12 binaries from the previous and new native settings
+had the same SHA-256. The serial configuration produced a different binary.
+
+Each of three rounds rotated the configuration order. Each configuration started with a
+fresh Cargo target directory, then rebuilt after a comment edit to the algorithm's `mod.rs`.
+The harness checked that `tig-algorithms` was actually recompiled. All builds used release
+optimization level 3, `lto=false`, and incremental compilation disabled. Dependencies were
+already downloaded; source staging, cache copying and Docker startup were outside the
+timed region. Containers had networking disabled. "Clean" means no compiled artifacts,
+not a cold operating-system page cache. No scoring or other test suite ran during the
+timed builds. These measurements cover this CPU algorithm and host; GPU builds, runtime
+performance, and different CPU/memory allocations were not benchmarked.
+
+Raw results and Cargo logs are retained locally, outside version control. Reproduce from
+the Talos checkout with an existing Docker image and a dependency cache populated for the pin:
+
+```bash
+python3 scripts/benchmark_native_build.py \
+  --monorepo ../tig-monorepo \
+  --cargo-cache talos-cargo-knapsack-65d14b568cd6 \
+  --cpus 8 --memory-gib 12 --repeats 3
+```
+
+The script snapshots the pinned Git commit, copies dependency caches from a read-only mount,
+and writes disposable source/targets plus raw results under `.talos/compiler-benchmark/`.
+Its `current` result label refers to the settings before the frontend flag was added, at
+Talos commit `4a8f0ac`; that control remains explicit when rerunning this branch.
