@@ -76,6 +76,7 @@ Status: won (beat baseline on training and held-out nonces)
 Best delta vs baseline: +1.000%
 LLM spend: $0.02   Compute spend (estimated): $0.48
 Package: .../runs/<job_id>/package
+You can find the code to submit at .../runs/<job_id>/package/submission, fill out the template README.md to make it ready to submit to The Innovation Game!
 ```
 
 The spend figures in a fake run are made up by the stand-ins. Delete `runs/` afterwards if
