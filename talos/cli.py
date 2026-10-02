@@ -560,6 +560,10 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
     return _one_line(text, width)
 
 
+def _user_tacit(direction: str) -> str:
+    return f"- USER: {direction.strip()}\n"
+
+
 def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> int:
     # spec §7.1: refuse before anything is spent when the credential is missing.
     if cfg.provider not in UNMETERED and resolve_api_key(cfg) is None:
@@ -568,7 +572,12 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
               file=sys.stderr)
         return 2
     from talos.package import build_package
-    state = store.load() if resume else JobState.fresh(Spend(started_at=time.time()))
+    if resume:
+        state = store.load()
+    else:
+        state = JobState.fresh(Spend(started_at=time.time()))
+        # the loop rewrites tacit.md from state.tacit, so the direction has to start in both
+        state.tacit = _user_tacit(spec.direction)
     if resume:
         if state.status in ("won", "exhausted"):
             print(f"job {spec.job_id} already {state.status}; nothing to resume")
@@ -932,7 +941,7 @@ def cmd_run(args, ask) -> int:
                    scoring=args.scoring or "native")
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
-    (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n",
+    (store.run_dir / "tacit.md").write_text(_user_tacit(direction),
                                             encoding="utf-8", newline="\n")
     scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
     if hyperparameters is None and algorithm is not None:

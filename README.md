@@ -364,6 +364,10 @@ talos run --challenge knapsack \
   --budget-usd 20 --budget-hours 4 --budget-compute-usd 10 --yes
 ```
 
+To start from notes you already have (what has been tried, what failed, what to avoid), write
+them to a file and pass `--direction-file notes.md` instead of `--direction`. The whole file
+is sent to the LLM as the direction on every iteration.
+
 Before the job starts, Talos fetches the challenge's active tracks and fuel from mainnet,
 draws the nonces, and prints a line such as:
 
