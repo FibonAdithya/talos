@@ -298,6 +298,9 @@ def test_fake_run_end_to_end_wins_and_packages(tmp_path, monkeypatch, capsys):
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     assert f"Package: {run_dir / 'package'}" in out
     assert (run_dir / "package" / "scores.md").exists()
+    # mutation: dropping the hint leaves the user hunting for the files to submit
+    assert (f"You can find the code to submit at {run_dir / 'package' / 'submission'}, fill out "
+            "the template README.md to make it ready to submit to The Innovation Game!") in out
     best = json.loads((run_dir / "state.json").read_text())["best"]
     assert "let k = 2;" in best["files"]["mod.rs"]
 
@@ -482,7 +485,10 @@ def test_resume_of_finished_job_and_of_missing_job(tmp_path, monkeypatch, capsys
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     capsys.readouterr()
     assert cli.main(["run", "--resume", run_dir.name]) == 1
-    assert "already won; nothing to resume" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "already won; nothing to resume" in out
+    # mutation: the resume path re-packages but forgets to say where the code to submit is
+    assert f"You can find the code to submit at {run_dir / 'package' / 'submission'}" in out
     assert cli.main(["run", "--resume", "20990101-000000-knapsack"]) == 2
     assert not (tmp_path / "runs" / "20990101-000000-knapsack").exists()
 
@@ -522,6 +528,33 @@ def test_direction_file_is_read_and_conflicts_are_refused(tmp_path, monkeypatch,
     assert cli.main(["run", "--challenge", "knapsack", "--direction-file", "missing.md",
                      "--budget-iterations", "1", "--yes"]) == 2
     assert "direction file not found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("status", ["exhausted", "cancelled", "failed"])
+def test_unconfirmed_candidate_gets_a_caveat_not_the_submit_hint(tmp_path, capsys, status):
+    # A job that did not win can still hold a best candidate, e.g. a held-out false positive.
+    # mutation: printing the won hint for it tells the user to submit code that lost on held-out
+    pkg = tmp_path / "package"
+    (pkg / "submission").mkdir(parents=True)
+    cli._print_submission_hint(types.SimpleNamespace(status=status, best=object()), pkg)
+    out = capsys.readouterr().out
+    assert "ready to submit" not in out
+    # mutation: printing nothing hides where the unconfirmed candidate's code is
+    assert out == (f"The best candidate is in {pkg / 'submission'}, but it has not beaten the "
+                   f"baseline on the held-out nonces. Read {pkg / 'README.md'} before "
+                   "submitting it.\n")
+
+
+def test_no_hint_when_the_package_has_no_submission_folder(tmp_path, capsys):
+    # build_package writes no submission/ for a best without a baseline
+    # mutation: gating on state.best alone points the user at a folder that does not exist
+    from talos.package import build_package
+    from tests.test_package import make
+    spec, st, store = make(tmp_path)
+    st.baseline = None
+    pkg = build_package(spec, st, store)
+    cli._print_submission_hint(st, pkg)
+    assert capsys.readouterr().out == ""
 
 
 def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch, capsys):
@@ -1032,7 +1065,10 @@ def test_a_cancelled_baseline_is_not_a_failed_run(tmp_path, monkeypatch, capsys)
     run_dir = next((tmp_path / "runs").glob("*/state.json")).parent
     st = json.loads((run_dir / "state.json").read_text())
     assert st["status"] == "cancelled" and "job_x" in st["stop_reason"]
-    assert "Status: cancelled" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Status: cancelled" in out
+    # mutation: printing the hint without a candidate points at a folder that does not exist
+    assert "You can find the code to submit" not in out
 
 
 class _RefusingBench:

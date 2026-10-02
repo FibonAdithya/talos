@@ -43,7 +43,7 @@ def test_package_contents_and_no_hash(tmp_path):
                           "error": "no edit block applied"})
     pkg = build_package(spec, st, store)
     names = {p.name for p in pkg.iterdir()}
-    assert {"mod.rs", "diff_vs_baseline.patch", "scores.md", "hypotheses.md",
+    assert {"submission", "diff_vs_baseline.patch", "scores.md", "hypotheses.md",
             "evidence_draft.md", "README.md", "hyperparameters.json"} <= names
     assert "let k = 9" in (pkg / "diff_vs_baseline.patch").read_text(encoding="utf-8")
     # mutation: dropping the error string from the log hides why an iteration failed
@@ -55,7 +55,7 @@ def test_package_contents_and_no_hash(tmp_path):
         if p.is_file():
             assert HASH not in p.read_text(errors="ignore")
     z = zipfile.ZipFile(tmp_path / "package.zip")
-    assert "mod.rs" in {n.rsplit("/", 1)[-1] for n in z.namelist()}
+    assert "submission/mod.rs" in z.namelist()
     # mutation: building the zip from run_dir would ship job.json
     for name in z.namelist():
         assert HASH not in z.read(name).decode(errors="ignore")
@@ -200,3 +200,35 @@ def test_package_without_hyperparameters_has_no_section_or_file(tmp_path):
     # mutation: writing the section for None claims values were used when none were
     assert "## Hyperparameters" not in (pkg / "README.md").read_text(encoding="utf-8")
     assert not (pkg / "hyperparameters.json").exists()
+
+
+def test_submission_folder_holds_the_code_and_the_tig_readme_template(tmp_path):
+    spec, st, store = make(tmp_path)
+    # the mainnet algorithm folder ships its author's own submission README; a GPU algorithm
+    # also has .cu kernels, possibly nested
+    st.best.files = {"mod.rs": "fn a() {}\n", "kernels/solve.cu": "__global__ void k() {}\n",
+                     "README.md": "* **Copyright:** 2026 NVX\n"}
+    pkg = build_package(spec, st, store)
+    sub = pkg / "submission"
+    assert sorted(str(p.relative_to(sub)).replace("\\", "/") for p in sub.rglob("*")
+                  if p.is_file()) == ["README.md", "kernels/solve.cu", "mod.rs"]
+    # mutation: filtering on .rs drops the GPU kernels
+    assert (sub / "kernels" / "solve.cu").read_text(encoding="utf-8") == "__global__ void k() {}\n"
+    # mutation: leaving the code at the top level as well duplicates it next to the reports
+    assert not (pkg / "mod.rs").exists()
+    readme = (sub / "README.md").read_text(encoding="utf-8")
+    # mutation: copying the baseline's README submits under someone else's copyright
+    assert "NVX" not in readme
+    # mutation: not substituting the challenge leaves the placeholder in the template
+    assert "* **Challenge Name:** knapsack\n" in readme and "{challenge}" not in readme
+    assert "* **Copyright:** [year work created] [name of copyright owner]" in readme
+    assert "TIG Inbound Game License" in readme
+    # mutation: writing the template over package/README.md loses the hand-back notes
+    assert "Talos hand-back" in (pkg / "README.md").read_text(encoding="utf-8")
+
+
+def test_package_without_candidate_has_no_submission_folder(tmp_path):
+    spec, st, store = make(tmp_path, status="exhausted")
+    st.best = None
+    # mutation: writing an empty submission/ invites submitting nothing
+    assert not (build_package(spec, st, store) / "submission").exists()

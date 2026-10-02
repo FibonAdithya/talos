@@ -154,9 +154,13 @@ def _readme(spec: JobSpec, state: JobState) -> str:
     else:
         head += ("This candidate was never scored on the held-out nonces; it did not beat the "
                  "baseline on training.\n\n")
-    head += ("## Submitting\n\n1. Copy the algorithm files into "
+    head += ("## Submitting\n\n1. Fill out the template `submission/README.md`: algorithm name, "
+             "copyright, submitter. If the baseline's own README on mainnet "
+             f"(`tig-algorithms/src/{spec.challenge}/{state.baseline.name}/README.md`) lists a "
+             "Unique Algorithm Identifier and this candidate still embodies that method, carry "
+             "it over.\n"
+             "2. Copy the contents of `submission/` into "
              f"`tig-algorithms/src/{spec.challenge}/<your_name>/` in a monorepo checkout.\n"
-             "2. Add the copyright header the TIG Inbound Game License requires.\n"
              "3. Follow docs/guides in the monorepo to submit. For Advance Rewards, complete "
              "evidence_draft.md.\n")
     return head + _hyperparameters_section(spec)
@@ -169,6 +173,23 @@ def _hypothesis_line(h: dict) -> str:
     if error:
         line += f" — {error[:200]}"
     return line
+
+
+SUBMISSION_DIR = "submission"
+
+
+def write_submission(spec: JobSpec, files: dict[str, str], dest: Path) -> None:
+    """The candidate's code plus TIG's blank submission README, laid out as an algorithm folder
+    under tig-algorithms/src/<challenge>/. The algorithm's own README.md is the mainnet author's
+    submission header (their copyright), so the template is written over it."""
+    for name, text in files.items():
+        (dest / name).parent.mkdir(parents=True, exist_ok=True)
+        (dest / name).write_text(text, encoding="utf-8", newline="\n")
+    template = (resources.files("talos.data").joinpath("submission_readme_template.md")
+                .read_text(encoding="utf-8"))
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "README.md").write_text(template.replace("{challenge}", spec.challenge),
+                                    encoding="utf-8", newline="\n")
 
 
 def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
@@ -186,9 +207,7 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
                                        encoding="utf-8", newline="\n")
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
-    for name, text in state.best.files.items():
-        (pkg / name).parent.mkdir(parents=True, exist_ok=True)
-        (pkg / name).write_text(text, encoding="utf-8", newline="\n")
+    write_submission(spec, state.best.files, pkg / SUBMISSION_DIR)
     (pkg / "diff_vs_baseline.patch").write_text(_diff(state.baseline.files, state.best.files),
                                                 encoding="utf-8", newline="\n")
     scores = "\n".join(f"# {heading}\n\n{table}" for heading, table in scores_sections(spec, state))
