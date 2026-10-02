@@ -732,9 +732,10 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
 
 
 def _print_submission_hint(state: JobState, pkg: Path) -> None:
-    if state.best is None:
-        return
     from talos.package import SUBMISSION_DIR
+    # build_package decides whether there is a submission folder; follow what it wrote
+    if not (pkg / SUBMISSION_DIR).is_dir():
+        return
     if state.status == "won":
         print(f"You can find the code to submit at {pkg / SUBMISSION_DIR}, fill out the template "
               "README.md to make it ready to submit to The Innovation Game!")

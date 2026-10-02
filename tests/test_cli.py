@@ -535,6 +535,7 @@ def test_unconfirmed_candidate_gets_a_caveat_not_the_submit_hint(tmp_path, capsy
     # A job that did not win can still hold a best candidate, e.g. a held-out false positive.
     # mutation: printing the won hint for it tells the user to submit code that lost on held-out
     pkg = tmp_path / "package"
+    (pkg / "submission").mkdir(parents=True)
     cli._print_submission_hint(types.SimpleNamespace(status=status, best=object()), pkg)
     out = capsys.readouterr().out
     assert "ready to submit" not in out
@@ -542,6 +543,18 @@ def test_unconfirmed_candidate_gets_a_caveat_not_the_submit_hint(tmp_path, capsy
     assert out == (f"The best candidate is in {pkg / 'submission'}, but it has not beaten the "
                    f"baseline on the held-out nonces. Read {pkg / 'README.md'} before "
                    "submitting it.\n")
+
+
+def test_no_hint_when_the_package_has_no_submission_folder(tmp_path, capsys):
+    # build_package writes no submission/ for a best without a baseline
+    # mutation: gating on state.best alone points the user at a folder that does not exist
+    from talos.package import build_package
+    from tests.test_package import make
+    spec, st, store = make(tmp_path)
+    st.baseline = None
+    pkg = build_package(spec, st, store)
+    cli._print_submission_hint(st, pkg)
+    assert capsys.readouterr().out == ""
 
 
 def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch, capsys):
