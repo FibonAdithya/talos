@@ -2,7 +2,7 @@
 
 How Talos uses Modal, C3 and local Docker, what a C3 job and a local job cost in time, and
 what maintainers do to keep the C3 and local backends working. For choosing and configuring a backend, see
-[README.md](../README.md#3-pick-a-compute-backend).
+[README.md](../README.md#2-pick-a-compute-backend).
 
 ## Transports
 
