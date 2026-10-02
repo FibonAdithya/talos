@@ -572,7 +572,9 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     if resume:
         if state.status in ("won", "exhausted"):
             print(f"job {spec.job_id} already {state.status}; nothing to resume")
-            print(f"Package: {build_package(spec, state, store)}")
+            pkg = build_package(spec, state, store)
+            print(f"Package: {pkg}")
+            _print_submission_hint(state, pkg)
             return 1
         if spec.monorepo_ref != MONOREPO_REF or spec.dev_image_tag != DEV_IMAGE_TAG:
             print(f"job {spec.job_id} was created with a different or unrecorded TIG build "
@@ -725,7 +727,22 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
            if unpriced(spec.provider, spec.model) else f"${final.spend.llm_usd:.2f}")
     print(f"LLM spend: {llm}   Compute spend (estimated): ${final.spend.compute_usd:.2f}")
     print(f"Package: {pkg}")
+    _print_submission_hint(final, pkg)
     return 0 if final.status == "won" else 1
+
+
+def _print_submission_hint(state: JobState, pkg: Path) -> None:
+    from talos.package import SUBMISSION_DIR
+    # build_package decides whether there is a submission folder; follow what it wrote
+    if not (pkg / SUBMISSION_DIR).is_dir():
+        return
+    if state.status == "won":
+        print(f"You can find the code to submit at {pkg / SUBMISSION_DIR}, fill out the template "
+              "README.md to make it ready to submit to The Innovation Game!")
+        return
+    # the best of a job that did not win is unconfirmed or a held-out false positive
+    print(f"The best candidate is in {pkg / SUBMISSION_DIR}, but it has not beaten the baseline "
+          f"on the held-out nonces. Read {pkg / 'README.md'} before submitting it.")
 
 
 def cmd_run(args, ask) -> int:
