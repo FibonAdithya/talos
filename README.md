@@ -422,9 +422,12 @@ the next job. Run your backend's [live smoke test](#live-smoke-test) after upgra
 
 ### Submit
 
-When a job ends with `Status: won`, open `runs/<job_id>/package/README.md`. It explains how
-to submit the candidate to TIG. `evidence_draft.md` in the same directory is a partly
-filled-in advance-evidence template. You submit it yourself; Talos does not.
+When a job ends with `Status: won`, the code to submit is in `runs/<job_id>/package/submission/`,
+next to a copy of TIG's submission `README.md` template. Fill out the template (algorithm name,
+copyright, submitter), then copy the folder's contents into
+`tig-algorithms/src/<challenge>/<your_name>/` in a monorepo checkout.
+`runs/<job_id>/package/README.md` lists the steps. `evidence_draft.md` in the same directory
+is a partly filled-in advance-evidence template. You submit it yourself; Talos does not.
 
 A job that ends any other way still writes a package with its best candidate, but that
 candidate has not beaten the baseline on held-out nonces, and the package README says so.
@@ -600,13 +603,13 @@ The package directory holds:
 
 | File | Contents |
 |---|---|
-| the best algorithm's files | The candidate to submit. |
+| `submission` | A folder with the candidate to submit: the best algorithm's `.rs` and `.cu` files and TIG's submission `README.md` template, to fill out. Absent when the job produced no candidate. |
 | `diff_vs_baseline.patch` | The candidate as a patch against the baseline. |
 | `scores.md` | Per-nonce tables for baseline and candidate on training and held-out nonces. A focused job (`--track`) adds a regression-guard table for the other tracks. |
 | `hypotheses.md` | The full hypothesis log with outcomes. |
 | `evidence_draft.md` | A partly filled-in TIG advance-evidence template. |
 | `hyperparameters.json` | The per-track hyperparameters, when the job used them. |
-| `README.md` | How to submit, with a Hyperparameters section when the job used them. |
+| `README.md` | The submission steps, with a Hyperparameters section when the job used them. |
 
 Benchmark the submitted algorithm with the same hyperparameters: the measured improvement
 holds only with them.

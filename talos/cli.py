@@ -572,7 +572,9 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     if resume:
         if state.status in ("won", "exhausted"):
             print(f"job {spec.job_id} already {state.status}; nothing to resume")
-            print(f"Package: {build_package(spec, state, store)}")
+            pkg = build_package(spec, state, store)
+            print(f"Package: {pkg}")
+            _print_submission_hint(state, pkg)
             return 1
         if spec.monorepo_ref != MONOREPO_REF or spec.dev_image_tag != DEV_IMAGE_TAG:
             print(f"job {spec.job_id} was created with a different or unrecorded TIG build "
@@ -725,7 +727,16 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
            if unpriced(spec.provider, spec.model) else f"${final.spend.llm_usd:.2f}")
     print(f"LLM spend: {llm}   Compute spend (estimated): ${final.spend.compute_usd:.2f}")
     print(f"Package: {pkg}")
+    _print_submission_hint(final, pkg)
     return 0 if final.status == "won" else 1
+
+
+def _print_submission_hint(state: JobState, pkg: Path) -> None:
+    if state.best is None:
+        return
+    from talos.package import SUBMISSION_DIR
+    print(f"You can find the code to submit at {pkg / SUBMISSION_DIR}, fill out the template "
+          "README.md to make it ready to submit to The Innovation Game!")
 
 
 def cmd_run(args, ask) -> int:

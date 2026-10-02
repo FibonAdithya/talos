@@ -298,6 +298,9 @@ def test_fake_run_end_to_end_wins_and_packages(tmp_path, monkeypatch, capsys):
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     assert f"Package: {run_dir / 'package'}" in out
     assert (run_dir / "package" / "scores.md").exists()
+    # mutation: dropping the hint leaves the user hunting for the files to submit
+    assert (f"You can find the code to submit at {run_dir / 'package' / 'submission'}, fill out "
+            "the template README.md to make it ready to submit to The Innovation Game!") in out
     best = json.loads((run_dir / "state.json").read_text())["best"]
     assert "let k = 2;" in best["files"]["mod.rs"]
 
@@ -482,7 +485,10 @@ def test_resume_of_finished_job_and_of_missing_job(tmp_path, monkeypatch, capsys
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     capsys.readouterr()
     assert cli.main(["run", "--resume", run_dir.name]) == 1
-    assert "already won; nothing to resume" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "already won; nothing to resume" in out
+    # mutation: the resume path re-packages but forgets to say where the code to submit is
+    assert f"You can find the code to submit at {run_dir / 'package' / 'submission'}" in out
     assert cli.main(["run", "--resume", "20990101-000000-knapsack"]) == 2
     assert not (tmp_path / "runs" / "20990101-000000-knapsack").exists()
 
@@ -1032,7 +1038,10 @@ def test_a_cancelled_baseline_is_not_a_failed_run(tmp_path, monkeypatch, capsys)
     run_dir = next((tmp_path / "runs").glob("*/state.json")).parent
     st = json.loads((run_dir / "state.json").read_text())
     assert st["status"] == "cancelled" and "job_x" in st["stop_reason"]
-    assert "Status: cancelled" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Status: cancelled" in out
+    # mutation: printing the hint without a candidate points at a folder that does not exist
+    assert "You can find the code to submit" not in out
 
 
 class _RefusingBench:
