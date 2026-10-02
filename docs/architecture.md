@@ -60,9 +60,9 @@ nonces it is scored on.
 
 "Beats the baseline" (`talos/scoring.py::beats`) means the mean relative delta across tracks
 is above the challenge's `BeatRule.margin`, no track is worse than the baseline, and the error
-rate is under the challenge's ceiling. The margin is 0 for every challenge, so any improvement
-wins and a tie does not. With `--track`, the focus track must be above the margin and no other
-track may get worse (`beats_focused`). Until 2026-10-02 the margin was 0.5%, inclusive.
+rate is under the challenge's ceiling. The default margin is 0, so any improvement wins and a
+tie does not; per-challenge rules live in `talos/challenges.py`. With `--track`, the focus
+track must be above the margin and no other track may get worse (`beats_focused`).
 
 ## Native research scoring
 
