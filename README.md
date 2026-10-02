@@ -74,7 +74,7 @@ It finishes in under a second and prints the same event stream a real run does, 
 ```
 Status: won (beat baseline on training and held-out nonces)
 Best delta vs baseline: +1.000%
-LLM spend: $0.02   Compute spend (estimated): $1.28
+LLM spend: $0.02   Compute spend (estimated): $0.48
 Package: .../runs/<job_id>/package
 ```
 
