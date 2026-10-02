@@ -429,6 +429,7 @@ is a partly filled-in advance-evidence template. You submit it yourself; Talos d
 
 A job that ends any other way still writes a package with its best candidate, but that
 candidate has not beaten the baseline on held-out nonces, and the package README says so.
+The last line of the run's output says the same instead of telling you to submit it.
 
 ## Command reference
 

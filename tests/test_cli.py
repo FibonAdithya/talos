@@ -530,6 +530,20 @@ def test_direction_file_is_read_and_conflicts_are_refused(tmp_path, monkeypatch,
     assert "direction file not found" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("status", ["exhausted", "cancelled", "failed"])
+def test_unconfirmed_candidate_gets_a_caveat_not_the_submit_hint(tmp_path, capsys, status):
+    # A job that did not win can still hold a best candidate, e.g. a held-out false positive.
+    # mutation: printing the won hint for it tells the user to submit code that lost on held-out
+    pkg = tmp_path / "package"
+    cli._print_submission_hint(types.SimpleNamespace(status=status, best=object()), pkg)
+    out = capsys.readouterr().out
+    assert "ready to submit" not in out
+    # mutation: printing nothing hides where the unconfirmed candidate's code is
+    assert out == (f"The best candidate is in {pkg / 'submission'}, but it has not beaten the "
+                   f"baseline on the held-out nonces. Read {pkg / 'README.md'} before "
+                   "submitting it.\n")
+
+
 def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch, capsys):
     # mutation: returning 0 on a failed compile, or shipping non-source files, fails these
     monkeypatch.chdir(tmp_path)

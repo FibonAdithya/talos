@@ -735,8 +735,13 @@ def _print_submission_hint(state: JobState, pkg: Path) -> None:
     if state.best is None:
         return
     from talos.package import SUBMISSION_DIR
-    print(f"You can find the code to submit at {pkg / SUBMISSION_DIR}, fill out the template "
-          "README.md to make it ready to submit to The Innovation Game!")
+    if state.status == "won":
+        print(f"You can find the code to submit at {pkg / SUBMISSION_DIR}, fill out the template "
+              "README.md to make it ready to submit to The Innovation Game!")
+        return
+    # the best of a job that did not win is unconfirmed or a held-out false positive
+    print(f"The best candidate is in {pkg / SUBMISSION_DIR}, but it has not beaten the baseline "
+          f"on the held-out nonces. Read {pkg / 'README.md'} before submitting it.")
 
 
 def cmd_run(args, ask) -> int:
