@@ -34,7 +34,9 @@ def c3_image(name: str) -> str:
 
 @dataclass(frozen=True)
 class BeatRule:
-    margin: float = 0.005
+    """A candidate wins when its mean relative delta is strictly over `margin`. A margin of 0
+    makes any improvement over the baseline a win (user decision 2026-10-02)."""
+    margin: float = 0.0
     track_tolerance: float = 0.0
     error_ceiling: float = 0.05
 
