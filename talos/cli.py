@@ -41,7 +41,7 @@ from talos.nonces import HOLDOUT_START, NONCES_PER_TRACK, draw_nonce_sets, new_r
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
 from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
-from talos.state import JobSpec, JobState, JobStore
+from talos.state import JobSpec, JobState, JobStore, user_tacit
 from talos.types import Usage
 
 BASELINE_CACHE = Path.home() / ".talos" / "baselines"
@@ -949,7 +949,7 @@ def cmd_run(args, ask) -> int:
                    scoring=args.scoring or "native")
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
-    (store.run_dir / "tacit.md").write_text(f"- USER: {direction.strip()}\n",
+    (store.run_dir / "tacit.md").write_text(user_tacit(direction),
                                             encoding="utf-8", newline="\n")
     scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
     if hyperparameters is None and algorithm is not None:

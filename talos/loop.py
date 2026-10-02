@@ -28,7 +28,7 @@ from talos.scoring import (ScoringError, beats, beats_focused, bundle_delta, foc
                            fuel_proxy_misses, quality_mismatches, runtime_ratio, select,
                            validation_failure)
 from talos.search_replace import format_misses
-from talos.state import Candidate, JobSpec, JobState, JobStore, TERMINAL
+from talos.state import Candidate, JobSpec, JobState, JobStore, TERMINAL, user_tacit
 from talos.types import Completion, NonceResult
 
 
@@ -672,8 +672,9 @@ class Loop:
         lesson = parse_distillation(text)
         if lesson:
             self.state.tacit = (self.state.tacit.rstrip() + f"\n- LLM: {lesson}\n").lstrip()
-            (self.store.run_dir / "tacit.md").write_text(self.state.tacit,
-                                                         encoding="utf-8", newline="\n")
+            (self.store.run_dir / "tacit.md").write_text(
+                user_tacit(self.spec.direction) + self.state.tacit,
+                encoding="utf-8", newline="\n")
             self._save()
             self._event("distilled", lesson=lesson)
 
