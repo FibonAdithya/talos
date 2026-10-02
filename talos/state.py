@@ -113,6 +113,12 @@ class Candidate:
                             if d.get("holdout") else None))
 
 
+def user_tacit(direction: str) -> str:
+    """The first line of tacit.md. It is not kept in JobState.tacit: the prompts already carry
+    the direction, and repeating it in the tacit block would send it twice."""
+    return f"- USER: {direction.strip()}\n"
+
+
 @dataclass
 class JobState:
     status: str

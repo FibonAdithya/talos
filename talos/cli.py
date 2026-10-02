@@ -41,7 +41,7 @@ from talos.nonces import HOLDOUT_START, NONCES_PER_TRACK, draw_nonce_sets, new_r
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
 from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
-from talos.state import JobSpec, JobState, JobStore
+from talos.state import JobSpec, JobState, JobStore, user_tacit
 from talos.types import Usage
 
 BASELINE_CACHE = Path.home() / ".talos" / "baselines"
@@ -560,10 +560,6 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
     return _one_line(text, width)
 
 
-def _user_tacit(direction: str) -> str:
-    return f"- USER: {direction.strip()}\n"
-
-
 def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> int:
     # spec §7.1: refuse before anything is spent when the credential is missing.
     if cfg.provider not in UNMETERED and resolve_api_key(cfg) is None:
@@ -572,12 +568,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
               file=sys.stderr)
         return 2
     from talos.package import build_package
-    if resume:
-        state = store.load()
-    else:
-        state = JobState.fresh(Spend(started_at=time.time()))
-        # the loop rewrites tacit.md from state.tacit, so the direction has to start in both
-        state.tacit = _user_tacit(spec.direction)
+    state = store.load() if resume else JobState.fresh(Spend(started_at=time.time()))
     if resume:
         if state.status in ("won", "exhausted"):
             print(f"job {spec.job_id} already {state.status}; nothing to resume")
@@ -941,7 +932,7 @@ def cmd_run(args, ask) -> int:
                    scoring=args.scoring or "native")
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
-    (store.run_dir / "tacit.md").write_text(_user_tacit(direction),
+    (store.run_dir / "tacit.md").write_text(user_tacit(direction),
                                             encoding="utf-8", newline="\n")
     scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
     if hyperparameters is None and algorithm is not None:

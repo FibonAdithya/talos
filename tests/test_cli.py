@@ -524,18 +524,6 @@ def test_direction_file_is_read_and_conflicts_are_refused(tmp_path, monkeypatch,
     assert "direction file not found" in capsys.readouterr().err
 
 
-def test_new_job_state_starts_with_the_user_direction_in_tacit(tmp_path, monkeypatch):
-    # The loop rewrites tacit.md from state.tacit when it distills a lesson, so a state that
-    # starts empty erased the direction from tacit.md at the first lesson.
-    # mutation: starting the job from a bare JobState.fresh leaves state.tacit empty
-    monkeypatch.chdir(tmp_path)
-    fake_config(tmp_path)
-    assert fake_run(monkeypatch, ["--scoring", "metered"]) == 0
-    run_dir = next((tmp_path / "runs").glob("*/state.json")).parent
-    st = json.loads((run_dir / "state.json").read_text())
-    assert st["tacit"] == (run_dir / "tacit.md").read_text() == "- USER: go\n"
-
-
 def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch, capsys):
     # mutation: returning 0 on a failed compile, or shipping non-source files, fails these
     monkeypatch.chdir(tmp_path)

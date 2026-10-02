@@ -194,6 +194,28 @@ def test_stagnation_recall_distill_reset(tmp_path):
     assert [h["outcome"] for h in st.hypotheses] == ["failed:score"] * 6
 
 
+def test_distilled_lesson_keeps_the_direction_in_tacit_md_and_out_of_the_tacit_prompt(tmp_path):
+    # tacit.md starts as the user's direction (cli.cmd_run writes it); a distilled lesson is
+    # added after it. The prompts already carry the direction, so state.tacit holds lessons only.
+    # mutation: writing tacit.md from state.tacit alone erases the direction at the first lesson;
+    # putting the direction into the prompts' tacit block sends it twice in every hypothesis prompt
+    script = []
+    for i in range(4):
+        script += [hyp(f"h{i}"), edit(1)]
+    script.insert(6, "LESSON: constants are not the answer.")  # distill call after 3rd failure
+    b = Budget(usd=None, hours=None, iterations=4, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, script, budget=b,
+                               thresholds=Thresholds(recall=2, distill=3, reset=5))
+    loop.spec = replace(loop.spec, direction="DIRECTION-SENTINEL")
+    st = loop.run()
+    assert (store.run_dir / "tacit.md").read_text() == (
+        "- USER: DIRECTION-SENTINEL\n- LLM: constants are not the answer.\n")
+    assert st.tacit == "- LLM: constants are not the answer.\n"
+    last_hypothesis_prompt = fp.calls[-2][1]
+    assert "constants are not the answer" in last_hypothesis_prompt
+    assert last_hypothesis_prompt.count("DIRECTION-SENTINEL") == 1
+
+
 def test_resume_discards_incomplete_iteration(tmp_path):
     # mutation: resuming without discarding the half-written iteration dir would leave the
     # stale hypothesis.json in place and re-number the next iteration
