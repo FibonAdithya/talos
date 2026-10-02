@@ -6,6 +6,7 @@ import pytest
 
 from talos.budget import Budget, BudgetExhausted, Spend
 from talos.bench import FakeBench
+from talos.challenges import BeatRule
 from talos.loop import Loop, Thresholds
 from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
                              ProviderTimeout)
@@ -89,6 +90,18 @@ def test_win_requires_training_then_holdout_beat(tmp_path):
     # spec §7.10: the rand_hash reaches neither the timeline nor a prompt
     assert HASH not in raw
     assert all(HASH not in system and HASH not in user for system, user in fp.calls)
+
+
+def test_any_improvement_over_the_baseline_wins(tmp_path):
+    # user decision 2026-10-02: no minimum margin. k=2 over a baseline of 1000 is +0.1%.
+    # mutation: restoring the 0.5% default margin leaves this job researching to its budget
+    loop, fp, fb, store = make(tmp_path, [hyp("tiny"), edit(2)],
+                               scores=lambda ch, files, ns: [
+                                   q + 900 for q in quality_from_files(ch, files, ns)])
+    loop.state.baseline = baseline(q=1000)
+    st = loop.run()
+    assert st.status == "won" and st.best.iteration == 1 and st.confirmed == [1]
+    assert st.best.delta["mean_rel_delta"] == pytest.approx(0.001)
 
 
 def test_false_positive_returns_to_research(tmp_path):
@@ -303,6 +316,7 @@ def test_failures_against_an_earlier_best_survive_the_best_changing(tmp_path):
                                    q + 900 for q in quality_from_files(ch, files, ns)],
                                thresholds=Thresholds(recall=1, distill=1, reset=99))
     loop.state.baseline = baseline(q=1000)  # so k=2 is +0.1%: a new best, not a win
+    loop.rule = BeatRule(margin=0.005)  # the default margin of 0 would make it a win
     st = loop.run()
     assert [h["outcome"] for h in st.hypotheses] == [
         "failed:score", "improved", "failed:score", "failed:score"]

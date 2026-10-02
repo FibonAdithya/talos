@@ -48,12 +48,23 @@ def test_mismatched_nonces_raise():
 
 
 def test_beats_margin_boundary():
-    # mutation: `>` instead of `>=` on the margin fails the equal case
+    # mutation: `>=` instead of `>` on the margin passes the equal case
     rule = BeatRule(margin=0.05, track_tolerance=0.0, error_ceiling=0.05)
     cand = [R("t1", 0, 110), R("t1", 1, 110), R("t2", 0, 200), R("t2", 1, 200)]
-    assert beats(BASE, cand, rule)  # mean delta exactly 0.05
-    rule2 = BeatRule(margin=0.0501, track_tolerance=0.0, error_ceiling=0.05)
-    assert not beats(BASE, cand, rule2)
+    assert not beats(BASE, cand, rule)  # mean delta exactly 0.05
+    rule2 = BeatRule(margin=0.0499, track_tolerance=0.0, error_ceiling=0.05)
+    assert beats(BASE, cand, rule2)
+
+
+def test_default_rule_wins_on_any_improvement():
+    # user decision 2026-10-02: any improvement over the baseline is a win.
+    # mutation: a default margin above 0.0025 rejects the +0.25% candidate; `>=` accepts the tie
+    step = [R("t1", 0, 100), R("t1", 1, 101), R("t2", 0, 200), R("t2", 1, 200)]
+    assert bundle_delta(BASE, step).mean_rel_delta == pytest.approx(0.0025)
+    assert beats(BASE, step, BeatRule())
+    assert beats_focused(BASE, step, BeatRule(), "t1")
+    assert not beats(BASE, BASE, BeatRule())
+    assert not beats_focused(BASE, BASE, BeatRule(), "t1")
 
 
 def test_beats_rejects_track_regression_and_errors():
@@ -139,7 +150,8 @@ def test_beats_focused_on_a_single_track_equals_beats():
     for q in (200, 201, 202, 220):
         cand = [R("t1", 0, q), R("t1", 1, q)]
         assert beats_focused(base, cand, RULE, "t1") == beats(base, cand, RULE)
-    assert beats_focused(base, [R("t1", 0, 201), R("t1", 1, 201)], RULE, "t1")
+    assert not beats_focused(base, [R("t1", 0, 201), R("t1", 1, 201)], RULE, "t1")
+    assert beats_focused(base, [R("t1", 0, 202), R("t1", 1, 202)], RULE, "t1")
 
 
 def test_runtime_ratio_is_the_slowest_track_relative_to_baseline():
@@ -166,7 +178,8 @@ def vrows(qs, track="t", error=None, limit=()):
 
 
 VBASE = vrows([100, 100, 100, 100])
-VRULE = BeatRule()  # margin 0.005, track tolerance 0.0, error ceiling 0.05
+# a non-zero margin, so a stepping stone can improve without beats()
+VRULE = BeatRule(margin=0.005, track_tolerance=0.0, error_ceiling=0.05)
 
 
 def test_validation_passes_a_stepping_stone_short_of_the_margin():

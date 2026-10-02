@@ -7,8 +7,8 @@ import pytest
 from talos import c3_jobdir
 from talos.bench import EvalRequest
 from talos.c3_jobdir import LocalSettings
-from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, c3_hardware_class, c3_image,
-                              c3_profile, c3_workers, dev_image)
+from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, BeatRule, MONOREPO_REF, c3_hardware_class,
+                              c3_image, c3_profile, c3_workers, dev_image)
 from talos.types import NonceResult, NonceSet
 
 HASH = "ab" * 32
@@ -107,7 +107,7 @@ def test_write_job_dir_contents_and_secrecy(tmp_path):
     assert MONOREPO_REF in (d / "job.sh").read_text()
     p = json.loads((d / "payload.json").read_text())
     assert p["challenge"] == "knapsack" and p["challenge_id"] == "c003" and p["fuel"] == 7
-    assert p["training"][0]["rand_hash"] == HASH and p["rule"]["margin"] == 0.005
+    assert p["training"][0]["rand_hash"] == HASH and p["rule"]["margin"] == 0.0
     assert p["monorepo_ref"] == MONOREPO_REF and p["workers"] == 4
     # mutation: the rand hash in any file C3 shows in its dashboard (the .c3, the job name,
     # the script) is a leak; only payload.json may carry it
@@ -172,10 +172,12 @@ def test_request_hash_is_unchanged_from_before_hyperparameters_existed(monkeypat
     # Freeze the historical pins: an actual build upgrade must change the request hash.
     monkeypatch.setattr(c3_jobdir, "MONOREPO_REF", "84a5787f5b14a630bdf40f52bccf37887d3d8464")
     monkeypatch.setattr(c3_jobdir, "DEV_IMAGE_TAG", "0.0.7")
+    r = req()
+    r.rule = BeatRule(margin=0.005)  # the default before 2026-10-02
     # mutation: always writing the "hyperparameters" key changes this request's hash, so a
     # resume against a job that was submitted before the upgrade orphans it instead of
     # reattaching, leaving it to keep billing
-    assert c3_jobdir.request_hash(req()) == "8360658c78306a4f"
+    assert c3_jobdir.request_hash(r) == "8360658c78306a4f"
 
 
 def test_request_hash_changes_with_the_hyperparameters():

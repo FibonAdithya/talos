@@ -153,7 +153,7 @@ def _readme(spec: JobSpec, state: JobState) -> str:
                  "unconfirmed. See scores.md.\n\n")
     else:
         head += ("This candidate was never scored on the held-out nonces; it did not beat the "
-                 "baseline on training by the required margin.\n\n")
+                 "baseline on training.\n\n")
     head += ("## Submitting\n\n1. Copy the algorithm files into "
              f"`tig-algorithms/src/{spec.challenge}/<your_name>/` in a monorepo checkout.\n"
              "2. Add the copyright header the TIG Inbound Game License requires.\n"

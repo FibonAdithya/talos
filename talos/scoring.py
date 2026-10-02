@@ -88,7 +88,7 @@ def runtime_ratio(baseline: list[NonceResult], candidate: list[NonceResult]) -> 
 
 def beats(baseline: list[NonceResult], candidate: list[NonceResult], rule: BeatRule) -> bool:
     d = bundle_delta(baseline, candidate)
-    return (d.mean_rel_delta >= rule.margin
+    return (d.mean_rel_delta > rule.margin
             and d.worst_rel_delta >= -rule.track_tolerance
             and d.error_rate <= rule.error_ceiling)
 
@@ -127,7 +127,7 @@ def focus_sets(track: str | None, training: list[NonceSet],
 
 def beats_focused(baseline: list[NonceResult], candidate: list[NonceResult], rule: BeatRule,
                   track: str) -> bool:
-    """Confirmation rule for a focused job: the focus track clears the margin with its own error
+    """Confirmation rule for a focused job: the focus track is over the margin with its own error
     rate under the ceiling, and no guard track drops below -track_tolerance."""
     d = bundle_delta(baseline, candidate)
     by = {t.track: t for t in d.tracks}
@@ -135,7 +135,7 @@ def beats_focused(baseline: list[NonceResult], candidate: list[NonceResult], rul
         raise ScoringError(f"focus track {track!r} has no results")
     focus = by[track]
     guards_ok = all(t.rel_delta >= -rule.track_tolerance for t in d.tracks if t.track != track)
-    return (focus.rel_delta >= rule.margin
+    return (focus.rel_delta > rule.margin
             and focus.cand_errors / focus.n <= rule.error_ceiling
             and guards_ok)
 
