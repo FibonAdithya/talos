@@ -16,6 +16,7 @@ capabilities dropped, and CPU and memory limits; the one opt-in exception is
 ## Contents
 
 - [How it works](#how-it-works)
+- [Prerequisites](#prerequisites)
 - [Try it with no accounts](#try-it-with-no-accounts)
 - [Setup](#setup)
 - [Running on Windows](#running-on-windows)
@@ -42,6 +43,18 @@ build and scoring, the agentic sandbox and the baseline cache.
 [docs/compute-backends.md](docs/compute-backends.md) covers how Modal, C3 and local Docker
 are used, C3 and local timings, and the dev images.
 
+## Prerequisites
+
+- Linux, macOS or Windows. CI runs the test suite on all three. Compiling and scoring happen
+  on the compute backend, so nothing Rust- or CUDA-related is needed locally. The `local`
+  backend needs Docker (and, for GPU challenges, the NVIDIA container toolkit); the compiler
+  still runs inside the container.
+- Python 3.10 or newer, with `pip` and the `venv` module, and Git. On Debian and Ubuntu,
+  `venv` is a separate package: `sudo apt install python3-venv`.
+- For a real run, not the no-account demo below: one compute backend account
+  ([Setup, step 2](#2-pick-a-compute-backend)) and one LLM credential
+  ([Setup, step 3](#3-pick-an-llm-provider)).
+
 ## Try it with no accounts
 
 You can run the whole loop end to end before creating any account. The hidden `--fake` flag
@@ -51,8 +64,8 @@ no network, no credentials.
 ```bash
 git clone https://github.com/FibonAdithya/talos.git
 cd talos
-uv venv --python 3.10 .venv
-uv pip install --python .venv/bin/python -e .
+python3 -m venv .venv
+.venv/bin/pip install -e .
 .venv/bin/talos run --challenge knapsack --direction "demo" --budget-iterations 3 --yes --fake
 ```
 
@@ -61,7 +74,7 @@ It finishes in under a second and prints the same event stream a real run does, 
 ```
 Status: won (beat baseline on training and held-out nonces)
 Best delta vs baseline: +1.000%
-LLM spend: $0.02   Compute spend (estimated): $1.28
+LLM spend: $0.02   Compute spend (estimated): $0.48
 Package: .../runs/<job_id>/package
 ```
 
@@ -70,25 +83,13 @@ you do not want the demo job listed by `talos status`.
 
 ## Setup
 
-### 1. Prerequisites
-
-- Linux, macOS or Windows. CI runs the test suite on all three. Compiling and scoring happen
-  on the compute backend, so nothing Rust- or CUDA-related is needed locally. The `local`
-  backend needs Docker (and, for GPU challenges, the NVIDIA container toolkit); the compiler
-  still runs inside the container.
-- Python 3.10 or newer, and Git.
-- [`uv`](https://docs.astral.sh/uv/) to create the virtualenv (recommended; plain `pip`
-  works too).
-- One compute backend account (step 3).
-- One LLM credential (step 4).
-
-### 2. Install
+### 1. Install
 
 ```bash
 git clone https://github.com/FibonAdithya/talos.git
 cd talos
-uv venv --python 3.10 .venv
-uv pip install --python .venv/bin/python -e .
+python3 -m venv .venv
+.venv/bin/pip install -e .
 source .venv/bin/activate      # puts `talos` on PATH for this shell
 talos --help
 ```
@@ -101,7 +102,7 @@ commands.
 `runs/` in the **current directory**. Always run Talos from the same directory, normally
 the repository root.
 
-### 3. Pick a compute backend
+### 2. Pick a compute backend
 
 Candidates are compiled and scored on one of three backends. You choose one in `talos setup`.
 
@@ -111,7 +112,7 @@ Candidates are compiled and scored on one of three backends. You choose one in `
 | `c3` | With a C3 API key (`c3 apikey create`): nothing to install — Talos talks to C3 over HTTPS. Without a key: the `c3` CLI ([cthree.cloud](https://cthree.cloud)), version 0.20.0 or newer, installed and logged in with `c3 login` (older releases refuse the GHCR dev image before it reaches C3; check with `c3 version`). Either way, credit on the account; top up with `c3 topup`. | One batch job of about 12 minutes before the first nonce is scored. See [docs/compute-backends.md](docs/compute-backends.md#c3-timings). |
 | `local` | Docker running on this machine. The first run per challenge pulls the 13 GB dev image and does one warm-up build (MEASURED 2026-09-25: 90 s including the clone, on a 16-core machine with the image already pulled). Every iteration then builds the candidate alone in its crate (MEASURED 2026-09-25: 3 minutes for one knapsack build and 4 nonces of under 2 s each; 16.5 minutes for job_scheduling, whose nonces take 150 to 165 s each): the dev image re-instruments every dependency on each build, so this is not incremental. GPU challenges need the NVIDIA container toolkit and are unverified; see [docs/compute-backends.md](docs/compute-backends.md#local-backend). | Nothing. The compute budget question is skipped. |
 
-### 4. Pick an LLM provider
+### 3. Pick an LLM provider
 
 | Provider | Credential | Environment variable used if `.talos/secrets.json` has no key | Default model |
 |---|---|---|---|
@@ -127,7 +128,7 @@ Only the CLI providers (`claude-cli`, `codex-cli`) support [agentic mode](#agent
 CLI providers bill through your CLI subscription rather than per API call, so the `talos run`
 wizard asks them for an iteration budget instead of a dollar budget.
 
-### 5. Run `talos setup`
+### 4. Run `talos setup`
 
 ```bash
 talos setup
@@ -179,7 +180,7 @@ because the score function's arguments change between versions. A client that re
 older deploy stops with a message naming `talos setup`. The C3 backend ships its code with
 each job, so it needs no redeploy.
 
-### 6. Before your first real run
+### 5. Before your first real run
 
 Run the [live smoke test](#live-smoke-test) for your backend once. It spends a small amount
 of real compute and confirms the backend can compile and score the real mainnet algorithm.
@@ -195,30 +196,26 @@ Every block below is for PowerShell and can be pasted whole. The commands call
 `.venv\Scripts\talos.exe` directly, so they work without activating the virtualenv and
 without changing PowerShell's script execution policy.
 
-### 1. Install Git and uv
+### 1. Install Git and Python
 
 ```powershell
 winget install --id Git.Git -e --source winget
-winget install --id astral-sh.uv -e --source winget
+winget install --id Python.Python.3.12 -e --source winget
 ```
 
-Close PowerShell and open a new window, so that `git` and `uv` are on `PATH`. You do not
-need to install Python: `uv venv` in the next step downloads it if the machine has none.
+Close PowerShell and open a new window, so that `git` and `python` are on `PATH`.
 
 If `winget` is not available, install [Git for Windows](https://git-scm.com/download/win)
-from its installer, and `uv` with:
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
+and [Python](https://www.python.org/downloads/windows/) from their installers. In the
+Python installer, tick "Add python.exe to PATH".
 
 ### 2. Install Talos
 
 ```powershell
 git clone https://github.com/FibonAdithya/talos.git
 cd talos
-uv venv --python 3.10 .venv
-uv pip install --python .venv\Scripts\python.exe -e .
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
 .venv\Scripts\talos.exe --help
 ```
 
@@ -234,15 +231,15 @@ See [Try it with no accounts](#try-it-with-no-accounts) for what it prints.
 
 ### 4. Configure
 
-Pick a [compute backend](#3-pick-a-compute-backend) and an
-[LLM provider](#4-pick-an-llm-provider), then:
+Pick a [compute backend](#2-pick-a-compute-backend) and an
+[LLM provider](#3-pick-an-llm-provider), then:
 
 ```powershell
 .venv\Scripts\talos.exe setup
 ```
 
 It asks the same questions on every OS; they are listed under
-[Run `talos setup`](#5-run-talos-setup). On the C3 backend, give it a C3 API key (see
+[Run `talos setup`](#4-run-talos-setup). On the C3 backend, give it a C3 API key (see
 [What differs on Windows](#what-differs-on-windows)).
 
 ### 5. Run the live smoke test once
@@ -250,7 +247,7 @@ It asks the same questions on every OS; they are listed under
 For the Modal backend:
 
 ```powershell
-uv pip install --python .venv\Scripts\python.exe pytest
+.venv\Scripts\python.exe -m pip install pytest
 $env:TALOS_LIVE_CHALLENGE = "knapsack"
 .venv\Scripts\python.exe -m pytest -m live tests/test_live.py -s
 ```
@@ -258,7 +255,7 @@ $env:TALOS_LIVE_CHALLENGE = "knapsack"
 For the C3 backend:
 
 ```powershell
-uv pip install --python .venv\Scripts\python.exe pytest
+.venv\Scripts\python.exe -m pip install pytest
 $env:TALOS_LIVE_BACKEND = "c3"
 .venv\Scripts\python.exe -m pytest -m live tests/test_live.py -k c3 -s
 ```
@@ -342,8 +339,8 @@ The `.venv\Scripts\...` commands are the same. Two things differ:
 by the three commands `make check` runs:
 
 ```powershell
-uv venv --python 3.12 .venv
-uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt -e .
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -e .
 .venv\Scripts\python.exe -m ruff check .
 .venv\Scripts\python.exe -m pytest -q -m "not live"
 .venv\Scripts\python.exe -m agentify check .
@@ -441,7 +438,7 @@ candidate has not beaten the baseline on held-out nonces, and the package README
 
 ### `talos setup`
 
-No flags. See [Setup, step 5](#5-run-talos-setup) for every prompt and what is written.
+No flags. See [Setup, step 4](#4-run-talos-setup) for every prompt and what is written.
 Exit code 0 on success, 1 when a credential or backend check fails, 2 for an unknown
 backend or provider.
 
@@ -675,7 +672,7 @@ folder and must still be allowed to edit there (MEASURED 2026-09-29: `1 passed` 
 TALOS_LIVE_AGENT=claude-cli .venv/bin/pytest -m live tests/test_live.py -k claude_agent -s
 ```
 
-All of them need `pytest`: install it with `uv pip install --python .venv/bin/python pytest`, or use
+All of them need `pytest`: install it with `.venv/bin/pip install pytest`, or use
 the development install below.
 
 Run the one for your backend once after `talos setup`, before trusting a real run. The
@@ -685,11 +682,12 @@ credentials were available in the development environment.
 ## Development
 
 The gate needs Python 3.11 or newer, because the pinned `agentify` in `requirements-dev.txt`
-does. CI uses 3.12.
+does. CI uses 3.12. If `python3` is older, create the virtualenv with a newer interpreter,
+for example `python3.12 -m venv .venv`.
 
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r requirements-dev.txt -e .
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt -e .
 make check PYTHON=.venv/bin/python
 ```
 
