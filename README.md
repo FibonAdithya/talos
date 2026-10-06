@@ -243,6 +243,17 @@ It asks the same questions on every OS; they are listed under
 [Run `talos setup`](#4-run-talos-setup). On the C3 backend, give it a C3 API key (see
 [What differs on Windows](#what-differs-on-windows)).
 
+If Modal deployment fails with a `charmap` error mentioning `\u2713`, set UTF-8 for the
+current PowerShell window and run setup again:
+
+```powershell
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+.venv\Scripts\talos.exe setup
+```
+
+These variables affect only the current PowerShell window.
+
 ### 5. Run the live smoke test once
 
 For the Modal backend:
