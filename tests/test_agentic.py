@@ -4,12 +4,12 @@ import shutil
 import subprocess
 import sys
 import types
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
-from talos.agentic import (AgenticError, CODEX_AGENTIC_ENV, attach_agentic, claude_md,
-                           prepare_worktree, read_back, sandbox_settings)
+from talos.agentic import (AgenticError, CODEX_AGENTIC_ENV, _rule_root, attach_agentic,
+                           claude_md, prepare_worktree, read_back, sandbox_settings)
 from talos.prompts import PromptContext
 from talos.state import JobStore
 
@@ -77,14 +77,119 @@ def test_sandbox_denies_network_and_scopes_edits(tmp_path):
     allow, deny = s["permissions"]["allow"], s["permissions"]["deny"]
     # Claude Code's documented prefix form is `Bash(cmd:*)`; a bare `*` is not a prefix match
     assert "Bash(talos compile:*)" in allow
-    assert "Edit(algorithm/**)" in allow and "Edit(.talos/hypothesis.json)" in allow
+    # mutation: a relative rule such as Edit(algorithm/**) is resolved against the session's
+    # current directory, so one `cd algorithm` in the agent's shell denies every later Edit
+    paths = {r.partition("(")[0]: [] for r in allow}
+    for r in allow:
+        paths[r.partition("(")[0]].append(r.partition("(")[2].rstrip(")"))
+    assert all(p.startswith("//") for tool in ("Read", "Glob", "Grep", "Edit") for p in paths[tool])
+    assert sorted(p.rsplit("/", 2)[-2:] for p in paths["Edit"]) == [[".talos", "hypothesis.json"],
+                                                                   ["algorithm", "**"]]
     # mutation: dropping Glob/Grep entries leaves a dontAsk agent unable to discover file names
     # under algorithm/ (Read alone does not grant Glob/Grep access)
-    assert "Glob(algorithm/**)" in allow and "Grep(algorithm/**)" in allow
+    assert len(paths["Read"]) == 5 and paths["Glob"] == paths["Read"] == paths["Grep"]
     assert "WebFetch" in deny and "WebSearch" in deny and "Write(**)" in deny
     assert {"Bash(curl:*)", "Bash(wget:*)", "Bash(git:*)", "Bash(ssh:*)", "Bash(python:*)"} <= set(deny)
     assert "Edit(**)" not in deny and "Bash(*)" not in deny and "Bash(*:*)" not in deny
     assert s["permissions"]["defaultMode"] == "dontAsk"  # unlisted tools are refused, not prompted
+
+
+def test_rule_root_is_claude_codes_absolute_form():
+    # Claude Code reads `//path` as absolute from the filesystem root; a single slash anchors at
+    # the settings file's own directory (.claude/), which holds no algorithm files.
+    # mutation: returning the path with one leading slash denies every Edit
+    assert _rule_root(PurePosixPath("/tmp/talos-agentic-ab12")) == "//tmp/talos-agentic-ab12"
+    # Claude Code matches Windows paths in POSIX form, C:\Users\u as /c/Users/u
+    # mutation: leaving the drive as `C:` gives a rule no Windows path matches
+    assert (_rule_root(PureWindowsPath(r"C:\Users\u\Temp\talos-agentic-ab12"))
+            == "//c/Users/u/Temp/talos-agentic-ab12")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege there")
+def test_sandbox_rules_name_the_worktrees_real_location(tmp_path):
+    # Claude Code checks the file a path resolves to, so a rule anchored at a symlinked spelling
+    # of the worktree (macOS's /var/folders is one) matches nothing.
+    # mutation: anchoring at the path as given, without resolve(), denies every Edit there
+    real = tmp_path.resolve() / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    allow = sandbox_settings(link)["permissions"]["allow"]
+    assert f"Edit(/{real.as_posix()}/algorithm/**)" in allow
+    assert f"Edit(/{real.as_posix()}/.talos/hypothesis.json)" in allow
+    assert f"Read(/{real.as_posix()}/CHALLENGE.md)" in allow
+    assert not [r for r in allow if "link" in r]
+
+
+def _denied_run(denials, edit=False):
+    """A fake claude: the JSON result only when asked for it, as the real CLI behaves."""
+    def run(cmd, **kw):
+        wt = kw["cwd"]
+        if edit:
+            (wt / ".talos" / "hypothesis.json").write_text(json.dumps(
+                {"title": "T", "description": "D", "strategy_tag": "local_search"}))
+            (wt / "algorithm" / "mod.rs").write_text("fn a(){ 1 }")
+        as_json = "json" in cmd and cmd[cmd.index("json") - 1] == "--output-format"
+        out = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                          "result": "done", "permission_denials": denials}) if as_json else "done"
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+    return run
+
+
+def _agentic_loop(tmp_path, run, kind="claude-cli"):
+    loop = types.SimpleNamespace(store=JobStore(tmp_path), propose_and_edit=None,
+                                 _check_budget=lambda: None, _event=lambda *a, **k: None)
+    attach_agentic(loop, kind, "m", timeout_s=1, run=run)
+    return loop
+
+
+def test_failed_read_back_reports_the_tool_calls_the_cli_refused(tmp_path):
+    # mutation: without this a session whose every Edit was denied is recorded as the agent
+    # producing nothing, with no trace of the denial anywhere in the run's output
+    edit = {"tool_name": "Edit", "tool_use_id": "t1",
+            "tool_input": {"file_path": "/x/algorithm/mod.rs", "old_string": "a",
+                           "new_string": "b"}}
+    read = {"tool_name": "Read", "tool_use_id": "t3", "tool_input": {"file_path": "/etc/passwd"}}
+    loop = _agentic_loop(tmp_path, _denied_run([edit, read, dict(edit, tool_use_id="t2")]))
+    with pytest.raises(AgenticError) as ei:
+        loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert str(ei.value) == ("agent did not fill in .talos/hypothesis.json; "
+                             "the CLI refused 3 tool calls (Edit x2, Read x1)")
+
+
+def test_failed_read_back_without_a_denial_says_nothing_about_one(tmp_path):
+    # mutation: appending the note unconditionally blames the sandbox for an idle agent
+    loop = _agentic_loop(tmp_path, _denied_run([]))
+    with pytest.raises(AgenticError) as ei:
+        loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert str(ei.value) == "agent did not fill in .talos/hypothesis.json"
+
+
+def test_failed_read_back_survives_a_transcript_that_is_not_json(tmp_path, monkeypatch):
+    # codex prints prose, and a JSON value that is not an object must not crash the loop either
+    # mutation: letting JSONDecodeError or AttributeError escape kills the whole run
+    monkeypatch.setenv(CODEX_AGENTIC_ENV, "1")
+    for out in ("plain prose", "[1, 2]", '{"permission_denials": "nope"}',
+                '{"permission_denials": [7]}'):
+        loop = _agentic_loop(tmp_path, lambda cmd, out=out, **kw: subprocess.CompletedProcess(
+            cmd, 0, stdout=out, stderr=""), kind="codex-cli")
+        with pytest.raises(AgenticError) as ei:
+            loop.propose_and_edit(ctx())
+        shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+        assert str(ei.value) == "agent did not fill in .talos/hypothesis.json"
+
+
+def test_a_denied_call_does_not_fail_an_iteration_that_produced_an_edit(tmp_path):
+    # mutation: raising on any denial fails an agent that was refused one stray Read and then
+    # did its work
+    loop = _agentic_loop(tmp_path, _denied_run(
+        [{"tool_name": "Read", "tool_use_id": "t", "tool_input": {"file_path": "/etc/passwd"}}],
+        edit=True))
+    hypothesis, files = loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert hypothesis["title"] == "T" and files["mod.rs"] == "fn a(){ 1 }"
 
 
 def test_read_back_requires_hypothesis_and_returns_files(tmp_path):

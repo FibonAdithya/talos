@@ -9,7 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from collections import Counter
+from pathlib import Path, PurePath
 
 from talos.executables import argv0
 from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, describe_attempt,
@@ -34,19 +35,37 @@ def codex_agentic_refused(provider_kind: str, mode: str) -> bool:
             and os.environ.get(CODEX_AGENTIC_ENV) != "1")
 
 
+def _rule_root(worktree: PurePath) -> str:
+    """The worktree in the form Claude Code reads as absolute from the filesystem root: `//path`.
+    A single leading slash anchors at the directory of the settings file instead. Windows paths
+    are matched in POSIX form, `C:\\Users\\u` as `/c/Users/u`."""
+    p = worktree.as_posix()
+    if worktree.drive:
+        p = "/" + worktree.drive[0].lower() + p[len(worktree.drive):]
+    return "/" + p
+
+
 def sandbox_settings(worktree: Path) -> dict:
     """Deny is evaluated before allow in Claude Code, so never deny a glob that covers an
     allowed path. Unlisted tools are refused by `dontAsk` mode rather than prompted for.
 
     Reads alone do not let a `dontAsk` agent discover file names under `algorithm/`: Glob and
     Grep are separate tools from Read and need their own allow entries over the same read
-    scope (mirrors Prometheus's `_build_sandbox_settings`)."""
-    read_scope = ["algorithm/**", "CHALLENGE.md", "tacit.md", "AGENTS.md",
-                  ".talos/hypothesis.json"]
+    scope (mirrors Prometheus's `_build_sandbox_settings`).
+
+    Every path is anchored at the worktree's absolute, resolved location. Claude Code resolves a
+    relative rule against the session's current directory, which a `cd` in one Bash call moves
+    for the rest of the session: after `cd algorithm`, `Edit(algorithm/**)` covers no file the
+    agent may edit. It also checks the file a path resolves to, so a rule spelled through a
+    symlink (macOS's temporary directory is one) matches nothing."""
+    root = _rule_root(worktree.resolve())
+    read_scope = [f"{root}/{p}" for p in ("algorithm/**", "CHALLENGE.md", "tacit.md", "AGENTS.md",
+                                           ".talos/hypothesis.json")]
     allow = []
     for tool in ("Read", "Glob", "Grep"):
         allow += [f"{tool}({p})" for p in read_scope]
-    allow += ["Edit(algorithm/**)", "Edit(.talos/hypothesis.json)", "Bash(talos compile:*)"]
+    allow += [f"Edit({root}/algorithm/**)", f"Edit({root}/.talos/hypothesis.json)",
+              "Bash(talos compile:*)"]
     return {"permissions": {
         "allow": allow,
         "deny": ["WebFetch", "WebSearch", "Write(**)", "Bash(curl:*)", "Bash(wget:*)", "Bash(git:*)",
@@ -199,7 +218,8 @@ def _run_agent(cmd: list[str], wt: Path, prompt: str, timeout_s: int, run) -> No
 
 
 def _run_claude(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
-    _run_agent([argv0("claude"), "-p", "--model", model,
+    # the JSON result lists the tool calls the CLI refused; the text format does not mention them
+    _run_agent([argv0("claude"), "-p", "--model", model, "--output-format", "json",
                 "--settings", str(wt / ".claude" / "settings.json"),
                 "--permission-mode", "dontAsk"], wt, prompt, timeout_s, run)
 
@@ -222,6 +242,22 @@ def _copy_transcript(wt: Path, loop) -> None:
         src = wt / ".talos" / name
         if src.exists():
             shutil.copy(src, it_dir / name)
+
+
+def _denial_note(wt: Path) -> str:
+    """What the claude CLI refused, for the error of an iteration that produced nothing: without
+    it a session whose every Edit was denied reads as the agent doing no work. Empty for codex,
+    whose stdout is prose, and for a JSON result cut by _TRANSCRIPT_CAP."""
+    try:
+        result = json.loads((wt / ".talos" / "agent_stdout.txt").read_text(encoding="utf-8"))
+        tools = Counter(str(d["tool_name"]) for d in result["permission_denials"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    if not tools:
+        return ""
+    n = sum(tools.values())
+    return (f"; the CLI refused {n} tool call{'s' if n != 1 else ''} ("
+            + ", ".join(f"{tool} x{count}" for tool, count in sorted(tools.items())) + ")")
 
 
 def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
@@ -250,7 +286,10 @@ def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
             runner(wt, model, prompt, timeout_s, run)
         finally:
             _copy_transcript(wt, loop)
-        hypothesis, files = read_back(wt, ctx)
+        try:
+            hypothesis, files = read_back(wt, ctx)
+        except AgenticError as e:
+            raise AgenticError(f"{e}{_denial_note(wt)}") from None
         loop._event("hypothesis", **hypothesis)
         return hypothesis, files
 

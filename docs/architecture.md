@@ -89,6 +89,17 @@ With `claude-cli`, Talos writes a `.claude/settings.json` that the CLI enforces:
 - `defaultMode` is `dontAsk`, so any tool not on the allow list is refused outright rather
   than prompted for.
 
+Every path in those rules is the worktree's absolute, resolved location, written in Claude
+Code's `//path` form. A relative rule is resolved against the session's current directory, and
+a `cd` in one of the agent's shell commands moves that for the rest of the session: with
+relative rules, `cd algorithm` left `Edit(algorithm/**)` covering no algorithm file, and every
+later edit was denied.
+
+The session runs with `--output-format json`, so the agent's standard output kept in the
+iteration directory is the CLI's JSON result. When an iteration fails because the agent left
+nothing to read back, the error names the tool calls the CLI refused, for example
+`agent did not fill in .talos/hypothesis.json; the CLI refused 3 tool calls (Edit x2, Read x1)`.
+
 The child process gets an environment allowlist rather than your environment: no LLM keys,
 no Modal tokens.
 
