@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 from talos.executables import argv0
@@ -219,7 +220,8 @@ def _run_agent(cmd: list[str], wt: Path, prompt: str, timeout_s: int, run) -> No
 
 
 def _run_claude(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
-    _run_agent([argv0("claude"), "-p", "--model", model,
+    # the JSON result lists the tool calls the CLI refused; the text format does not mention them
+    _run_agent([argv0("claude"), "-p", "--model", model, "--output-format", "json",
                 "--settings", str(wt / SETTINGS_REL),
                 "--permission-mode", "dontAsk"], wt, prompt, timeout_s, run)
 
@@ -242,6 +244,22 @@ def _copy_transcript(wt: Path, loop) -> None:
         src = wt / ".talos" / name
         if src.exists():
             shutil.copy(src, it_dir / name)
+
+
+def _denial_note(wt: Path) -> str:
+    """What the claude CLI refused, for the error of an iteration that produced nothing: without
+    it a session whose every Edit was denied reads as the agent doing no work. Empty for codex,
+    whose stdout is prose, and for a JSON result cut by _TRANSCRIPT_CAP."""
+    try:
+        result = json.loads((wt / ".talos" / "agent_stdout.txt").read_text(encoding="utf-8"))
+        tools = Counter(str(d["tool_name"]) for d in result["permission_denials"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+    if not tools:
+        return ""
+    n = sum(tools.values())
+    return (f"; the CLI refused {n} tool call{'s' if n != 1 else ''} ("
+            + ", ".join(f"{tool} x{count}" for tool, count in sorted(tools.items())) + ")")
 
 
 def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
@@ -270,7 +288,10 @@ def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
             runner(wt, model, prompt, timeout_s, run)
         finally:
             _copy_transcript(wt, loop)
-        hypothesis, files = read_back(wt, ctx)
+        try:
+            hypothesis, files = read_back(wt, ctx)
+        except AgenticError as e:
+            raise AgenticError(f"{e}{_denial_note(wt)}") from None
         loop._event("hypothesis", **hypothesis)
         return hypothesis, files
 

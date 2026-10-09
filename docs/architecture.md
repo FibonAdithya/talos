@@ -205,6 +205,11 @@ with `--settings`; the CLI enforces it:
 - The file is not `.claude/settings.json`: Claude Code also reads that path as project
   settings and ignores their allow list in a directory nobody has trusted.
 
+The session runs with `--output-format json`, so the agent's standard output kept in the
+iteration directory is the CLI's JSON result. When an iteration fails because the agent left
+nothing to read back, the error names the tool calls the CLI refused, for example
+`agent did not fill in .talos/hypothesis.json; the CLI refused 3 tool calls (Edit x2, Read x1)`.
+
 The child process gets an environment allowlist rather than your environment: no LLM keys,
 no Modal tokens.
 
