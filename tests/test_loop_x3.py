@@ -214,6 +214,35 @@ def test_fresh_policy_reference_requests_are_metered_and_plain(tmp_path):
     assert st.validations == [] and st.false_positives == [1, 2]
 
 
+def test_fresh_policy_compile_fix_round_stays_on_the_iterations_window(tmp_path):
+    # Iteration 2's candidate (k=6) does not build; the compile-fix reply makes it k=7, which
+    # is evaluated again. The bench solves in 50 s per nonce, so limits taken from the
+    # baseline's rows on the window are 150 s and limits from the stored baseline are 60 s.
+    # The table has an entry for k=7 on nonce 0 so that a run that re-evaluates on the job's
+    # fixed sets gets as far as the assertions.
+    # mutation: dropping `training=sets, base=bench_base` at the compile-fix re-evaluate scores
+    # k=7 on nonces 0 to 3 against the stored baseline;
+    # passing them positionally there builds that request as a validation request, on the
+    # job's fixed sets with no dead-code check
+    script = [hyp("a"), edit(5), hyp("b"), edit(6, frm=5), edit(7, frm=6)]
+    scores = table_scores({(1, 0): 1000, (5, 0): 1020, (1, 4): 1000, (5, 4): 1010,
+                           (7, 4): 1015, (7, 0): 1015})
+    loop, fp, fb = make(tmp_path, script, scores, iterations=2, confirm_wins=False,
+                        nonce_policy=FreshTraining(4))
+    fb._compile_ok = lambda files: "let k = 6;" not in files["mod.rs"]
+    fb._runtime_ms = 50_000
+    st = loop.run()
+    assert ks(fb.calls) == [1, 5, 1, 5, 6, 7]
+    second = fb.calls[2:]
+    assert [c.training[0].start for c in second] == [4, 4, 4, 4]
+    fixed = fb.calls[5]
+    assert [r.nonce for r in fixed.baseline_training] == [4, 5, 6, 7]
+    assert fixed.timeouts == {"t": 150} and fixed.prior_functions is not None
+    # scored against the baseline on the window: 1015 against 1000, above the best's +1% there
+    assert st.hypotheses[1]["outcome"] == "improved"
+    assert abs(st.hypotheses[1]["mean_rel_delta"] - 0.015) < 1e-12
+
+
 # ── recorded scores ───────────────────────────────────────────────────
 
 def distinct_scores(challenge, files, ns):
@@ -262,6 +291,52 @@ def test_scores_are_not_recorded_unless_asked(tmp_path):
     assert all("Per-instance" not in user for system, user in fp.calls)
 
 
+def test_a_stored_table_is_not_shown_by_a_loop_that_does_not_record(tmp_path):
+    # The state carries last_scores from an earlier run that recorded them; this loop was built
+    # without record_scores.
+    # mutation: removing `self.record_scores and` in `_context` puts the stored table (7781)
+    # in every prompt
+    def row(nonce):
+        return {"track": "t", "nonce": nonce, "ok": True, "quality": 7781, "runtime_ms": 1,
+                "error": None}
+    stored = {"iteration": 9, "accepted": True, "sets": [["t", 0, 1]], "start": [row(0)],
+              "best_before": [row(0)], "candidate": [row(0)]}
+    loop, fp, fb = make(tmp_path, TWO, iterations=2, confirm_wins=False)
+    loop.state.last_scores = stored
+    st = loop.run()
+    assert len(fp.calls) == 4
+    assert all("Per-instance" not in user and "7781" not in user for system, user in fp.calls)
+    assert st.last_scores == stored
+
+
+def failing_at_6(challenge, files, ns):
+    """k=6 solves nothing; any other k scores 1000 + k on every nonce"""
+    k = int(re.search(r"let k = (\d+);", files["mod.rs"]).group(1))
+    return [None if k == 6 else 1000 + k] * ns.count
+
+
+def test_a_candidate_over_the_error_ceiling_is_recorded_on_each_policy(tmp_path):
+    # Iteration 1 makes k=5 the best. Iteration 2's candidate (k=6) fails every solve.
+    # Fixed policy: nonces 0 to 3, the stored baseline's 100. Fresh policy: nonces 4 to 7, the
+    # baseline solved there (1001).
+    # mutation: deleting the `_record_scores` call on the error-ceiling exit leaves iteration 2
+    # without a scores.json (FileNotFoundError here)
+    script = [hyp("a"), edit(5), hyp("b"), edit(6, frm=5), hyp("c"), edit(7, frm=5)]
+    for name, policy, first, base in (("fixed", None, 0, 100),
+                                      ("fresh", FreshTraining(4), 4, 1001)):
+        run_dir = tmp_path / name
+        loop, fp, fb = make(run_dir, script, failing_at_6, confirm_wins=False,
+                            record_scores=True, nonce_policy=policy)
+        st = loop.run()
+        assert st.hypotheses[1]["outcome"] == "failed:runtime" and st.best.iteration != 2
+        saved = json.loads((run_dir / "iterations" / "0002" / "scores.json").read_text())
+        assert saved["accepted"] is False and saved["sets"] == [["t", first, 4]]
+        assert [(r["nonce"], r["quality"]) for r in saved["best_before"]] == [
+            (first + i, 1005) for i in range(4)]
+        assert all(r["ok"] is False for r in saved["candidate"])
+        assert f"t | {first} | {base} | 1005 | failed" in fp.calls[4][1]
+
+
 # ── native scoring ────────────────────────────────────────────────────
 
 # Each option set away from its default. The loop refuses every one on a job whose spec asks
@@ -271,14 +346,16 @@ NON_DEFAULT = {"confirm_wins": {"confirm_wins": False},
                "record_scores": {"record_scores": True}}
 
 
-def native_loop(tmp_path, **loop_kwargs):
+def native_loop(tmp_path, spec_scoring="native", state_scoring=None, **loop_kwargs):
     """A loop on a spec that asks for native scoring, as it is constructed before calibrate()
-    has run: the spec field is the only thing that says native at that point."""
+    has run: the spec field is the only thing that says native at that point. `state_scoring`
+    is what calibrate() would have left in the state."""
     store = JobStore(tmp_path)
-    sp = spec(scoring="native")
+    sp = spec(scoring=spec_scoring)
     store.write_spec(sp)
     st = JobState.fresh(Spend(started_at=0.0))
     st.baseline = baseline()
+    st.scoring = state_scoring
     return Loop(sp, st, store, FakeProvider([]), FakeBench(quality_from_files),
                 template_rs="pub fn solve_challenge(", clock=lambda: 0.0, sleep=lambda s: None,
                 **loop_kwargs)
@@ -298,3 +375,37 @@ def test_native_job_with_default_options_is_accepted(tmp_path):
     # mutation: refusing every native job raises here
     loop = native_loop(tmp_path)
     assert loop.spec.scoring == "native" and loop.confirm_wins is True
+
+
+def test_a_state_that_says_native_refuses_each_x3_option(tmp_path):
+    # The spec says metered and the state says native. Such a state scores natively
+    # (Loop._scoring reads the state), so the options are refused there as well.
+    # mutation: checking the spec field alone constructs these loops without an error
+    for name, kwargs in NON_DEFAULT.items():
+        with pytest.raises(ValueError) as refused:
+            native_loop(tmp_path / name, spec_scoring="metered", state_scoring="native",
+                        **kwargs)
+        message = str(refused.value)
+        assert [option for option in NON_DEFAULT if option in message] == [name]
+        assert "metered path only" in message
+    # with the options at their defaults the same state is accepted
+    loop = native_loop(tmp_path / "defaults", spec_scoring="metered", state_scoring="native")
+    assert loop.state.scoring == "native" and loop.record_scores is False
+
+
+class FalsyFresh(FreshTraining):
+    """A policy object that is false in a boolean test, as one with `__len__` or `__bool__` is."""
+
+    def __bool__(self):
+        return False
+
+
+def test_a_policy_object_that_is_falsy_is_still_the_policy(tmp_path):
+    # mutation: `nonce_policy or FixedTraining()` replaces this policy with the fixed one, so
+    # iteration 2 scores nonces 0 to 3 again
+    policy = FalsyFresh(4)
+    loop, fp, fb = make(tmp_path, TWO, table_scores(SCORES_4), iterations=2, confirm_wins=False,
+                        nonce_policy=policy)
+    assert loop.policy is policy
+    loop.run()
+    assert [c.training[0].start for c in fb.calls] == [0, 0, 4, 4, 4]

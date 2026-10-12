@@ -28,6 +28,10 @@ class FreshTraining:
     count: int
     fresh = True
 
+    def __post_init__(self) -> None:
+        if self.count < 1:
+            raise ValueError(f"a fresh window needs at least 1 nonce per track, got {self.count}")
+
     def training(self, spec, iteration: int) -> list[NonceSet]:
         if iteration < 1:
             raise ValueError(f"iterations count from 1, got {iteration}")

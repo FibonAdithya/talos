@@ -97,14 +97,15 @@ class Loop:
                  nonce_policy=None, record_scores: bool = False):
         # The options below are the ones the X3 experiment drives the loop with. Native scoring
         # (metered validation of a would-be best, and its resume) does not know them, so a job
-        # whose spec asks for native scoring is refused rather than run half-applied.
+        # whose spec asks for native scoring is refused rather than run half-applied. So is one
+        # whose state says native: _scoring() reads the state, whatever the spec says.
         x3_set = [name for name, is_set in (("confirm_wins", not confirm_wins),
                                             ("nonce_policy", nonce_policy is not None),
                                             ("record_scores", record_scores))
                   if is_set]
-        if spec.scoring == "native" and x3_set:
+        if (spec.scoring == "native" or state.scoring == "native") and x3_set:
             raise ValueError(f"{', '.join(x3_set)}: the X3 options run on the metered path only, "
-                             f"and this job's spec asks for native scoring")
+                             f"and this job's spec or state asks for native scoring")
         self.spec, self.state, self.store = spec, state, store
         self.provider, self.bench = provider, bench
         self.template_rs = template_rs
@@ -116,7 +117,7 @@ class Loop:
         # so the job runs until its budget does.
         self.confirm_wins = confirm_wins
         # Which training nonces an iteration scores. None: the job's own sets, every iteration.
-        self.policy = nonce_policy or FixedTraining()
+        self.policy = FixedTraining() if nonce_policy is None else nonce_policy
         # True: each scored iteration writes its per-instance results to scores.json and to
         # state.last_scores, and the next prompt shows them as a table.
         self.record_scores = record_scores

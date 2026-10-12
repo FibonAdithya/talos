@@ -31,3 +31,11 @@ def test_fresh_rejects_iteration_zero():
     # mutation: without the check, iteration 0 gets a window at a negative nonce
     with pytest.raises(ValueError):
         FreshTraining(8).training(spec(), 0)
+
+
+def test_fresh_rejects_a_count_below_one():
+    # mutation: without the check, FreshTraining(0) gives every iteration an empty window
+    for count in (0, -1):
+        with pytest.raises(ValueError):
+            FreshTraining(count)
+    assert FreshTraining(1).training(spec(), 3) == [NonceSet("t", HASH, 2, 1)]
