@@ -20,7 +20,7 @@ from talos.diagnostics import dead_new_functions, defined_functions, first_error
 from talos.inside import NONCE_TIMEOUT_S
 from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
                            dead_code_fix_prompts, distill_prompts, edit_prompts,
-                           edit_repair_prompts, hypothesis_prompts,
+                           edit_repair_prompts, format_score_table, hypothesis_prompts,
                            parse_distillation, parse_hypothesis)
 from talos.policy import FixedTraining
 from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
@@ -94,12 +94,13 @@ class Loop:
                  template_rs: str, clock=time.time, sleep=time.sleep,
                  on_event: Callable[[str, dict], None] | None = None,
                  thresholds: Thresholds | None = None, confirm_wins: bool = True,
-                 nonce_policy=None):
+                 nonce_policy=None, record_scores: bool = False):
         # The options below are the ones the X3 experiment drives the loop with. Native scoring
         # (metered validation of a would-be best, and its resume) does not know them, so a job
         # whose spec asks for native scoring is refused rather than run half-applied.
         x3_set = [name for name, is_set in (("confirm_wins", not confirm_wins),
-                                            ("nonce_policy", nonce_policy is not None))
+                                            ("nonce_policy", nonce_policy is not None),
+                                            ("record_scores", record_scores))
                   if is_set]
         if spec.scoring == "native" and x3_set:
             raise ValueError(f"{', '.join(x3_set)}: the X3 options run on the metered path only, "
@@ -116,6 +117,9 @@ class Loop:
         self.confirm_wins = confirm_wins
         # Which training nonces an iteration scores. None: the job's own sets, every iteration.
         self.policy = nonce_policy or FixedTraining()
+        # True: each scored iteration writes its per-instance results to scores.json and to
+        # state.last_scores, and the next prompt shows them as a table.
+        self.record_scores = record_scores
         self._stop = False
         # The iteration an event belongs to. state.iteration only catches up when the iteration
         # finishes, so events raised mid-iteration would otherwise carry the previous number.
@@ -248,6 +252,16 @@ class Loop:
         base = self._plain_evaluate(self.state.baseline.files, sets)
         best = self._plain_evaluate(self.state.best.files, sets) if self.state.best else base
         return base, best
+
+    def _record_scores(self, n: int, sets, start, best_before, candidate, accepted: bool) -> None:
+        scores = {"iteration": n, "accepted": accepted,
+                  "sets": [[s.track, s.start, s.count] for s in sets],  # never the rand_hash
+                  "start": [r.to_dict() for r in start],
+                  "best_before": [r.to_dict() for r in best_before],
+                  "candidate": [r.to_dict() for r in candidate]}
+        (self.store.iteration_dir(n) / "scores.json").write_text(
+            json.dumps(scores), encoding="utf-8", newline="\n")
+        self.state.last_scores = scores
 
     # ── baseline ──────────────────────────────────────────────────────
 
@@ -418,7 +432,10 @@ class Loop:
                              guard_tracks=([t for t in self.spec.tracks if t != self.spec.track]
                                            if self.spec.track else []),
                              hyperparameters=self.spec.hyperparameters,
-                             scoring=self._scoring())
+                             scoring=self._scoring(),
+                             score_table=(format_score_table(self.state.last_scores)
+                                          if self.record_scores and self.state.last_scores
+                                          else ""))
 
     # ── single-shot propose + edit ────────────────────────────────────
 
@@ -543,6 +560,11 @@ class Loop:
             record.update(outcome="failed:score", error=str(e))
             self._finish_iteration(n, record, improved=False)
             return
+        # The best's results on the instances this iteration scored, before any replacement.
+        # Only read when scores are recorded.
+        best_before = (None if not self.record_scores
+                       else best_tr if best_tr is not None
+                       else select(self._current_training(), sets))
         cand = Candidate(iteration=n, files=files, artifact_id=res.compile.artifact_id,
                          training=results, delta=delta.to_dict(), hypothesis=hypothesis)
         worst = min(delta.tracks, key=lambda t: t.rel_delta)
@@ -558,6 +580,8 @@ class Loop:
                     runtime_ratio=record.get("runtime_ratio"))
         if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a failure
             record.update(outcome="failed:runtime", error_rate=delta.error_rate)
+            if self.record_scores:
+                self._record_scores(n, sets, base_tr, best_before, results, accepted=False)
             self._finish_iteration(n, record, improved=False)
             return
         # spec §7.7: a candidate that beats the baseline on training becomes the best, whether or
@@ -571,6 +595,10 @@ class Loop:
         if improved and self._scoring() == "native":
             self._validate_and_finish(n, record, cand, base_tr)
             return
+        # After the native branch: record_scores is refused on a native job, and a record
+        # written before a validation would say "accepted" for a candidate it can still demote.
+        if self.record_scores:
+            self._record_scores(n, sets, base_tr, best_before, results, accepted=improved)
         if improved:
             self.state.best = cand
             self._write_files(self.store.run_dir / "best", cand.files)

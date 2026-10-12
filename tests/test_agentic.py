@@ -435,3 +435,16 @@ def test_a_native_job_tells_its_agent_to_compile_natively():
     assert "`talos compile --challenge knapsack --dir algorithm`" in metered
     # mutation: the flag left out puts a native job's agent on the 287 s metered build
     assert "`talos compile --challenge knapsack --dir algorithm --native`" in native
+
+
+def test_claude_md_carries_the_score_table_only_when_there_is_one():
+    # mutation: leaving the table out of the CLAUDE.md template drops TABLE-MARK-7781
+    from talos.agentic import claude_md
+    from talos.prompts import PromptContext
+
+    def ctx(table):
+        return PromptContext(challenge="knapsack", template_rs="t", direction="d", tacit="",
+                             files={"mod.rs": "x"}, baseline_name="b", best_delta=0.0,
+                             score_table=table)
+    assert "TABLE-MARK-7781" in claude_md(ctx("TABLE-MARK-7781"))
+    assert "Per-instance" not in claude_md(ctx(""))

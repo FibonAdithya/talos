@@ -80,13 +80,14 @@ def claude_md(ctx: PromptContext) -> str:
     hp = (hp + "\n\n") if hp else ""
     compile_cmd = (f"talos compile --challenge {ctx.challenge} --dir algorithm"
                    + (" --native" if ctx.scoring == "native" else ""))
+    table = (ctx.score_table + "\n\n") if ctx.score_table else ""
     return f"""# Talos agentic iteration: {ctx.challenge}
 
 You are improving a Rust solver for the TIG challenge "{ctx.challenge}". Beat the mainnet
 baseline "{ctx.baseline_name}" on TIG's benchmark (higher verifier quality per nonce under a
 fixed fuel budget {scope}). Your current best is {ctx.best_delta:+.3%} vs baseline.
 
-{focus}{hp}Rules:
+{table}{focus}{hp}Rules:
 - Edit ONLY files under `algorithm/`. Do not create new files. Do not touch anything else.
 - You may run `{compile_cmd}` to check the build.
   Nothing else may be executed. There is no network.

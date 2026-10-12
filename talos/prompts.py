@@ -48,6 +48,7 @@ class PromptContext:
     guard_tracks: list[str] = field(default_factory=list)
     hyperparameters: dict[str, dict | None] | None = None
     scoring: str = "metered"
+    score_table: str = ""
 
 
 def _files_block(files: dict[str, str]) -> str:
@@ -123,6 +124,26 @@ def recall_block(ctx: PromptContext) -> str:
     return "\n\n".join(parts)
 
 
+def format_score_table(scores: dict) -> str:
+    """Per-instance quality from the most recent scored iteration: the baseline, the current
+    best after that iteration's decision, and that iteration's candidate. A nonce here is a
+    label; the rand_hash that turns one into an instance is not part of `scores`."""
+    def quality(row: dict | None) -> str:
+        if row is None:
+            return "-"
+        return str(row["quality"]) if row["ok"] and row["quality"] is not None else "failed"
+
+    best = scores["candidate"] if scores["accepted"] else scores["best_before"]
+    columns = [{(r["track"], r["nonce"]): r for r in rows}
+               for rows in (scores["start"], best, scores["candidate"])]
+    lines = [f"Per-instance verifier quality at iteration {scores['iteration']} "
+             f"(higher is better; \"failed\" means no valid solution):",
+             "track | nonce | baseline | current best | last candidate"]
+    for key in sorted(columns[0]):
+        lines.append(" | ".join([key[0], str(key[1])] + [quality(c.get(key)) for c in columns]))
+    return "\n".join(lines)
+
+
 def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
     scope = f"on track \"{ctx.track}\"" if ctx.track else "across every active track"
     focus = (focus_sentence(ctx) + "\n\n") if ctx.track else ""
@@ -150,6 +171,8 @@ def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
     hp = hyperparameters_block(ctx)
     if hp:
         parts.append(hp)
+    if ctx.score_table:
+        parts.append(ctx.score_table)
     parts.append("Current algorithm source:\n" + _files_block(ctx.files))
     return system, "\n\n".join(parts)
 

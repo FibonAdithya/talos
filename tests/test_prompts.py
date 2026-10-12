@@ -225,3 +225,23 @@ def test_a_focused_prompt_shows_only_the_focus_tracks_hyperparameters():
     # mutation: listing every track spends the focused prompt on tracks it must not tune for
     assert 'track t: {"x":1}' in user and '{"x":2}' not in user
     assert "guard tracks run with their own values" in user
+
+
+def test_score_table_lists_each_instance_with_start_best_and_candidate():
+    from talos.prompts import format_score_table
+
+    def row(track, nonce, quality, ok=True):
+        return {"track": track, "nonce": nonce, "ok": ok, "quality": quality,
+                "runtime_ms": 1, "error": None if ok else "invalid"}
+    scores = {"iteration": 4, "accepted": False, "sets": [["t", 8, 2]],
+              "start": [row("t", 8, 1001), row("t", 9, 1002)],
+              "best_before": [row("t", 8, 2001), row("t", 9, 2002)],
+              "candidate": [row("t", 8, 3001), row("t", 9, None, ok=False)]}
+    text = format_score_table(scores)
+    assert "iteration 4" in text
+    assert "t | 8 | 1001 | 2001 | 3001" in text
+    # mutation: printing None for a failed solve hides that it failed
+    assert "t | 9 | 1002 | 2002 | failed" in text
+    # mutation: showing best_before after an accepted candidate reports a best that was replaced
+    accepted = format_score_table({**scores, "accepted": True})
+    assert "t | 8 | 1001 | 3001 | 3001" in accepted and "2001" not in accepted

@@ -1,4 +1,5 @@
 """The options X3 uses: no confirmation step, a nonce policy, a recorded score table."""
+import json
 import re
 
 import pytest
@@ -10,7 +11,7 @@ from talos.policy import FreshTraining
 from talos.providers.fake import FakeProvider
 from talos.state import JobState, JobStore
 
-from tests.test_loop import HO, baseline, edit, hyp, quality_from_files, spec
+from tests.test_loop import HASH, HO, baseline, edit, hyp, quality_from_files, spec
 from tests.test_loop import make as base_make
 
 THREE = [hyp("a"), edit(5), hyp("b"), edit(6, frm=5), hyp("c"), edit(7, frm=6)]
@@ -213,12 +214,61 @@ def test_fresh_policy_reference_requests_are_metered_and_plain(tmp_path):
     assert st.validations == [] and st.false_positives == [1, 2]
 
 
+# ── recorded scores ───────────────────────────────────────────────────
+
+def distinct_scores(challenge, files, ns):
+    """k=5 on nonce 2 scores 5027: values that appear nowhere else in a prompt"""
+    k = int(re.search(r"let k = (\d+);", files["mod.rs"]).group(1))
+    return [1000 * k + 7 * n + 13 for n in ns.nonces()]
+
+
+def test_recorded_scores_reach_the_next_prompt_and_older_rows_do_not(tmp_path):
+    loop, fp, fb = make(tmp_path, THREE, distinct_scores, confirm_wins=False, record_scores=True)
+    loop.run()
+    hypothesis_prompts = [user for system, user in fp.calls[0::2]]
+    # iteration 1 has nothing scored before it
+    assert "Per-instance" not in hypothesis_prompts[0]
+    # iteration 2 sees iteration 1: the stored baseline (100 on every nonce, from
+    # tests.test_loop.baseline), and the candidate, which was accepted and so is also the best
+    assert "t | 0 | 100 | 5013 | 5013" in hypothesis_prompts[1]
+    assert "t | 3 | 100 | 5034 | 5034" in hypothesis_prompts[1]
+    # iteration 3 sees iteration 2 only
+    # mutation: accumulating tables instead of replacing keeps 5013 in the third prompt
+    assert "t | 0 | 100 | 6013 | 6013" in hypothesis_prompts[2]
+    assert "5013" not in hypothesis_prompts[2]
+    # mutation: recording NonceSet objects whole would put the rand_hash in scores.json
+    saved = (tmp_path / "iterations" / "0002" / "scores.json").read_text()
+    assert HASH not in saved and all(HASH not in p for p in hypothesis_prompts)
+    assert json.loads(saved)["sets"] == [["t", 0, 4]]
+
+
+def test_a_rejected_candidate_is_shown_beside_the_best_it_failed_to_beat(tmp_path):
+    # mutation: recording a rejected candidate as accepted shows it in the best's column too
+    script = [hyp("a"), edit(5), hyp("b"), edit(3, frm=5), hyp("c"), edit(7, frm=5)]
+    loop, fp, fb = make(tmp_path, script, distinct_scores, confirm_wins=False, record_scores=True)
+    st = loop.run()
+    assert st.hypotheses[1]["outcome"] == "failed:score"
+    third = fp.calls[4][1]
+    assert "t | 0 | 100 | 5013 | 3013" in third
+    assert json.loads((tmp_path / "iterations" / "0002" / "scores.json").read_text())["accepted"] is False
+
+
+def test_scores_are_not_recorded_unless_asked(tmp_path):
+    # mutation: recording by default adds a file and a prompt block to every existing job
+    loop, fp, fb = make(tmp_path, THREE, distinct_scores, confirm_wins=False)
+    st = loop.run()
+    assert st.last_scores is None
+    assert not (tmp_path / "iterations" / "0001" / "scores.json").exists()
+    assert all("Per-instance" not in user for system, user in fp.calls)
+
+
 # ── native scoring ────────────────────────────────────────────────────
 
 # Each option set away from its default. The loop refuses every one on a job whose spec asks
 # for native scoring: the native path (metered validation of a new best) does not know them.
 NON_DEFAULT = {"confirm_wins": {"confirm_wins": False},
-               "nonce_policy": {"nonce_policy": FreshTraining(4)}}
+               "nonce_policy": {"nonce_policy": FreshTraining(4)},
+               "record_scores": {"record_scores": True}}
 
 
 def native_loop(tmp_path, **loop_kwargs):

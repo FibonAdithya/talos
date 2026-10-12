@@ -149,6 +149,9 @@ class JobState:
     fuel_budgets_us: dict[str, int] | None = None  # track -> native solve budget, microseconds
     # One entry per metered validation of a would-be best: iteration, outcome, reason.
     validations: list[dict] = field(default_factory=list)
+    # The per-instance results of the most recent scored iteration, when the loop was asked to
+    # record them: what the next prompt's score table is built from. Never holds the rand_hash.
+    last_scores: dict | None = None
 
     @classmethod
     def fresh(cls, spend: Spend) -> "JobState":
@@ -165,7 +168,8 @@ class JobState:
                 "stop_reason": self.stop_reason, "tacit": self.tacit,
                 "strategy_counts": self.strategy_counts, "pending_job": self.pending_job,
                 "hardware": self.hardware, "scoring": self.scoring,
-                "fuel_budgets_us": self.fuel_budgets_us, "validations": self.validations}
+                "fuel_budgets_us": self.fuel_budgets_us, "validations": self.validations,
+                "last_scores": self.last_scores}
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobState":
@@ -180,7 +184,8 @@ class JobState:
                    pending_job=d.get("pending_job"),
                    hardware=d.get("hardware", d.get("gpu")),
                    scoring=d.get("scoring"), fuel_budgets_us=d.get("fuel_budgets_us"),
-                   validations=d.get("validations", []))
+                   validations=d.get("validations", []),
+                   last_scores=d.get("last_scores"))
 
 
 def _atomic_write(path: Path, text: str) -> None:

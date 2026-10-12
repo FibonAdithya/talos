@@ -175,3 +175,16 @@ def test_job_spec_scoring_defaults_to_metered_for_an_old_job_json():
     d.pop("scoring")
     # mutation: a required field would make every job.json written before this unreadable
     assert JobSpec.from_dict(d).scoring == "metered"
+
+
+def test_last_scores_round_trips_and_defaults_to_none():
+    # mutation: leaving last_scores out of to_dict (or out of from_dict) loads it as None
+    from talos.budget import Spend
+    from talos.state import JobState
+    st = JobState.fresh(Spend(started_at=0.0))
+    assert st.last_scores is None
+    st.last_scores = {"iteration": 2, "accepted": True}
+    assert JobState.from_dict(st.to_dict()).last_scores == {"iteration": 2, "accepted": True}
+    old = st.to_dict()
+    old.pop("last_scores")  # a state.json written before this field existed
+    assert JobState.from_dict(old).last_scores is None
