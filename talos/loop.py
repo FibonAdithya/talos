@@ -92,7 +92,14 @@ class Loop:
     def __init__(self, spec: JobSpec, state: JobState, store: JobStore, provider, bench,
                  template_rs: str, clock=time.time, sleep=time.sleep,
                  on_event: Callable[[str, dict], None] | None = None,
-                 thresholds: Thresholds | None = None):
+                 thresholds: Thresholds | None = None, confirm_wins: bool = True):
+        # The options below are the ones the X3 experiment drives the loop with. Native scoring
+        # (metered validation of a would-be best, and its resume) does not know them, so a job
+        # whose spec asks for native scoring is refused rather than run half-applied.
+        x3_set = [name for name, is_set in (("confirm_wins", not confirm_wins),) if is_set]
+        if spec.scoring == "native" and x3_set:
+            raise ValueError(f"{', '.join(x3_set)}: the X3 options run on the metered path only, "
+                             f"and this job's spec asks for native scoring")
         self.spec, self.state, self.store = spec, state, store
         self.provider, self.bench = provider, bench
         self.template_rs = template_rs
@@ -100,6 +107,9 @@ class Loop:
         self.on_event = on_event or (lambda kind, data: None)
         self.t = thresholds or Thresholds()
         self.rule = CHALLENGES[spec.challenge].beat
+        # False: a training win is never confirmed on the held-out sets and never ends the job,
+        # so the job runs until its budget does.
+        self.confirm_wins = confirm_wins
         self._stop = False
         # The iteration an event belongs to. state.iteration only catches up when the iteration
         # finishes, so events raised mid-iteration would otherwise carry the previous number.
@@ -156,6 +166,8 @@ class Loop:
     def _request(self, files: dict[str, str], baseline_training, scoring: str = "metered",
                  validation: bool = False) -> EvalRequest:
         training, holdout = self._focus()
+        if not self.confirm_wins:
+            holdout = []  # nothing is confirmed, so the bench is given nothing held out to score
         base = select(baseline_training, training) if baseline_training is not None else None
         prior = ({name: defined_functions(text) for name, text in self._current_files().items()}
                  if not validation else None)  # the native build already passed the check
@@ -503,7 +515,10 @@ class Loop:
         # not the held-out set goes on to confirm it. Confirming a candidate that is not best would
         # report "won" with different code in state.best.
         wins = beats(base_tr, results, self.rule)
-        improved = delta.mean_rel_delta > self._best_delta() or wins
+        # A win replaces the best because it is about to be confirmed. With confirmation off it
+        # ends nothing, and must not replace a best that scored higher. The win margin is 0, so
+        # without this term any candidate above the baseline would replace the best.
+        improved = delta.mean_rel_delta > self._best_delta() or (wins and self.confirm_wins)
         if improved and self._scoring() == "native":
             self._validate_and_finish(n, record, cand, base_tr)
             return
@@ -516,7 +531,7 @@ class Loop:
         # The record and the iteration bump are persisted BEFORE the confirmation is read out of
         # the result, so a kill between the two never loses the iteration.
         self._finish_iteration(n, record, improved=improved)
-        if wins:
+        if wins and self.confirm_wins:
             self._confirm(cand, res.holdout, res.holdout_reason)
 
     def _dead_code(self, res: EvalResult) -> list[str]:
