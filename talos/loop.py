@@ -22,6 +22,7 @@ from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
                            dead_code_fix_prompts, distill_prompts, edit_prompts,
                            edit_repair_prompts, hypothesis_prompts,
                            parse_distillation, parse_hypothesis)
+from talos.policy import FixedTraining
 from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
                              ProviderTimeout)
 from talos.scoring import (ScoringError, beats, beats_focused, bundle_delta, focus_sets,
@@ -92,11 +93,14 @@ class Loop:
     def __init__(self, spec: JobSpec, state: JobState, store: JobStore, provider, bench,
                  template_rs: str, clock=time.time, sleep=time.sleep,
                  on_event: Callable[[str, dict], None] | None = None,
-                 thresholds: Thresholds | None = None, confirm_wins: bool = True):
+                 thresholds: Thresholds | None = None, confirm_wins: bool = True,
+                 nonce_policy=None):
         # The options below are the ones the X3 experiment drives the loop with. Native scoring
         # (metered validation of a would-be best, and its resume) does not know them, so a job
         # whose spec asks for native scoring is refused rather than run half-applied.
-        x3_set = [name for name, is_set in (("confirm_wins", not confirm_wins),) if is_set]
+        x3_set = [name for name, is_set in (("confirm_wins", not confirm_wins),
+                                            ("nonce_policy", nonce_policy is not None))
+                  if is_set]
         if spec.scoring == "native" and x3_set:
             raise ValueError(f"{', '.join(x3_set)}: the X3 options run on the metered path only, "
                              f"and this job's spec asks for native scoring")
@@ -110,6 +114,8 @@ class Loop:
         # False: a training win is never confirmed on the held-out sets and never ends the job,
         # so the job runs until its budget does.
         self.confirm_wins = confirm_wins
+        # Which training nonces an iteration scores. None: the job's own sets, every iteration.
+        self.policy = nonce_policy or FixedTraining()
         self._stop = False
         # The iteration an event belongs to. state.iteration only catches up when the iteration
         # finishes, so events raised mid-iteration would otherwise carry the previous number.
@@ -164,8 +170,12 @@ class Loop:
         return focus_sets(self.spec.track, self.spec.training, self.spec.holdout)
 
     def _request(self, files: dict[str, str], baseline_training, scoring: str = "metered",
-                 validation: bool = False) -> EvalRequest:
-        training, holdout = self._focus()
+                 validation: bool = False, *, training=None) -> EvalRequest:
+        """`training` is the iteration's nonce sets under a nonce policy; None is the job's own.
+        It is keyword-only: the third and fourth positions are the scoring mode and the
+        validation flag."""
+        focus_training, holdout = self._focus()
+        training = focus_training if training is None else training
         if not self.confirm_wins:
             holdout = []  # nothing is confirmed, so the bench is given nothing held out to score
         base = select(baseline_training, training) if baseline_training is not None else None
@@ -197,19 +207,47 @@ class Loop:
         return "native" if self.state.scoring == "native" else "metered"
 
     def _bench_evaluate(self, files: dict[str, str], scoring: str = "metered",
-                        validation: bool = False) -> EvalResult:
+                        validation: bool = False, *, training=None, base=None) -> EvalResult:
         """pending_job carries the files BEFORE the call: a C3 job outlives this process, and a
-        resume must be able to rebuild the exact request and reattach to it."""
+        resume must be able to rebuild the exact request and reattach to it. `training` and
+        `base` are the iteration's nonce sets and the baseline's results on them; both default
+        to the job's own, and both are keyword-only (see _request)."""
         self._check_budget()
         self.state.pending_job = {**(self.state.pending_job or {}), "files": files}
         self._save()
         mark = self.bench.cost_mark()
+        base = self.state.baseline.training if base is None else base
         try:
-            return self.bench.evaluate(self._request(files, self.state.baseline.training,
-                                                     scoring, validation))
+            return self.bench.evaluate(self._request(files, base, scoring, validation,
+                                                     training=training))
         finally:
             self.state.spend.compute_usd += self.bench.cost_usd_since(mark)
             self._save()
+
+    def _plain_evaluate(self, files: dict[str, str], sets) -> list:
+        """Score `files` on `sets` and nothing else, on the metered path: no held-out set, no
+        comparison, no dead-code check, no per-track time limit. Used for the baseline and the
+        best under a fresh nonce policy."""
+        self._check_budget()
+        mark = self.bench.cost_mark()
+        try:
+            res = self.bench.evaluate(EvalRequest(
+                challenge=self.spec.challenge, files=files, training=sets, holdout=[],
+                fuel=self.spec.fuel, baseline_training=None, rule=self.rule,
+                hyperparameters=self.spec.hyperparameters))
+        finally:
+            self.state.spend.compute_usd += self.bench.cost_usd_since(mark)
+            self._save()
+        if not res.compile.ok:
+            raise BenchUnavailable("an algorithm that built earlier in this job no longer builds")
+        return res.training
+
+    def _reference(self, sets) -> tuple[list, list]:
+        """(baseline results, current best's results) on `sets`. While the best is still the
+        baseline it is solved once."""
+        base = self._plain_evaluate(self.state.baseline.files, sets)
+        best = self._plain_evaluate(self.state.best.files, sets) if self.state.best else base
+        return base, best
 
     # ── baseline ──────────────────────────────────────────────────────
 
@@ -446,7 +484,15 @@ class Loop:
         """Everything after the LLM has produced files: compile-fix rounds, scoring, confirmation.
         Entered from iterate() and from a resume with a pending job."""
         it_dir = self.store.iteration_dir(n)
-        res = self._bench_evaluate(files, self._scoring())
+        sets = self.policy.training(self.spec, n)
+        if self.policy.fresh:
+            base_tr, best_tr = self._reference(sets)
+        else:
+            base_tr, best_tr = select(self.state.baseline.training, sets), None
+        # Only a fresh policy hands the bench its own baseline rows. The fixed policy passes
+        # none, so the request is built from the job's stored baseline exactly as before.
+        bench_base = base_tr if self.policy.fresh else None
+        res = self._bench_evaluate(files, self._scoring(), training=sets, base=bench_base)
         for _ in range(self.t.compile_fix_rounds):
             dead = self._dead_code(res)
             if res.compile.ok and not dead:
@@ -473,7 +519,7 @@ class Loop:
             if fixed.applied == 0:
                 break  # byte-identical files; re-evaluating them would repeat the same error
             files = fixed.files
-            res = self._bench_evaluate(files, self._scoring())
+            res = self._bench_evaluate(files, self._scoring(), training=sets, base=bench_base)
         if not res.compile.ok:
             record.update(outcome="failed:compile")
             self._finish_iteration(n, record, improved=False)
@@ -487,9 +533,12 @@ class Loop:
             (it_dir / name).parent.mkdir(parents=True, exist_ok=True)
             (it_dir / name).write_text(text, encoding="utf-8", newline="\n")
         results = res.training
-        base_tr = select(self.state.baseline.training, self._focus()[0])
         try:
             delta = bundle_delta(base_tr, results)
+            # Under a fresh policy the best's recorded delta is on other instances. Its delta
+            # on this iteration's instances is the one the candidate has to exceed.
+            best_delta = (self._best_delta() if best_tr is None or self.state.best is None
+                          else bundle_delta(base_tr, best_tr).mean_rel_delta)
         except ScoringError as e:
             record.update(outcome="failed:score", error=str(e))
             self._finish_iteration(n, record, improved=False)
@@ -518,7 +567,7 @@ class Loop:
         # A win replaces the best because it is about to be confirmed. With confirmation off it
         # ends nothing, and must not replace a best that scored higher. The win margin is 0, so
         # without this term any candidate above the baseline would replace the best.
-        improved = delta.mean_rel_delta > self._best_delta() or (wins and self.confirm_wins)
+        improved = delta.mean_rel_delta > best_delta or (wins and self.confirm_wins)
         if improved and self._scoring() == "native":
             self._validate_and_finish(n, record, cand, base_tr)
             return
