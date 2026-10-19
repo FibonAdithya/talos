@@ -277,6 +277,11 @@ class Loop:
         self._save()
         self._event("calibrated", budgets_us=self.state.fuel_budgets_us)
 
+    def _baseline_output(self, res: EvalResult) -> dict:
+        """The tail of a baseline build's compiler output for an event. Empty for a template
+        start: the output quotes the baseline's source, which must not reach the timeline."""
+        return {} if self.spec.start == "template" else {"output": res.compile.output[-2000:]}
+
     def _measure_calibration(self) -> dict | None:
         """The baseline on the training nonces: metered only if its stored rows carry no fuel
         (every baseline cached before fuel was recorded), then native with no budget. Both go
@@ -309,7 +314,7 @@ class Loop:
                 self._save()
                 self._event("calibration_fallback",
                             reason="the baseline failed the metered build",
-                            output=res.compile.output[-2000:])
+                            **self._baseline_output(res))
                 return None
             metered = res.training
             # Saved before the native call, so a kill during it resumes at the native call.
@@ -322,7 +327,7 @@ class Loop:
         self._save()
         if not res.compile.ok:
             self._event("calibration_fallback", reason="the baseline failed the native build",
-                        output=res.compile.output[-2000:])
+                        **self._baseline_output(res))
             return None
         ratios = calibration.track_ratios(metered, res.training)
         return calibration.new_record(ratios) if ratios else None

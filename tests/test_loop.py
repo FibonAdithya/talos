@@ -1873,3 +1873,21 @@ def test_anneal_recall_names_the_parent_node_not_an_earlier_best(tmp_path):
     # a failed:edit record carries no title: the edit failed before the hypothesis was stored
     assert "[failed:edit, against the baseline]" in proposals[2]
     assert "earlier best" not in proposals[2]
+
+
+@pytest.mark.parametrize("failing", ["metered", "native"])
+def test_a_template_start_calibration_failure_keeps_baseline_output_out_of_the_timeline(
+        tmp_path, failing):
+    # mutation: writing res.compile.output into either calibration_fallback event of a template
+    # start; the baseline's compiler output quotes its source
+    fb = (FakeBench(quality_from_files, metered_compile_ok=lambda files: False)
+          if failing == "metered" else
+          FakeBench(quality_from_files, compile_ok=lambda files: False,
+                    metered_compile_ok=lambda files: True))
+    loop, fp, _, store = native(tmp_path, [], bench=fb, spec_kw={"start": "template"})
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    loop.calibrate(tmp_path / "cal", "hw")
+    fallback = events(store, "calibration_fallback")
+    assert any(f"{failing} build" in e["reason"] for e in fallback)
+    assert all("output" not in e for e in fallback)
+    assert "E0308" not in (store.run_dir / "timeline.jsonl").read_text()
