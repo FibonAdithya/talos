@@ -73,7 +73,8 @@ progress.
    own `gpu=[...]` list, would score candidates on hardware the baseline never
    ran on, which is why `modal_app/talos_bench.py::register` pins each function
    to one GPU.
-   Both sides also run with identical hyperparameters: the per-track map is
+   Both sides also run with identical hyperparameters, except in a `--start template`
+   job (the third asymmetry below): the per-track map is
    frozen into `job.json` (`talos/state.py::JobSpec`) together with the
    algorithm it belongs to, every request takes it from there
    (`talos/loop.py::Loop._request`, `talos/baseline.py::resolve_baseline`), and
@@ -83,10 +84,10 @@ progress.
    the other tracks' training nonces against the cached baseline training results
    for those same nonces, and the confirmation rule is
    `talos/scoring.py::beats_focused`.
-   The one deliberate asymmetry is the per-nonce timeout: the baseline runs under the
-   flat `talos/inside.py::NONCE_TIMEOUT_S`, a candidate under the tighter per-track cap
-   from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a `timeout` error,
-   never a quality, so it can only fail a candidate, never flatter one.
+   There are three deliberate asymmetries. The first is the per-nonce timeout: the
+   baseline runs under the flat `talos/inside.py::NONCE_TIMEOUT_S`, a candidate under the
+   tighter per-track cap from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a
+   `timeout` error, never a quality, so it can only fail a candidate, never flatter one.
    With `--scoring native` there is a second, bounded asymmetry. Research candidates run
    natively (`talos/inside.py::run_nonce_native`) under a per-track time budget calibrated
    from the baseline's metered fuel (`talos/calibration.py::budgets_us`), while the baseline
@@ -96,6 +97,12 @@ progress.
    on those metered results. The calibration key (`talos/calibration.py::calibration_key`)
    carries the hardware class, both pins, the baseline's code, the native runner's digest
    (`talos/native_runner.py::runner_digest`) and the baseline's hyperparameters.
+   The third: with `--start template` the candidates run with hyperparameters `None`
+   while the baseline keeps the mainnet map
+   (`talos/loop.py::Loop._candidate_hyperparameters`), because a solver written from the
+   empty template is not tuned for the mainnet algorithm's values. The package then ships
+   no `hyperparameters.json`. This changes the conditions a template candidate's delta is
+   measured under, and it is a decision of the repo owner (design spec 2026-10-19 §5).
 2. **The job's `rand_hash` lives in `job.json` and nowhere the agent can
    read.** It seeds every nonce; an LLM that sees it can tune to the exact
    nonces it is scored on. It is stripped from the spec the prompts see
@@ -106,6 +113,13 @@ progress.
    zip (`tests/test_package.py`) and the redacted bench output
    (`tests/test_bench.py`) for the hash. Nothing greps the agentic mode's
    copied transcript (`talos/agentic.py::_copy_transcript`) for it.
+   With `--start template` the baseline's source never reaches the LLM either: the
+   root of every chain is the empty template, and the baseline's files are not read
+   to build a prompt, a timeline entry, an iteration directory or an agentic
+   worktree (`talos/loop.py::Loop._root_files`; tested in `tests/test_loop.py`).
+   The agentic worktree of a template job also holds no baseline code. Codex is
+   refused for template starts even with `TALOS_ALLOW_CODEX_AGENTIC=1`
+   (`talos/agentic.py::codex_agentic_refused`).
 3. **The monorepo commit and dev image tag are pins, and both are part of
    every cache key.** `MONOREPO_REF` and `DEV_IMAGE_TAG` in
    `talos/challenges.py` enter the Modal artifact hash
@@ -123,7 +137,8 @@ progress.
    runner change never reuses a binary cached on the Modal volume.
 4. **An edit outside the algorithm files fails the whole iteration; its
    in-scope blocks are never applied either.** `talos/edits.py::apply_edit_response`
-   reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration
+   (and `talos/edits.py::apply_whole_file_response` for a template start's whole-file
+   replies) reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration
    on any of them, including in a compile-fix round. The only spelling accepted
    besides the bare file name is the candidate's own directory, with or without the
    directories above it (`.../talos_cand/<name>`, `talos_cand/<name>`;
@@ -228,6 +243,7 @@ nobody.
 | CLI entry point, wizards, flags | `talos/cli.py::main` |
 | Per-challenge pins, beat rules, hardware | `talos/challenges.py::CHALLENGES` |
 | One iteration of the research loop | `talos/loop.py::Loop.iterate`, confirmation in `talos/loop.py::Loop._confirm` |
+| Lineage tree, chains, annealing accept rule and temperature | `talos/lineage.py::decide`, `talos/lineage.py::temperature`, `talos/loop.py::Loop._anneal_step` |
 | How a candidate is compared to the baseline | `talos/scoring.py::bundle_delta`, `talos/scoring.py::beats` |
 | What a job persists, and the run directory layout | `talos/state.py::JobStore`, `README.md#where-results-land` |
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |

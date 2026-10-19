@@ -6,7 +6,7 @@ import json
 import math
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -15,9 +15,11 @@ from talos.baseline import resolve_baseline
 from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, EvalResult
 from talos.budget import BudgetExhausted, exhausted
 from talos.challenges import CHALLENGES
-from talos.edits import EditError, EditOutcome, apply_edit_response
+from talos.edits import EditError, EditOutcome, apply_edit_response, apply_whole_file_response
 from talos.diagnostics import dead_new_functions, defined_functions, first_error
 from talos.inside import NONCE_TIMEOUT_S
+from talos.lineage import (ROOT, AnnealSettings, Chain, Node, chain_for, decide, draw,
+                           spent_fraction, temperature)
 from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
                            dead_code_fix_prompts, distill_prompts, edit_prompts,
                            edit_repair_prompts, hypothesis_prompts,
@@ -92,10 +94,13 @@ class Loop:
     def __init__(self, spec: JobSpec, state: JobState, store: JobStore, provider, bench,
                  template_rs: str, clock=time.time, sleep=time.sleep,
                  on_event: Callable[[str, dict], None] | None = None,
-                 thresholds: Thresholds | None = None):
+                 thresholds: Thresholds | None = None,
+                 challenge_docs: dict[str, str] | None = None):
         self.spec, self.state, self.store = spec, state, store
         self.provider, self.bench = provider, bench
         self.template_rs = template_rs
+        # The challenge definition files shown to a template start (prompts.challenge_block).
+        self.challenge_docs = dict(challenge_docs or {})
         self.clock, self.sleep = clock, sleep
         self.on_event = on_event or (lambda kind, data: None)
         self.t = thresholds or Thresholds()
@@ -163,12 +168,17 @@ class Loop:
                           holdout=holdout, fuel=self.spec.fuel, baseline_training=base,
                           rule=self.rule, prior_functions=prior,
                           timeouts=self._timeouts(baseline_training),
-                          hyperparameters=self.spec.hyperparameters)
+                          hyperparameters=self._candidate_hyperparameters())
         if scoring == "native":
             # Held-out is decided on the metered validation run, never on native results.
             req.holdout, req.baseline_training = [], None
             req.mode, req.fuel_budgets_us = "native", self.state.fuel_budgets_us
         return req
+
+    def _candidate_hyperparameters(self) -> dict | None:
+        """What a candidate runs with. A template start writes its own solver, so the mainnet
+        algorithm's hyperparameters mean nothing to it; the baseline keeps them."""
+        return None if self.spec.start == "template" else self.spec.hyperparameters
 
     def _timeouts(self, baseline_training) -> dict[str, int] | None:
         if self.t.runtime_ceiling <= 0 or not baseline_training:
@@ -267,6 +277,11 @@ class Loop:
         self._save()
         self._event("calibrated", budgets_us=self.state.fuel_budgets_us)
 
+    def _baseline_output(self, res: EvalResult) -> dict:
+        """The tail of a baseline build's compiler output for an event. Empty for a template
+        start: the output quotes the baseline's source, which must not reach the timeline."""
+        return {} if self.spec.start == "template" else {"output": res.compile.output[-2000:]}
+
     def _measure_calibration(self) -> dict | None:
         """The baseline on the training nonces: metered only if its stored rows carry no fuel
         (every baseline cached before fuel was recorded), then native with no budget. Both go
@@ -299,7 +314,7 @@ class Loop:
                 self._save()
                 self._event("calibration_fallback",
                             reason="the baseline failed the metered build",
-                            output=res.compile.output[-2000:])
+                            **self._baseline_output(res))
                 return None
             metered = res.training
             # Saved before the native call, so a kill during it resumes at the native call.
@@ -312,7 +327,7 @@ class Loop:
         self._save()
         if not res.compile.ok:
             self._event("calibration_fallback", reason="the baseline failed the native build",
-                        output=res.compile.output[-2000:])
+                        **self._baseline_output(res))
             return None
         ratios = calibration.track_ratios(metered, res.training)
         return calibration.new_record(ratios) if ratios else None
@@ -332,43 +347,182 @@ class Loop:
     # ── context ───────────────────────────────────────────────────────
 
     def _current_files(self) -> dict[str, str]:
-        return dict(self.state.best.files if self.state.best else self.state.baseline.files)
+        """The files of the parent that iteration self._n edits."""
+        return self._node_files(self._parent_id(self._chain(self._n)))
 
     def _current_training(self):
         return self.state.best.training if self.state.best else self.state.baseline.training
 
     def _best_delta(self) -> float:
-        return self.state.best.delta["mean_rel_delta"] if self.state.best else 0.0
+        """The score a candidate must exceed to become the best. With no best yet that is the
+        baseline's 0.0 on a mainnet start, and minus infinity on a template start, so the first
+        scored candidate becomes the best however far below mainnet it is."""
+        if self.state.best:
+            return self.state.best.delta["mean_rel_delta"]
+        return -math.inf if self.spec.start == "template" else 0.0
 
-    def _anchor(self) -> int:
-        return self.state.best.iteration if self.state.best else 0
+    # ── lineage tree ──────────────────────────────────────────────────
+
+    def _chain(self, n: int) -> Chain:
+        """The chain iteration n belongs to. The chains are created on first use."""
+        if not self.state.chains:
+            self.state.chains = [Chain(index=i, best_score=self._root_score())
+                                 for i in range(self.spec.chains)]
+            if self.state.best is not None:
+                # A job saved before the lineage tree has a best but no chains. Chain 0 continues
+                # from that best; starting it at the root would edit the baseline again.
+                first = self.state.chains[0]
+                first.current = first.best = self.state.best.iteration
+                first.best_score = self._best_delta()
+        return self.state.chains[chain_for(n, self.spec.chains)]
+
+    def _parent_id(self, chain: Chain) -> int:
+        return chain.current if self.spec.search == "anneal" else chain.best
+
+    def _root_files(self) -> dict[str, str]:
+        """A template start's root is TIG's empty template as mod.rs. The baseline's code is
+        never read here for it, so it reaches no prompt, timeline entry or iteration directory."""
+        if self.spec.start == "template":
+            return {"mod.rs": self.template_rs}
+        return dict(self.state.baseline.files)
+
+    def _root_score(self) -> float | None:
+        """The mainnet baseline scores 0 against itself; the empty template is not scored."""
+        return None if self.spec.start == "template" else 0.0
+
+    def _node(self, node_id: int) -> Node | None:
+        return next((node for node in self.state.nodes if node.id == node_id), None)
+
+    def _node_files(self, node_id: int) -> dict[str, str]:
+        """A node's sources: the root's files, the job best's, or the files saved in the
+        node's iteration directory. A best kept from before the lineage tree has no directory
+        of its own guaranteed, so state.best is checked before the disk."""
+        root = self._root_files()
+        if node_id == ROOT:
+            return root
+        if self.state.best is not None and self.state.best.iteration == node_id:
+            return dict(self.state.best.files)
+        # Not store.iteration_dir: it creates the directory.
+        it_dir = self.store.run_dir / "iterations" / f"{node_id:04d}"
+        return {name: (it_dir / name).read_bytes().decode("utf-8") for name in root}
+
+    @staticmethod
+    def _candidate_gap(cand: Candidate) -> dict:
+        return {"node": cand.iteration, "mean": cand.delta["mean_rel_delta"],
+                "tracks": {t["track"]: t["rel_delta"] for t in cand.delta["tracks"]}}
+
+    def _parent_gap(self, parent: int) -> dict | None:
+        if parent == ROOT:
+            return None
+        node = self._node(parent)
+        if node is not None:
+            return {"node": parent, "mean": node.rank_score(), "tracks": node.tracks or {}}
+        best = self.state.best  # a best kept from before the lineage tree has no Node
+        return self._candidate_gap(best) if best and best.iteration == parent else None
+
+    def _best_gap(self) -> dict | None:
+        return self._candidate_gap(self.state.best) if self.state.best else None
+
+    def _node_score(self, node_id: int) -> float | None:
+        """The score a node was produced with (native in a native job), which the accept rule
+        compares against. A best kept from before the lineage tree has no Node."""
+        if node_id == ROOT:
+            return self._root_score()
+        node = self._node(node_id)
+        if node is not None:
+            return node.score
+        best = self.state.best
+        return self._best_delta() if best is not None and best.iteration == node_id else None
+
+    def _anneal_settings(self) -> AnnealSettings:
+        return (AnnealSettings.from_dict(self.spec.anneal) if self.spec.anneal
+                else AnnealSettings())
+
+    def _spent(self) -> float:
+        return spent_fraction(self.spec.budget, self.state.spend, self.clock())
+
+    def _anneal_step(self, n: int, record: dict, score: float) -> None:
+        """Accepts or rejects a scored candidate that is not a job-wide improvement: always when
+        it is no worse than its parent, otherwise with probability exp(-drop / T). The draw is
+        keyed on the job, the chain and the iteration, so a resumed job decides the same way."""
+        chain = self._chain(n)
+        t = temperature(self._anneal_settings(), self._spent(), chain.reheated_at)
+        u = draw(self.spec.job_id, chain.index, n)
+        accepted, p = decide(self._node_score(record["against"]), score, t, u)
+        record.update(outcome="accepted" if accepted else "failed:score", accepted=accepted,
+                      probability=p, draw=u, temperature=t)
+
+    def _chain_scores_apart(self) -> bool:
+        """Whether a chain's best can differ from the job's. With one chain on a mainnet start
+        the chain's best moves only with state.best, as before chains existed."""
+        return self.spec.chains > 1 or self.spec.start == "template"
+
+    def _lineage_fields(self, chain: Chain) -> dict:
+        """The lineage part of a new iteration record."""
+        return {"chain": chain.index, "against": self._parent_id(chain), "design_family": "",
+                "accepted": False, "probability": None, "draw": None, "temperature": None}
+
+    def _add_node(self, n: int, record: dict, improved: bool, scored: dict | None,
+                  metered: dict | None) -> None:
+        """Appends iteration n's Node and moves its chain. A job-wide improvement always becomes
+        the chain's best, so with one chain the chain's best stays the job's best. A chain's
+        best_score is the score its best was produced with (native in a native job), never the
+        metered score of a validation: spec §6 compares native scores only."""
+        chain = self._chain(n)
+        node = Node(id=n, chain=chain.index, parent=record["against"],
+                    family=record.get("design_family", ""), title=record.get("title", ""),
+                    outcome=record["outcome"],
+                    score=scored["mean_rel_delta"] if scored else None,
+                    tracks=({t["track"]: t["rel_delta"] for t in scored["tracks"]}
+                            if scored else None),
+                    metered_score=metered["mean_rel_delta"] if metered else None,
+                    accepted=record["accepted"], probability=record["probability"],
+                    draw=record["draw"], temperature=record["temperature"],
+                    best=self.state.best is not None and self.state.best.iteration == n)
+        self.state.nodes.append(node)
+        if node.accepted:
+            chain.current = n
+            score = node.score
+            if improved or (self._chain_scores_apart() and score is not None
+                            and (chain.best_score is None or score > chain.best_score)):
+                chain.best, chain.best_score, chain.stall = n, score, 0
+                return
+        chain.stall += 1
 
     def _failed(self) -> list[dict]:
         """Every failure of the job, whichever best it was tried against (issue #33)."""
         return [h for h in self.state.hypotheses if h.get("outcome", "").startswith("failed")]
 
     def _forced_tag(self) -> str | None:
-        if self.state.runs_since_improvement < self.t.reset:
+        """Annealing never forces a strategy tag: reheating takes the place of the rotation."""
+        if self.spec.search == "anneal" or self.state.runs_since_improvement < self.t.reset:
             return None
         counts = self.state.strategy_counts
         return min(STRATEGY_TAGS, key=lambda tag: counts.get(tag, 0))
 
     def _context(self) -> PromptContext:
+        chain = self._chain(self._n)
+        parent = self._parent_id(chain)
         recall = self.state.runs_since_improvement >= self.t.recall
-        failed = self._failed() if recall else []
+        # Each chain recalls only its own failures; a record from before chains is chain 0's.
+        failed = ([h for h in self._failed() if h.get("chain", 0) == chain.index]
+                  if recall else [])
         return PromptContext(challenge=self.spec.challenge, template_rs=self.template_rs,
                              direction=self.spec.direction, tacit=self.state.tacit,
-                             files=self._current_files(),
+                             files=self._node_files(parent),
                              baseline_name=self.state.baseline.name,
                              best_delta=self._best_delta(), failed_hypotheses=failed,
-                             anchor=self._anchor(),
+                             anchor=parent, parent_gap=self._parent_gap(parent),
+                             best_gap=self._best_gap(),
                              forced_tag=self._forced_tag(),
                              is_gpu=CHALLENGES[self.spec.challenge].is_gpu,
                              track=self.spec.track,
                              guard_tracks=([t for t in self.spec.tracks if t != self.spec.track]
                                            if self.spec.track else []),
-                             hyperparameters=self.spec.hyperparameters,
-                             scoring=self._scoring())
+                             hyperparameters=self._candidate_hyperparameters(),
+                             scoring=self._scoring(), start=self.spec.start,
+                             challenge_docs=self.challenge_docs, search=self.spec.search,
+                             chains=self.spec.chains)
 
     # ── single-shot propose + edit ────────────────────────────────────
 
@@ -376,9 +530,14 @@ class Loop:
         system, user = hypothesis_prompts(ctx)
         hypothesis = parse_hypothesis(self._llm(system, user).text)
         self._event("hypothesis", **hypothesis)
-        system, user = edit_prompts(ctx, hypothesis)
+        whole_file = self._whole_file(ctx, hypothesis)
+        # A copy: _score_candidate reuses ctx for the compile-fix prompts, which stay diffs.
+        system, user = edit_prompts(replace(ctx, whole_file=whole_file), hypothesis)
         text = self._llm(system, user).text
-        outcome = apply_edit_response(ctx.files, text)
+        if whole_file:
+            outcome = apply_whole_file_response(ctx.files, text)
+        else:
+            outcome = apply_edit_response(ctx.files, text)
         for _ in range(self.t.edit_repair_rounds):
             if not outcome.misses:
                 break
@@ -404,6 +563,16 @@ class Loop:
             raise EditError("no edit block applied")
         return hypothesis, outcome.files
 
+    def _whole_file(self, ctx: PromptContext, hypothesis: dict) -> bool:
+        """Template starts only: the edit is a whole-file write from the root, or when the
+        hypothesis names a design family no node on this chain has used. A mainnet start always
+        edits with search/replace."""
+        if self.spec.start != "template":
+            return False
+        chain = self._chain(self._n)
+        families = {node.family for node in self.state.nodes if node.chain == chain.index}
+        return ctx.anchor == ROOT or hypothesis["design_family"] not in families
+
     # ── one iteration ─────────────────────────────────────────────────
 
     def iterate(self) -> None:
@@ -411,9 +580,8 @@ class Loop:
         self._n = n
         it_dir = self.store.iteration_dir(n)
         ctx = self._context()
-        anchor = self._anchor()
-        record = {"iteration": n, "against": anchor, "title": "", "description": "",
-                  "strategy_tag": "", "outcome": "started"}
+        record = {"iteration": n, **self._lineage_fields(self._chain(n)), "title": "",
+                  "description": "", "strategy_tag": "", "outcome": "started"}
         try:
             hypothesis, files = self.propose_and_edit(ctx)
         # A CLI timeout fails this iteration only, as the agentic path's AgenticError does; every
@@ -497,7 +665,7 @@ class Loop:
                     runtime_ratio=record.get("runtime_ratio"))
         if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a failure
             record.update(outcome="failed:runtime", error_rate=delta.error_rate)
-            self._finish_iteration(n, record, improved=False)
+            self._finish_iteration(n, record, improved=False, scored=cand.delta)
             return
         # spec §7.7: a candidate that beats the baseline on training becomes the best, whether or
         # not the held-out set goes on to confirm it. Confirming a candidate that is not best would
@@ -507,15 +675,22 @@ class Loop:
         if improved and self._scoring() == "native":
             self._validate_and_finish(n, record, cand, base_tr)
             return
+        chain = self._chain(n)
         if improved:
             self.state.best = cand
             self._write_files(self.store.run_dir / "best", cand.files)
-            record["outcome"] = "improved"
+            record.update(outcome="improved", accepted=True)
+        elif self.spec.search == "anneal":
+            self._anneal_step(n, record, delta.mean_rel_delta)
+        elif self._chain_scores_apart() and (chain.best_score is None
+                                              or delta.mean_rel_delta > chain.best_score):
+            # Greedy, per chain: not a job-wide improvement, but better than this chain's best.
+            record.update(outcome="accepted", accepted=True)
         else:
             record["outcome"] = "failed:score"
         # The record and the iteration bump are persisted BEFORE the confirmation is read out of
         # the result, so a kill between the two never loses the iteration.
-        self._finish_iteration(n, record, improved=improved)
+        self._finish_iteration(n, record, improved=improved, scored=cand.delta)
         if wins:
             self._confirm(cand, res.holdout, res.holdout_reason)
 
@@ -549,17 +724,18 @@ class Loop:
             self._note_demotion(reason, res.training, cand.training)
             record.update(outcome="failed:validation", error=reason)
             self._event("demoted", reason=reason)
-            self._finish_iteration(n, record, improved=False)
+            self._finish_iteration(n, record, improved=False, scored=cand.delta)
             return
         best = Candidate(iteration=n, files=cand.files, artifact_id=res.compile.artifact_id,
                          training=res.training, delta=d.to_dict(), hypothesis=cand.hypothesis)
         self.state.best = best
         self._write_files(self.store.run_dir / "best", best.files)
-        record.update(outcome="improved", mean_rel_delta=d.mean_rel_delta,
+        record.update(outcome="improved", accepted=True, mean_rel_delta=d.mean_rel_delta,
                       worst_rel_delta=d.worst_rel_delta,
                       runtime_ratio=runtime_ratio(base_tr, res.training))
         self._event("validated", mean_rel_delta=d.mean_rel_delta)
-        self._finish_iteration(n, record, improved=True)
+        # The node keeps the native score it was produced with beside the metered one.
+        self._finish_iteration(n, record, improved=True, scored=cand.delta, metered=best.delta)
         if beats(base_tr, res.training, self.rule):
             self._confirm(best, res.holdout, res.holdout_reason)
 
@@ -634,12 +810,21 @@ class Loop:
         held-out run, so it is the last one — but check rather than assume."""
         if self.state.hypotheses and self.state.hypotheses[-1].get("iteration") == iteration:
             self.state.hypotheses[-1]["outcome"] = "won"
+        if self.state.nodes and self.state.nodes[-1].id == iteration:
+            self.state.nodes[-1].outcome = "won"
 
-    def _finish_iteration(self, n: int, record: dict, improved: bool) -> None:
+    def _finish_iteration(self, n: int, record: dict, improved: bool,
+                          scored: dict | None = None, metered: dict | None = None) -> None:
+        """`scored` is the delta the candidate was scored with (native in a native job) and
+        `metered` its validated metered delta; both None for an iteration with no score."""
         self.state.iteration = n
         self.state.spend.iterations += 1
         self.state.hypotheses.append(record)
         self._n = n
+        # Before the save below, so an event handler's stop or an interrupted distill never
+        # loses a chain's move.
+        self._add_node(n, record, improved, scored, metered)
+        reheated = self._reheat(n)
         if improved:
             self.state.runs_since_improvement = 0
         else:
@@ -651,12 +836,43 @@ class Loop:
                 self.state.strategy_counts.get(record["strategy_tag"], 0) + 1)
         self.state.pending_job = None
         self._save()
+        node = self.state.nodes[-1]
+        # Spec §8: one line per iteration in a tree. Greedy shows it whenever chains score apart
+        # (several chains or a template start); the default job's events stay as they were.
+        if self.spec.search == "anneal":
+            line = node.accepted or node.temperature is not None
+        else:
+            line = self._chain_scores_apart()
+        if line:
+            self._event("accept", chain=node.chain, node=node.id, parent=node.parent,
+                        family=node.family, score=node.score, accepted=node.accepted,
+                        probability=node.probability, temperature=node.temperature,
+                        outcome=node.outcome)
+        if reheated is not None:
+            self._event("reheat", **reheated)
         self._event("iteration_done", outcome=record["outcome"],
                     runs_since_improvement=self.state.runs_since_improvement)
         if not improved and self.state.runs_since_improvement == self.t.distill:
             self._distill()
-        if not improved and self.state.runs_since_improvement >= self.t.reset:
+        if (self.spec.search != "anneal" and not improved
+                and self.state.runs_since_improvement >= self.t.reset):
             self._event("reset", forced_tag=self._forced_tag())
+
+    def _reheat(self, n: int) -> dict | None:
+        """Anneal only. After `stall` iterations with no new chain best, the chain goes back to
+        its best and cooling restarts over the budget left. Runs after the iteration is counted,
+        so the spent fraction includes it. Returns the reheat event's fields, or None."""
+        if self.spec.search != "anneal":
+            return None
+        settings = self._anneal_settings()
+        chain = self._chain(n)
+        if chain.stall < settings.stall:
+            return None
+        chain.current = chain.best
+        chain.reheated_at = self._spent()
+        chain.stall = 0
+        return {"chain": chain.index, "node": chain.current,
+                "temperature": temperature(settings, chain.reheated_at, chain.reheated_at)}
 
     def _distill(self) -> None:
         failed = self._failed()
@@ -693,9 +909,9 @@ class Loop:
         n = pending["purpose"]
         self._n = n
         self._event("resumed_pending", job_id=pending.get("job_id"))
-        anchor = self._anchor()
         hypothesis = pending["hypothesis"]
-        record = {"iteration": n, "against": anchor, **hypothesis, "outcome": "started"}
+        record = {"iteration": n, **self._lineage_fields(self._chain(n)), **hypothesis,
+                  "outcome": "started"}
         if pending.get("native_training"):
             files = pending["files"]
             native = [NonceResult.from_dict(r) for r in pending["native_training"]]

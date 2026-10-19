@@ -8,6 +8,14 @@ from dataclasses import dataclass
 MONOREPO_REF = "839c7184afda9b64c4a9dca18bca5a647a1bb867"
 DEV_IMAGE_TAG = "0.0.8"
 
+# `talos run --start template`: the challenge files under tig-challenges/src/<name>/ at the
+# pin that the first candidate is written from. The baselines/ directory is left out on
+# purpose: it holds working designs.
+TEMPLATE_START_FILES: dict[str, tuple[str, ...]] = {
+    "energy_arbitrage": ("README.md", "mod.rs", "battery.rs", "market.rs", "network.rs",
+                         "scenarios.rs", "constants.rs", "utils.rs"),
+}
+
 C3_CPU_WORKERS = 4
 # Hardware preference order, tried in turn at job start until one has capacity
 # (`talos/bench.py::ModalBench.select_hardware`, `talos/c3_bench.py::C3Bench.select_hardware`).

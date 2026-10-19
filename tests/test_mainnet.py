@@ -1,6 +1,7 @@
 import pytest
 
 from talos import mainnet
+from talos.challenges import MONOREPO_REF, TEMPLATE_START_FILES
 
 BLOCK = {"block": {"id": "b1"}}
 CHALLENGES = {"challenges": [
@@ -249,3 +250,22 @@ def test_top_hyperparameters_raises_mainneterror_on_a_malformed_precommit():
     # mutation: leaving the KeyError unconverted sends a bare traceback out of `talos run`
     with pytest.raises(mainnet.MainnetError):
         mainnet.top_hyperparameters("a2", ["T1"], FUEL, get_json=gj)
+
+
+def test_challenge_docs_come_from_the_pin_and_skip_the_reference_policy():
+    urls = []
+    docs = mainnet.fetch_challenge_docs("energy_arbitrage",
+                                        get_text=lambda u: urls.append(u) or f"text of {u}")
+    assert set(docs) == set(TEMPLATE_START_FILES["energy_arbitrage"])
+    prefix = f"{mainnet.GH_RAW}/{MONOREPO_REF}/tig-challenges/src/energy_arbitrage/"
+    # mutation: fetching at a branch name rather than the pinned commit
+    assert urls and all(u.startswith(prefix) for u in urls)
+    # mutation: walking the directory picks up baselines/greedy.rs, a working design to tweak
+    assert not any("baselines" in u for u in urls)
+
+
+def test_challenge_docs_refuse_a_challenge_without_a_file_list():
+    # mutation: `TEMPLATE_START_FILES.get(name, ())` returns {} and a knapsack template job
+    # would run with no problem definition at all
+    with pytest.raises(mainnet.MainnetError):
+        mainnet.fetch_challenge_docs("knapsack", get_text=lambda u: "x")

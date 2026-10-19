@@ -1,4 +1,6 @@
 import json
+import math
+import re
 import types
 from dataclasses import replace
 
@@ -8,6 +10,7 @@ from talos.budget import Budget, BudgetExhausted, Spend
 from talos.bench import FakeBench
 from talos.challenges import BeatRule
 from talos.loop import Loop, Thresholds
+from talos.prompts import SEARCH_REPLACE_FORMAT, WHOLE_FILE_FORMAT
 from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
                              ProviderTimeout)
 from talos.providers.fake import FakeProvider
@@ -22,14 +25,17 @@ HO2 = [NonceSet("t", HASH, 1_000_000, 4), NonceSet("u", HASH, 1_000_000, 4)]
 BASE_FILES = {"mod.rs": "fn solve() { let k = 1; }\n"}
 
 
-def spec(budget=None, track=None, two_tracks=False, scoring="metered", fuel=1):
+def spec(budget=None, track=None, two_tracks=False, scoring="metered", fuel=1, **spec_kw):
+    """Any other JobSpec field (start, search, chains, anneal, hyperparameters) is passed
+    through as given."""
     tracks = ["t", "u"] if two_tracks else ["t"]
     return JobSpec(job_id="j", challenge="knapsack", direction="go", provider="fake", model="m",
                    mode="single-shot",
                    budget=budget or Budget(usd=None, hours=None, iterations=20, compute_usd=None),
                    rand_hash=HASH, tracks=tracks, training=TR2 if two_tracks else TR,
                    holdout=HO2 if two_tracks else HO, fuel=fuel, created_at=0.0,
-                   monorepo_ref="r", challenge_id="c003", track=track, scoring=scoring)
+                   monorepo_ref="r", challenge_id="c003", track=track, scoring=scoring,
+                   **spec_kw)
 
 
 def baseline(q=100, holdout_n=4, tracks=("t",)):
@@ -57,9 +63,11 @@ def quality_from_files(challenge, files, ns):
 
 
 def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=None, holdout_n=4,
-         track=None, two_tracks=False, scoring="metered", fuel=1, budgets=None, bench=None):
+         track=None, two_tracks=False, scoring="metered", fuel=1, budgets=None, bench=None,
+         spec_kw=None, template_rs="pub fn solve_challenge(", challenge_docs=None):
     store = JobStore(tmp_path)
-    sp = spec(budget, track=track, two_tracks=two_tracks, scoring=scoring, fuel=fuel)
+    sp = spec(budget, track=track, two_tracks=two_tracks, scoring=scoring, fuel=fuel,
+              **(spec_kw or {}))
     store.write_spec(sp)
     st = JobState.fresh(Spend(started_at=0.0))
     st.baseline = baseline(holdout_n=holdout_n, tracks=("t", "u") if two_tracks else ("t",))
@@ -70,8 +78,9 @@ def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=No
         st.fuel_budgets_us = budgets or {"t": 1_000_000}
     fb = bench if bench is not None else FakeBench(scores)
     fp = FakeProvider(script)
-    loop = Loop(sp, st, store, fp, fb, template_rs="pub fn solve_challenge(",
-                clock=lambda: 0.0, sleep=lambda s: None, thresholds=thresholds or Thresholds())
+    loop = Loop(sp, st, store, fp, fb, template_rs=template_rs,
+                clock=lambda: 0.0, sleep=lambda s: None, thresholds=thresholds or Thresholds(),
+                **({"challenge_docs": challenge_docs} if challenge_docs is not None else {}))
     return loop, fp, fb, store
 
 
@@ -1215,3 +1224,704 @@ def test_provider_timeout_in_a_compile_fix_is_a_compile_failure(tmp_path):
     assert st.status == "won" and st.best.iteration == 2
     assert st.hypotheses[0]["outcome"] == "failed:compile"
     assert len(fb.calls) == 2  # the broken edit once, no re-evaluation, then the winning edit
+
+
+# ── lineage tree and chains ───────────────────────────────────────────
+
+
+def heldout_flat(challenge, files, ns):
+    """quality_from_files on training; the baseline's 100 on held-out, so no candidate is ever
+    confirmed and the job keeps researching."""
+    if ns.start >= 1_000_000:
+        return [100 for _ in ns.nonces()]
+    return quality_from_files(challenge, files, ns)
+
+
+def test_default_job_is_unchanged_and_records_a_tree(tmp_path):
+    # mutation: not appending a Node, or building it with the wrong parent, chain or flags
+    loop, fp, fb, store = make(tmp_path, [hyp("bump k"), edit(5)])
+    st = loop.run()
+    assert st.status == "won" and st.best.iteration == 1 and st.confirmed == [1]
+    node = st.nodes[0]
+    assert (node.id, node.parent, node.chain) == (1, 0, 0)
+    assert node.accepted is True and node.best is True
+    # mutation: leaving the node's outcome at "improved" when _mark_won rewrites the record
+    assert node.outcome == "won" == st.hypotheses[0]["outcome"]
+    assert node.score == pytest.approx(0.04) and node.tracks == {"t": pytest.approx(0.04)}
+    assert st.chains[0].best == 1 and st.chains[0].best_score == pytest.approx(0.04)
+    rec = st.hypotheses[0]
+    assert (rec["chain"], rec["against"], rec["accepted"]) == (0, 0, True)
+    assert rec["design_family"] == "unlabelled"  # hyp() gives none; parse_hypothesis fills it
+
+
+def test_two_greedy_chains_take_turns_and_keep_their_own_parent(tmp_path):
+    # mutation: building chain 1's iteration 2 on the job best (k=5) makes its SEARCH text
+    # `let k = 1;` miss, and that iteration fails as failed:edit
+    # mutation: leaving parent_gap unset drops the parent line from iteration 3's prompt
+    # mutation: not resetting a chain's stall on a new best leaves chain 0 at 1
+    b = Budget(usd=None, hours=None, iterations=7, compute_usd=None)
+    script = [hyp("a"), edit(5),            # 1, chain 0: from the root to k=5
+              hyp("b"), edit(3),            # 2, chain 1: from the root to k=3
+              hyp("c"), edit(6, frm=5),     # 3, chain 0: from node 1
+              hyp("d"), edit(4, frm=3),     # 4, chain 1: from node 2
+              hyp("e"), edit(0, frm=6),     # 5, chain 0: worse, failed:score
+              hyp("f"), edit(1, frm=4),     # 6, chain 1: the baseline's score, failed:score
+              hyp("g"), edit(7, frm=6)]     # 7, chain 0: from node 3, a new best
+    loop, fp, fb, store = make(tmp_path, script, scores=heldout_flat, budget=b,
+                               spec_kw={"chains": 2})
+    st = loop.run()
+    assert st.status == "exhausted"
+    assert [h["outcome"] for h in st.hypotheses] == (
+        ["improved"] * 4 + ["failed:score"] * 2 + ["improved"])
+    assert [n.chain for n in st.nodes] == [0, 1, 0, 1, 0, 1, 0]
+    assert [n.parent for n in st.nodes] == [0, 0, 1, 2, 3, 4, 3]
+    assert [n.id for n in st.nodes] == [1, 2, 3, 4, 5, 6, 7]
+    assert [h["against"] for h in st.hypotheses] == [0, 0, 1, 2, 3, 4, 3]
+    assert [(c.index, c.best) for c in st.chains] == [(0, 7), (1, 4)]
+    assert [c.stall for c in st.chains] == [0, 1]
+    system, user = fp.calls[4]  # iteration 3's hypothesis call
+    assert "Parent (node #1): +4.000%" in system + user
+
+
+def test_recall_is_per_chain(tmp_path):
+    # mutation: an unfiltered _failed() shows chain 0's failure to chain 1
+    # The positive control ("fail-c1" present) catches recall never being shown, which would
+    # make the absence check pass on its own.
+    b = Budget(usd=None, hours=None, iterations=4, compute_usd=None)
+    script = [hyp("fail-c0"), edit(1),      # 1, chain 0: no change, failed:score
+              hyp("fail-c1"), edit(1),      # 2, chain 1: no change, failed:score
+              hyp("third"), edit(1),        # 3, chain 0
+              hyp("fourth"), edit(1)]       # 4, chain 1
+    loop, fp, fb, store = make(tmp_path, script, budget=b, spec_kw={"chains": 2},
+                               thresholds=Thresholds(recall=2, distill=99))
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["failed:score"] * 4
+    assert [h["chain"] for h in st.hypotheses] == [0, 1, 0, 1]
+    system, user = fp.calls[6]  # iteration 4's hypothesis call
+    assert "fail-c1" in user
+    assert "fail-c0" not in system + user
+    # a failed iteration is never accepted and raises its chain's stall
+    assert [n.accepted for n in st.nodes] == [False] * 4
+    assert [(c.best, c.stall) for c in st.chains] == [(0, 2), (0, 2)]
+
+
+def test_job_from_before_lineage_resumes_on_its_best(tmp_path):
+    # Review Focus 3: a job saved before the lineage tree has a best but no nodes or chains.
+    # mutation: seeding chain 0 at ROOT makes the SEARCH text `let k = 5;` miss against the
+    # baseline's `let k = 1;`
+    # mutation: reading the best's files only from disk raises FileNotFoundError (there is no
+    # iterations/0001/ here)
+    from talos.scoring import bundle_delta
+    from talos.state import Candidate
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("next"), edit(6, frm=5)], budget=b)
+    st = loop.state
+    rows = [NonceResult("t", n, True, 104, 1) for n in range(4)]
+    st.iteration = 1
+    st.best = Candidate(iteration=1, files={"mod.rs": "fn solve() { let k = 5; }\n"},
+                        artifact_id="old", training=rows,
+                        delta=bundle_delta(st.baseline.training, rows).to_dict(),
+                        hypothesis={"title": "old", "description": "d",
+                                    "strategy_tag": "local_search"})
+    st.hypotheses = [{"iteration": 1, "against": 0, "title": "old", "outcome": "improved"}]
+    assert st.nodes == [] and st.chains == []
+    assert not (tmp_path / "iterations" / "0001").exists()
+    st = loop.run()
+    assert st.hypotheses[-1]["outcome"] != "failed:edit"
+    assert st.nodes[0].parent == 1 and st.nodes[0].id == 2
+    assert st.chains[0].best == 2 and st.best.iteration == 2
+
+
+def test_parent_files_come_from_disk_after_a_restart(tmp_path):
+    # Chain 0's best (node 1) is not the job best (node 2, on chain 1), so after a restart its
+    # files can only come from iterations/0001/.
+    # mutation: keeping parent files only in memory loses them across the restart
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
+    script = [hyp("a"), edit(5),            # 1, chain 0: k=5
+              hyp("b"), edit(7),            # 2, chain 1: k=7, the job best
+              hyp("c"), edit(0, frm=5)]     # 3, chain 0: k=0 is worse, failed:score
+    loop, fp, fb, store = make(tmp_path, script, scores=heldout_flat, budget=b,
+                               spec_kw={"chains": 2})
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["improved", "improved", "failed:score"]
+    assert st.best.iteration == 2 and st.chains[0].best == 1
+    again = Loop(store.read_spec(), store.load(), store, FakeProvider([]),
+                 FakeBench(quality_from_files), template_rs="x",
+                 clock=lambda: 0.0, sleep=lambda s: None)
+    on_disk = (tmp_path / "iterations" / "0001" / "mod.rs").read_text(encoding="utf-8")
+    assert "let k = 5;" in on_disk
+    assert again._current_files() == {"mod.rs": on_disk}
+
+
+def test_native_chain_best_keeps_its_native_score(tmp_path):
+    # spec §6: in a native job the accept rule compares native scores only, including against a
+    # parent that has since been validated. Node 1 (k=9) scores +8% natively but +6% metered
+    # (one metered nonce errors); iteration 3 on the same chain scores +7% natively.
+    # mutation: setting chain.best_score from rank_score() (the metered +6%) accepts iteration 3
+    # as chain 0's best
+    from talos.challenges import CHALLENGES
+
+    def metered(ch, files, ns):
+        q = quality_from_files(ch, files, ns)
+        return [None] + q[1:] if "let k = 9;" in files["mod.rs"] else q
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
+    script = [hyp("a"), edit(9),            # 1, chain 0: +8% native, +6% metered
+              hyp("b"), edit(11),           # 2, chain 1: +10% both ways, the job best
+              hyp("c"), edit(8, frm=9)]     # 3, chain 0: +7% native
+    loop, fp, _, store = native(tmp_path, script, bench=fb, budget=b, spec_kw={"chains": 2})
+    # No candidate beats the baseline outright (margin 50%), so a job-wide improvement needs a
+    # mean above the best; the error ceiling lets node 1's metered error through validation.
+    loop.rule = replace(CHALLENGES["knapsack"].beat, margin=0.5, error_ceiling=0.5)
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["improved", "improved", "failed:score"]
+    first = st.nodes[0]
+    assert first.score == pytest.approx(0.08) and first.metered_score == pytest.approx(0.06)
+    assert st.best.iteration == 2
+    assert st.chains[0].best == 1 and st.chains[0].best_score == pytest.approx(0.08)
+    assert st.nodes[2].accepted is False
+
+
+def test_a_candidate_failing_native_validation_is_never_accepted(tmp_path):
+    # spec §6: a demoted candidate never becomes a chain state.
+    # mutation: marking the demoted record accepted moves chain 0 onto node 1
+    def metered(ch, files, ns):
+        q = quality_from_files(ch, files, ns)
+        return [x + 1 for x in q] if "let k = 5;" in files["mod.rs"] else q
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(5)], bench=fb, budget=b)
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] == "failed:validation"
+    assert st.nodes[0].accepted is False and st.nodes[0].score == pytest.approx(0.04)
+    assert st.chains[0].best == 0 and st.chains[0].current == 0
+    assert st.chains[0].stall == 1
+
+
+def test_one_chain_on_a_mainnet_start_moves_only_with_the_job_best(tmp_path):
+    # Node 1 (k=9) scores +6% natively (one native nonce errors) and +8% metered, so the job
+    # best is +8% while chain 0's best_score is +6%. Iteration 2 scores +7% natively: above the
+    # chain's score, but not a job-wide improvement.
+    # mutation: chain-only acceptance with one chain on a mainnet start accepts iteration 2
+    from talos.challenges import CHALLENGES
+
+    def native_scores(ch, files, ns):
+        q = quality_from_files(ch, files, ns)
+        return [None] + q[1:] if "let k = 9;" in files["mod.rs"] else q
+    fb = FakeBench(native_scores, metered_scores=quality_from_files)
+    b = Budget(usd=None, hours=None, iterations=2, compute_usd=None)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(9), hyp("b"), edit(8, frm=9)],
+                                bench=fb, budget=b)
+    loop.rule = replace(CHALLENGES["knapsack"].beat, margin=0.5, error_ceiling=0.5)
+    st = loop.run()
+    assert st.best.iteration == 1 and st.best.delta["mean_rel_delta"] == pytest.approx(0.08)
+    assert st.chains[0].best_score == pytest.approx(0.06)
+    assert st.hypotheses[1]["outcome"] == "failed:score"
+    assert st.nodes[1].accepted is False and st.chains[0].best == 1
+
+
+# ── simulated annealing ──────────────────────────────────────────────
+
+
+def annealing(tmp_path, script, settings=None, stop_after=None, on_done=None, **kw):
+    """An anneal job on heldout_flat (no win is ever confirmed, so the job keeps iterating). It
+    stops itself after `stop_after` iterations, so the default 20-iteration budget sets the
+    temperature schedule. `on_done(store)` runs on every iteration_done event."""
+    from talos.lineage import AnnealSettings
+    kw.setdefault("scores", heldout_flat)
+    spec_kw = {"search": "anneal", "anneal": (settings or AnnealSettings()).to_dict(),
+               **kw.pop("spec_kw", {})}
+    loop, fp, fb, store = make(tmp_path, script, spec_kw=spec_kw, **kw)
+    done = []
+
+    def on_event(kind, data):
+        if kind != "iteration_done":
+            return
+        done.append(data)
+        if on_done is not None:
+            on_done(store)
+        if stop_after is not None and len(done) == stop_after:
+            loop.request_stop()
+    loop.on_event = on_event
+    return loop, fp, fb, store
+
+
+def events(store, kind):
+    lines = (store.run_dir / "timeline.jsonl").read_text().splitlines()
+    return [e for e in map(json.loads, lines) if e["kind"] == kind]
+
+
+# Iteration 1 moves k=1 to k=6 (+5%, the job best). Iteration 2 moves k=6 back to k=1: 0.0
+# against the baseline, so not a win, and 0.05 below its parent.
+WORSE_AFTER_BEST = [hyp("up"), edit(6), hyp("back"), edit(1, frm=6)]
+
+
+def test_anneal_accepts_a_worse_candidate_when_the_draw_is_under_p(tmp_path, monkeypatch):
+    # mutation: making an accepted-worse node the job best
+    # mutation: computing T from the post-increment iteration count (2/20, T = 0.0455)
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    loop, fp, fb, store = annealing(tmp_path, WORSE_AFTER_BEST, stop_after=2)
+    st = loop.run()
+    assert st.status == "cancelled"
+    node = st.nodes[1]
+    assert node.accepted and node.outcome == "accepted" and node.parent == 1
+    assert st.chains[0].current == 2
+    # spend.iterations == 1 at the decision: T = 0.05 * (1 - 0.9 * 1/20)
+    assert node.temperature == pytest.approx(0.04775)
+    assert node.probability == pytest.approx(math.exp(-0.05 / node.temperature))
+    assert node.draw == 0.0
+    assert st.best.iteration == 1
+    accept = [e for e in events(store, "accept") if e["node"] == 2]
+    assert len(accept) == 1 and accept[0]["accepted"] is True and accept[0]["parent"] == 1
+    assert accept[0]["probability"] == pytest.approx(node.probability)
+
+
+def test_anneal_rejects_when_the_draw_is_over_p(tmp_path, monkeypatch):
+    # mutation: accepting every worse candidate
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.999999)
+    loop, fp, fb, store = annealing(tmp_path, WORSE_AFTER_BEST, stop_after=2)
+    st = loop.run()
+    assert not st.nodes[1].accepted and st.nodes[1].outcome == "failed:score"
+    assert st.nodes[1].probability is not None
+    assert st.chains[0].current == 1
+
+
+def test_accepted_worse_candidate_is_never_confirmed(tmp_path, monkeypatch):
+    # mutation: confirming any accepted node. Only iteration 1, which beat the baseline, was.
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    loop, fp, fb, store = annealing(tmp_path, WORSE_AFTER_BEST, stop_after=2)
+    st = loop.run()
+    assert st.nodes[1].accepted
+    assert fb.holdout_runs == 1 and st.false_positives == [1]
+
+
+def test_anneal_builds_on_the_current_state_not_the_best(tmp_path, monkeypatch):
+    # mutation: parent = chain.best (k=6) makes iteration 3's SEARCH text `let k = 1;` miss
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    script = WORSE_AFTER_BEST + [hyp("lower"), edit(0, frm=1)]  # 3: k=0, -1%, not a win
+    loop, fp, fb, store = annealing(tmp_path, script, stop_after=3)
+    st = loop.run()
+    assert st.nodes[2].parent == 2
+    assert st.hypotheses[2]["outcome"] != "failed:edit"
+    assert st.nodes[2].score == pytest.approx(-0.01)
+
+
+# Iteration 1 is the job best; iterations 2 and 3 are accepted-worse (draw 0.0), each lower
+# than the last, so with stall=2 chain 0 reheats after iteration 3.
+STALLING = WORSE_AFTER_BEST + [hyp("lower"), edit(0, frm=1)]
+
+
+def test_stall_reheats_back_to_the_chain_best(tmp_path, monkeypatch):
+    # mutation: `>` instead of `>=` against stall leaves chain 0 on node 3
+    # mutation: reheating without resetting the stall count leaves it at 2
+    from talos.lineage import AnnealSettings
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    loop, fp, fb, store = annealing(tmp_path, STALLING, settings=AnnealSettings(stall=2),
+                                    stop_after=3)
+    st = loop.run()
+    assert [n.outcome for n in st.nodes] == ["improved", "accepted", "accepted"]
+    reheats = events(store, "reheat")
+    assert len(reheats) == 1 and reheats[0]["iteration"] == 3
+    assert reheats[0]["node"] == 1 and reheats[0]["temperature"] == pytest.approx(0.05)
+    chain = st.chains[0]
+    assert chain.current == 1 and chain.stall == 0
+    assert chain.reheated_at == pytest.approx(3 / 20)  # iterations budget 20
+
+
+def test_anneal_never_forces_a_strategy_tag(tmp_path):
+    # mutation: _forced_tag() still rotating tags under anneal puts "MUST be" in a prompt and
+    # emits reset events
+    script = []
+    for i in range(6):
+        script += [hyp(f"h{i}"), "no edit blocks here"]
+    loop, fp, fb, store = annealing(tmp_path, script, stop_after=6,
+                                    thresholds=Thresholds(reset=5, distill=99))
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["failed:edit"] * 6
+    assert st.runs_since_improvement == 6  # past the reset threshold, so a greedy job would force
+    assert events(store, "reset") == []
+    assert not any("MUST be" in system + user for system, user in fp.calls)
+
+
+def test_native_demoted_candidate_is_not_a_chain_state(tmp_path):
+    # mutation: running the anneal accept rule on a demoted candidate; decide(0.0, +0.04)
+    # would accept it
+    def metered(ch, files, ns):
+        return ["out_of_fuel"] + quality_from_files(ch, files, ns)[1:]
+    fb = FakeBench(heldout_flat, metered_scores=metered)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, _, store = annealing(tmp_path, [hyp("a"), edit(5)], bench=fb, budget=b,
+                                   scoring="native")
+    st = loop.run()
+    assert st.validations[0]["reason"] == "fuel_proxy_miss"
+    node = st.nodes[0]
+    assert node.accepted is False and node.outcome == "failed:validation"
+    assert st.chains[0].current == 0 and st.chains[0].best == 0
+
+
+# Five iterations decided by the real draw (job "j", chain 0), with stall=2:
+#   1: k=6, +5%, the job best
+#   2: k=6 -> 1, drop 0.05, T=0.041, p=0.295, u=0.317: rejected
+#   3: k=6 -> 0, drop 0.06, T=0.032, p=0.153, u=0.122: accepted; stall 2, reheat to node 1
+#   4: k=6 -> 1, drop 0.05, T=0.05 (just reheated), p=0.368, u=0.303: accepted
+#   5: k=1 -> 0, drop 0.01, T=0.0275, p=0.695, u=0.818: rejected; stall 2, reheat
+# (ESTIMATE, arithmetic; the test compares two runs rather than these numbers.)
+RESUME_SCRIPT = [hyp("1"), edit(6), hyp("2"), edit(1, frm=6), hyp("3"), edit(0, frm=6),
+                 hyp("4"), edit(1, frm=6), hyp("5"), edit(0, frm=1)]
+
+
+def test_resumed_anneal_makes_the_same_decisions(tmp_path):
+    # Review Focus 1: a job stopped after iteration 3 and resumed decides as one that never
+    # stopped.
+    # mutation: an unseeded draw
+    # mutation: a draw keyed on anything but (job_id, chain, iteration), for example
+    # state.iteration read after the increment
+    from talos.lineage import AnnealSettings, draw
+    settings = AnnealSettings(stall=2)
+    b = Budget(usd=None, hours=None, iterations=5, compute_usd=None)
+    th = Thresholds(distill=99)  # two provider calls per iteration, no distill call
+    loop, *_ = annealing(tmp_path / "straight", RESUME_SCRIPT, settings=settings, budget=b,
+                         thresholds=th)
+    st = loop.run()
+    assert st.status == "exhausted"
+    straight = [(n.accepted, n.draw, n.parent) for n in st.nodes]
+    decided = [n for n in st.nodes if n.probability is not None]
+    assert decided, "no node was decided by a draw; the comparison would test nothing"
+    assert [n.draw for n in decided] == [draw("j", 0, n.id) for n in decided]
+    assert {n.accepted for n in decided} == {True, False}
+    assert [n.outcome for n in st.nodes] == [
+        "improved", "failed:score", "accepted", "accepted", "failed:score"]
+
+    loop, _, _, store = annealing(tmp_path / "resumed", RESUME_SCRIPT, settings=settings,
+                                  budget=b, thresholds=th, stop_after=3)
+    assert loop.run().status == "cancelled"
+    again = Loop(store.read_spec(), store.load(), store, FakeProvider(RESUME_SCRIPT[6:]),
+                 FakeBench(heldout_flat), template_rs="x", clock=lambda: 0.0,
+                 sleep=lambda s: None, thresholds=th)
+    again.state.status = "researching"  # as execute_job does on resume
+    resumed = again.run()
+    assert resumed.status == "exhausted"
+    assert [(n.accepted, n.draw, n.parent) for n in resumed.nodes] == straight
+    assert resumed.chains == st.chains
+
+
+def test_tree_and_reheat_are_saved_before_iteration_done(tmp_path, monkeypatch):
+    # mutation: appending the node or applying the reheat after _finish_iteration's save, which
+    # a hard kill at that point would lose
+    from talos.lineage import AnnealSettings
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    seen = []
+
+    def on_done(store):
+        saved = store.load()
+        seen.append((len(saved.nodes), saved.chains[0].current, saved.chains[0].stall))
+    loop, *_ = annealing(tmp_path, STALLING, settings=AnnealSettings(stall=2), stop_after=3,
+                         on_done=on_done)
+    loop.run()
+    assert seen == [(1, 1, 0), (2, 2, 1), (3, 1, 0)]
+
+
+def test_one_anneal_chain_on_a_mainnet_start_keeps_the_job_best_as_its_best(tmp_path):
+    # As test_one_chain_on_a_mainnet_start_moves_only_with_the_job_best, under anneal: node 1
+    # is +6% natively (the job best, +8% metered); iteration 2 is +7% natively, no worse than
+    # its parent, so annealing accepts it, but it is not a job-wide improvement.
+    # mutation: dropping the _chain_scores_apart() gate makes node 2 chain 0's best, so a
+    # reheat would return to code that is not the job's best
+    from talos.challenges import CHALLENGES
+
+    def native_scores(ch, files, ns):
+        q = heldout_flat(ch, files, ns)
+        return [None] + q[1:] if "let k = 9;" in files["mod.rs"] else q
+    fb = FakeBench(native_scores, metered_scores=heldout_flat)
+    b = Budget(usd=None, hours=None, iterations=2, compute_usd=None)
+    loop, fp, _, store = annealing(tmp_path, [hyp("a"), edit(9), hyp("b"), edit(8, frm=9)],
+                                   bench=fb, budget=b, scoring="native")
+    loop.rule = replace(CHALLENGES["knapsack"].beat, margin=0.5, error_ceiling=0.5)
+    st = loop.run()
+    assert st.best.iteration == 1
+    assert [n.outcome for n in st.nodes] == ["improved", "accepted"]
+    assert st.nodes[1].probability is None  # accepted outright, no draw needed
+    assert st.chains[0].current == 2
+    assert st.chains[0].best == 1 and st.chains[0].best_score == pytest.approx(0.06)
+
+
+# ── template start ───────────────────────────────────────────────────
+
+TEMPLATE_RS = "pub fn solve_challenge() { todo!() }\n"
+BASELINE_ONLY = "BASELINE-ONLY-7f3a"
+
+
+def hypf(title, family=None):
+    """A hypothesis reply, with a design_family when one is given."""
+    d = {"title": title, "description": "d", "strategy_tag": "local_search"}
+    if family is not None:
+        d["design_family"] = family
+    return json.dumps(d)
+
+
+def whole(k):
+    """A whole-file reply writing mod.rs with `let k = {k};`."""
+    return f"<<<<<<< FILE mod.rs\nfn solve() {{ let k = {k}; }}\n>>>>>>> END FILE\n"
+
+
+def make_template(tmp_path, script, iterations=4, spec_kw=None, **kw):
+    """A from-scratch anneal job. The root is the empty template as mod.rs. The baseline scores
+    200 on every nonce, so k=11 (quality 110) is -45%, and its code carries a marker that must
+    never be shown."""
+    from talos.lineage import AnnealSettings
+    sk = {"start": "template", "search": "anneal", "anneal": AnnealSettings().to_dict(),
+          **(spec_kw or {})}
+    kw.setdefault("budget", Budget(usd=None, hours=None, iterations=iterations,
+                                   compute_usd=None))
+    loop, fp, fb, store = make(tmp_path, script, spec_kw=sk, template_rs=TEMPLATE_RS,
+                               challenge_docs={"README.md": "doc"}, **kw)
+    loop.state.baseline = replace(
+        baseline(q=200), files={"mod.rs": f"fn solve() {{ let k = 1; }} // {BASELINE_ONLY}\n"})
+    return loop, fp, fb, store
+
+
+def edit_systems(fp):
+    return [system for system, _ in fp.calls if system.startswith("You are editing")]
+
+
+def test_whole_file_reply_naming_a_new_file_fails_the_iteration(tmp_path):
+    # AGENTS.md invariant 4 for whole-file replies: one out-of-scope FILE block fails the whole
+    # iteration, and the in-scope mod.rs block in the same reply is never applied or scored.
+    # mutation: dropping the `if outcome.rejected` check after apply_whole_file_response scores
+    # the mod.rs block and makes it the best
+    reply = whole(11) + "<<<<<<< FILE helpers.rs\nfn h() {}\n>>>>>>> END FILE\n"
+    loop, fp, fb, store = make_template(tmp_path, [hypf("lp", "lp"), reply], iterations=1)
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] == "failed:edit"
+    assert "helpers.rs" in st.hypotheses[0]["error"]
+    assert st.best is None and fb.calls == []
+
+
+def test_template_start_first_candidate_is_written_whole_from_the_template(tmp_path):
+    # mutation: _root_files() returning the baseline's files edits the baseline, not the template
+    # mutation: whole_file left False at the root asks for diffs against an empty template
+    # mutation: _context() without start or challenge_docs drops the challenge definition
+    loop, fp, fb, store = make_template(tmp_path, [hypf("lp", "lp"), whole(11)], iterations=1)
+    st = loop.run()
+    system, user = fp.calls[1]  # the edit call
+    assert "pub fn solve_challenge() { todo!() }" in user
+    assert WHOLE_FILE_FORMAT in system
+    assert "--- tig-challenges/src/knapsack/README.md ---\ndoc" in user
+    assert st.best.iteration == 1 and "let k = 11;" in st.best.files["mod.rs"]
+    assert set(st.best.files) == {"mod.rs"}
+
+
+def test_template_start_never_shows_baseline_code(tmp_path, monkeypatch):
+    # mutation: _root_files() returning state.baseline.files
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 1.0)  # never accept
+
+    def swap(frm, to):
+        return f"<<<<<<< SEARCH mod.rs\nlet k = {frm};\n=======\nlet k = {to};\n>>>>>>> REPLACE\n"
+
+    script = [hyp("a"), whole("BUG"), swap("BUG", "BUG2"),  # 1: no build after its fix round
+              hyp("b"), whole(11),                          # 2: from the root, the first best
+              hyp("c"), edit(5, frm=11),                    # 3: worse, rejected
+              hyp("d"), edit(6, frm=11),                    # 4: worse, rejected; then distill
+              "LESSON: start from a feasible schedule.",
+              hyp("e"), edit(7, frm=11)]                    # 5: lets the distill call run
+    # five iterations: with a budget of four, the distill call after iteration 4 is refused
+    loop, fp, fb, store = make_template(tmp_path, script, iterations=5,
+                                        thresholds=Thresholds(distill=2, compile_fix_rounds=1))
+    fb._compile_ok = lambda files: "BUG" not in files["mod.rs"]
+    st = loop.run()
+    assert all(BASELINE_ONLY not in system + user for system, user in fp.calls)
+    assert BASELINE_ONLY not in (store.run_dir / "timeline.jsonl").read_text()
+    written = [p for p in (store.run_dir / "iterations").rglob("*") if p.is_file()]
+    assert written and all(BASELINE_ONLY not in p.read_text() for p in written)
+    # the run went through every prompt kind: hypothesis, edit, compile fix and distill
+    assert [h["outcome"] for h in st.hypotheses] == [
+        "failed:compile", "improved", "failed:score", "failed:score", "failed:score"]
+    assert len(fp.calls) == 12
+    assert "start from a feasible schedule" in st.tacit
+
+
+def test_template_candidates_run_without_hyperparameters(tmp_path):
+    hp = {"t": {"x": 1}}
+    loop, fp, fb, store = make_template(
+        tmp_path, [hyp("a"), whole(11), hyp("b"), edit(12, frm=11)], iterations=2,
+        spec_kw={"hyperparameters": hp})
+    loop.run()
+    assert len(fb.calls) == 2
+    # mutation: _request passing spec.hyperparameters
+    assert all(c.hyperparameters is None for c in fb.calls)
+    # mutation: _context() passing spec.hyperparameters shows the mainnet keys to the model
+    assert all("Hyperparameters:" not in user for _system, user in fp.calls)
+
+
+def test_template_baseline_keeps_the_spec_hyperparameters(tmp_path):
+    # mutation: measure_baseline passing _candidate_hyperparameters() scores the baseline
+    # without the map it is published with
+    hp = {"t": {"x": 1}}
+    loop, fp, fb, store = make_template(tmp_path, [hyp("a"), whole(11)], iterations=1,
+                                        spec_kw={"hyperparameters": hp})
+    loop.spec = replace(loop.spec, baseline_algorithm={"name": "pinned", "id": "p1",
+                                                       "adoption": 3})
+    loop.state.baseline = None
+    mainnet = types.SimpleNamespace(
+        fetch_algorithm_files=lambda ch, name: BASE_FILES,
+        fetch_template=lambda ch: TEMPLATE_RS)
+    loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
+    assert fb.calls[0].hyperparameters == hp
+    loop.run()
+    assert len(fb.calls) == 2 and fb.calls[1].hyperparameters is None
+
+
+def test_template_best_below_mainnet_is_kept_and_shown(tmp_path):
+    loop, fp, fb, store = make_template(
+        tmp_path, [hyp("a"), whole(11), hyp("b"), edit(5, frm=11)], iterations=2)
+    st = loop.run()
+    # mutation: _best_delta() returning 0.0 drops every from-scratch best
+    assert st.best.iteration == 1
+    assert st.best.delta["mean_rel_delta"] == pytest.approx(-0.45)
+    _system, user = fp.calls[2]  # iteration 2's hypothesis call
+    assert "Best so far (node #1): -45.000%" in user
+    # a best below mainnet is never confirmed
+    assert fb.holdout_runs == 0 and st.confirmed == [] and st.status == "exhausted"
+
+
+def test_template_new_family_gets_whole_file_and_same_family_gets_diffs(tmp_path):
+    # mutation: whole-file only at the root makes iteration 3's whole-file reply fail to apply
+    # mutation: whole-file for every template edit makes iteration 2's diff reply fail
+    script = [hypf("a", "lp"), whole(11),          # 1: root
+              hypf("b", "lp"), edit(12, frm=11),   # 2: same family as node 1
+              hyp("c"), whole(13),                 # 3: unlabelled, new on this chain
+              hyp("d"), edit(14, frm=13)]          # 4: unlabelled again
+    loop, fp, fb, store = make_template(tmp_path, script, iterations=4)
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["improved"] * 4
+    systems = edit_systems(fp)
+    assert [WHOLE_FILE_FORMAT in s for s in systems] == [True, False, True, False]
+    assert [SEARCH_REPLACE_FORMAT in s for s in systems] == [False, True, False, True]
+    assert [n.family for n in st.nodes] == ["lp", "lp", "unlabelled", "unlabelled"]
+
+
+def test_template_greedy_second_chain_keeps_its_own_worse_best(tmp_path):
+    # mutation: dropping the greedy chain-only acceptance leaves chain 1 at the root, so
+    # iteration 4 asks for a whole file, its diff reply parses as no FILE block, and it fails
+    # failed:edit with parent 0
+    # mutation: collecting design families from every chain asks iteration 3 for a diff, and
+    # its whole-file reply fails failed:edit
+    script = [hypf("a", "greedy"), whole(21),        # 1, chain 0: root, -40%, the job best
+              hypf("b", "lp"), whole(11),            # 2, chain 1: root, -45%, chain 1's best
+              hypf("c", "lp"), whole(20),            # 3, chain 0: new family here, worse
+              hypf("d", "lp"), edit(10, frm=11)]     # 4, chain 1: from node 2, worse
+    loop, fp, fb, store = make_template(tmp_path, script, iterations=4,
+                                        spec_kw={"search": "greedy", "chains": 2})
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == [
+        "improved", "accepted", "failed:score", "failed:score"]
+    assert st.nodes[1].outcome == "accepted"
+    assert st.chains[1].best == 2 and st.chains[1].best_score == pytest.approx(-0.45)
+    assert st.nodes[3].parent == 2 and st.nodes[3].outcome != "failed:edit"
+    assert st.best.iteration == 1
+
+
+def test_template_native_first_candidate_validates_below_mainnet(tmp_path):
+    # mutation: validation_failure given 0.0 instead of _best_delta() demotes it not_improved
+    loop, fp, fb, store = make_template(tmp_path, [hyp("a"), whole(11)], iterations=1,
+                                        scoring="native")
+    st = loop.run()
+    assert [v["outcome"] for v in st.validations] == ["validated"]
+    assert st.best.iteration == 1
+    assert st.best.delta["mean_rel_delta"] == pytest.approx(-0.45)
+
+
+def never_compiling_script(system, user):
+    """A reply for every prompt kind, so compile-fix rounds and distillation cannot put a fixed
+    list out of step."""
+    if '"strategy_tag" (one of' in system:
+        return hyp("try")
+    if WHOLE_FILE_FORMAT in system:
+        return whole(11)
+    m = re.search(r"let k = (\d+);", user)
+    if system.startswith("You are fixing") and m:
+        k = int(m.group(1))
+        return edit(k + 1, frm=k)
+    return "LESSON: make it build first."
+
+
+def test_template_that_never_compiles(tmp_path):
+    # mutation: a reheat that reads chain.best_score or the root's score crashes on None
+    from talos.lineage import AnnealSettings
+    from talos.package import build_package
+    loop, fp, fb, store = make_template(
+        tmp_path, never_compiling_script, iterations=5,
+        spec_kw={"anneal": AnnealSettings(stall=2).to_dict()})
+    fb._compile_ok = lambda files: False
+    st = loop.run()
+    assert st.status == "exhausted" and st.best is None
+    assert [h["outcome"] for h in st.hypotheses] == ["failed:compile"] * 5
+    assert len(st.nodes) == 5 and all(n.accepted is False for n in st.nodes)
+    assert events(store, "reheat")
+    assert st.chains[0].current == 0
+    readme = (build_package(loop.spec, st, store) / "README.md").read_text()
+    assert "No candidate" in readme
+
+
+def test_anneal_recall_names_the_parent_node_not_an_earlier_best(tmp_path):
+    # mutation: Loop._context not passing search/chains to PromptContext keeps today's
+    # "Tried against an earlier best" title in an anneal job, where a parent need not be a best
+    from talos.lineage import AnnealSettings
+    script = [hyp("Old idea"), "no edit blocks here",  # 1: failed:edit against the root
+              hyp("Winner"), edit(2),                   # 2: improved; the chain moves to node 2
+              hyp("Next"), edit(3, frm=2)]
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, script, budget=b,
+                               spec_kw={"search": "anneal",
+                                        "anneal": AnnealSettings().to_dict()},
+                               scores=lambda ch, files, ns: [
+                                   q + 900 for q in quality_from_files(ch, files, ns)],
+                               thresholds=Thresholds(recall=0, distill=99, reset=99))
+    loop.state.baseline = baseline(q=1000)  # so k=2 is +0.1%: a new best, not a win
+    loop.rule = BeatRule(margin=0.005)
+    loop.run()
+    proposals = [u for s, u in fp.calls if s.startswith("You are a research engineer")]
+    assert len(proposals) == 3
+    assert "Tried against other code and did NOT help there" in proposals[2]
+    # a failed:edit record carries no title: the edit failed before the hypothesis was stored
+    assert "[failed:edit, against the baseline]" in proposals[2]
+    assert "earlier best" not in proposals[2]
+
+
+@pytest.mark.parametrize("failing", ["metered", "native"])
+def test_a_template_start_calibration_failure_keeps_baseline_output_out_of_the_timeline(
+        tmp_path, failing):
+    # mutation: writing res.compile.output into either calibration_fallback event of a template
+    # start; the baseline's compiler output quotes its source
+    fb = (FakeBench(quality_from_files, metered_compile_ok=lambda files: False)
+          if failing == "metered" else
+          FakeBench(quality_from_files, compile_ok=lambda files: False,
+                    metered_compile_ok=lambda files: True))
+    loop, fp, _, store = native(tmp_path, [], bench=fb, spec_kw={"start": "template"})
+    loop.state.scoring, loop.state.fuel_budgets_us = None, None
+    loop.calibrate(tmp_path / "cal", "hw")
+    fallback = events(store, "calibration_fallback")
+    assert any(f"{failing} build" in e["reason"] for e in fallback)
+    assert all("output" not in e for e in fallback)
+    assert "E0308" not in (store.run_dir / "timeline.jsonl").read_text()
+
+
+@pytest.mark.parametrize("spec_kw, lines", [({"chains": 2}, True), ({}, False)])
+def test_greedy_emits_one_accept_line_per_iteration_when_chains_score_apart(
+        tmp_path, spec_kw, lines):
+    # mutation: emitting the accept event for anneal only (spec §8 wants a line per iteration
+    # with chain, parent, family, score and outcome); emitting it for the default job too
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
+    script = [hyp("a"), edit(5),                  # 1, chain 0: improved
+              hyp("b"), "no edit blocks here",    # 2: failed:edit
+              hyp("c"), edit(0, frm=5)]           # 3, chain 0: worse, failed:score
+    loop, fp, fb, store = make(tmp_path, script, scores=heldout_flat, budget=b, spec_kw=spec_kw)
+    loop.run()
+    accept = events(store, "accept")
+    if not lines:
+        assert accept == []
+        return
+    assert [(e["node"], e["chain"], e["parent"], e["accepted"], e["outcome"]) for e in accept] == [
+        (1, 0, 0, True, "improved"), (2, 1, 0, False, "failed:edit"),
+        (3, 0, 1, False, "failed:score")]
+    assert accept[2]["score"] is not None and accept[1]["score"] is None

@@ -13,8 +13,8 @@ from collections import Counter
 from pathlib import Path
 
 from talos.executables import argv0
-from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, focus_sentence,
-                           hyperparameters_block, recall_block)
+from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, challenge_block,
+                           focus_sentence, gap_block, hyperparameters_block, recall_block)
 
 
 class AgenticError(ValueError):
@@ -30,9 +30,17 @@ CODEX_AGENTIC_REFUSAL = (
     f"set {CODEX_AGENTIC_ENV}=1 to accept that")
 
 
-def codex_agentic_refused(provider_kind: str, mode: str) -> bool:
-    return (mode == "agentic" and provider_kind == "codex-cli"
-            and os.environ.get(CODEX_AGENTIC_ENV) != "1")
+# A template start has no mainnet source to withhold from the agent's shell, and its prompts are
+# the only barrier; codex cannot restrict reads, so no opt-in applies.
+TEMPLATE_CODEX_REFUSAL = (
+    "codex agentic mode is not available with --start template: codex cannot restrict what the "
+    "agent reads, and a template start must keep the baseline's source away from it")
+
+
+def codex_agentic_refused(provider_kind: str, mode: str, start: str = "mainnet") -> bool:
+    if mode != "agentic" or provider_kind != "codex-cli":
+        return False
+    return start == "template" or os.environ.get(CODEX_AGENTIC_ENV) != "1"
 
 
 # Passed with --settings. Not .claude/settings.json: Claude Code also reads that path as project
@@ -80,11 +88,15 @@ def claude_md(ctx: PromptContext) -> str:
     hp = (hp + "\n\n") if hp else ""
     compile_cmd = (f"talos compile --challenge {ctx.challenge} --dir algorithm"
                    + (" --native" if ctx.scoring == "native" else ""))
+    role = ("writing a Rust solver from the empty template for"
+            if ctx.start == "template" else "improving a Rust solver for")
     return f"""# Talos agentic iteration: {ctx.challenge}
 
-You are improving a Rust solver for the TIG challenge "{ctx.challenge}". Beat the mainnet
+You are {role} the TIG challenge "{ctx.challenge}". Beat the mainnet
 baseline "{ctx.baseline_name}" on TIG's benchmark (higher verifier quality per nonce under a
-fixed fuel budget {scope}). Your current best is {ctx.best_delta:+.3%} vs baseline.
+fixed fuel budget {scope}).
+
+{gap_block(ctx)}
 
 {focus}{hp}Rules:
 - Edit ONLY files under `algorithm/`. Do not create new files. Do not touch anything else.
@@ -92,7 +104,8 @@ fixed fuel budget {scope}). Your current best is {ctx.best_delta:+.3%} vs baseli
   Nothing else may be executed. There is no network.
 - Make ONE focused change per iteration that implements a single hypothesis.
 - Before you stop, EDIT the existing file `.talos/hypothesis.json` (it starts as `{{}}`) so it
-  holds keys "title", "description", "strategy_tag" (one of: {", ".join(STRATEGY_TAGS)}).
+  holds keys "title", "description", "strategy_tag" (one of: {", ".join(STRATEGY_TAGS)}) and
+  "design_family" (a short label, at most 80 characters, for the kind of design this solver is).
   Use the Edit tool; creating new files is not permitted.
 
 The algorithm files are: {", ".join(f"algorithm/{name}" for name in sorted(ctx.files))}.
@@ -121,9 +134,12 @@ def prepare_worktree(ctx: PromptContext, parent: Path | None = None) -> Path:
         p = wt / "algorithm" / name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8", newline="\n")
-    (wt / "CHALLENGE.md").write_text(f"# {ctx.challenge} solver contract (template.rs)\n\n"
-                                     f"```rust\n{ctx.template_rs}\n```\n",
-                                     encoding="utf-8", newline="\n")
+    challenge_md = (f"# {ctx.challenge} solver contract (template.rs)\n\n"
+                    f"```rust\n{ctx.template_rs}\n```\n")
+    docs = challenge_block(ctx)
+    if docs:
+        challenge_md += "\n" + docs + "\n"
+    (wt / "CHALLENGE.md").write_text(challenge_md, encoding="utf-8", newline="\n")
     (wt / "tacit.md").write_text(ctx.tacit, encoding="utf-8", newline="\n")
     md = claude_md(ctx)
     (wt / "CLAUDE.md").write_text(md, encoding="utf-8", newline="\n")
@@ -142,8 +158,11 @@ def read_back(worktree: Path, ctx: PromptContext) -> tuple[dict, dict[str, str]]
         raise AgenticError("agent did not fill in .talos/hypothesis.json")
     try:
         h = json.loads(hp.read_text(encoding="utf-8"))
+        tag = h.get("strategy_tag")
         hypothesis = {"title": str(h["title"])[:200], "description": str(h["description"])[:4000],
-                      "strategy_tag": h.get("strategy_tag") if h.get("strategy_tag") in STRATEGY_TAGS else "hybrid"}
+                      "strategy_tag": tag if tag in STRATEGY_TAGS else "hybrid",
+                      "design_family": str(h.get("design_family") or "unlabelled").strip()[:80]
+                      or "unlabelled"}
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         raise AgenticError(f"bad hypothesis.json: {e}") from None
     algo_dir = worktree / "algorithm"
@@ -267,8 +286,10 @@ def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
     runner = {"claude-cli": _run_claude, "codex-cli": _run_codex}.get(provider_kind)
     if runner is None:
         raise AgenticError(f"agentic mode needs claude-cli or codex-cli, not {provider_kind}")
-    if codex_agentic_refused(provider_kind, "agentic"):
-        raise AgenticError(CODEX_AGENTIC_REFUSAL)
+    start = getattr(getattr(loop, "spec", None), "start", "mainnet")
+    if codex_agentic_refused(provider_kind, "agentic", start):
+        raise AgenticError(TEMPLATE_CODEX_REFUSAL if start == "template"
+                           else CODEX_AGENTIC_REFUSAL)
 
     def propose_and_edit(ctx: PromptContext) -> tuple[dict, dict[str, str]]:
         previous = getattr(loop, "_agentic_wt", None)

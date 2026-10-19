@@ -330,7 +330,7 @@ def test_resume_restarts_a_cancelled_job(tmp_path, monkeypatch, capsys):
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     st = json.loads((run_dir / "state.json").read_text())
     st.update(status="cancelled", stop_reason="user requested stop", best=None, iteration=0,
-              confirmed=[], hypotheses=[])
+              confirmed=[], hypotheses=[], nodes=[], chains=[])
     st["spend"]["iterations"] = 0
     (run_dir / "state.json").write_text(json.dumps(st))
     capsys.readouterr()
@@ -411,7 +411,7 @@ def test_resume_after_the_hours_window_shifts_the_clock(tmp_path, monkeypatch, c
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     st = json.loads((run_dir / "state.json").read_text())
     st.update(status="cancelled", stop_reason="user requested stop", best=None, iteration=0,
-              confirmed=[], hypotheses=[])
+              confirmed=[], hypotheses=[], nodes=[], chains=[])
     st["spend"]["iterations"] = 0
     cancelled_at = time.time() - 5 * 3600  # cancelled five hours ago, an hour past the window
     st["spend"]["started_at"] = cancelled_at - 60
@@ -793,6 +793,16 @@ def test_run_refuses_agentic_codex_without_the_opt_in(tmp_path, monkeypatch, cap
     assert not (tmp_path / "runs").exists()  # refused before the job dir was created
     monkeypatch.setenv("TALOS_ALLOW_CODEX_AGENTIC", "1")
     assert cli.main(argv) == 0  # the opt-in lets it through
+
+
+def test_codex_refused_takes_the_start(monkeypatch, capsys):
+    # mutation: ignoring start lets the opt-in through for a template start; pure function, no
+    # subprocess or network
+    monkeypatch.setenv("TALOS_ALLOW_CODEX_AGENTIC", "1")
+    cfg = Config(provider="codex-cli", model="m", mode="agentic", api_base=None)
+    assert cli._codex_refused(cfg) is False
+    assert cli._codex_refused(cfg, "template") is True
+    assert "--start template" in capsys.readouterr().err
 
 
 def test_deploy_bench_failure_never_quotes_the_token_secret():
@@ -2527,3 +2537,237 @@ def test_event_lines_for_validation():
     assert cli._event_line("iteration_done", {"outcome": "failed:validation",
                                                "runs_since_improvement": 2}) == \
         "rejected: failed metered validation (2 in a row)"
+
+
+# ── --start, --search, --chains ───────────────────────────────────────────────
+
+def _template_job(tmp_path, extra=()):
+    """A fake template-start job on energy_arbitrage; returns (rc, run_dir)."""
+    rc = cli.main(["run", "--fake", "--yes", "--challenge", "energy_arbitrage", "--direction",
+                   "go", "--start", "template", "--budget-iterations", "1", *extra])
+    return rc, next((tmp_path / "runs").glob("*/job.json")).parent
+
+
+def test_start_template_refuses_an_unsupported_challenge(tmp_path, monkeypatch, capsys):
+    # mutation: dropping the TEMPLATE_START_FILES check fetches docs that do not exist and
+    # creates a job before failing
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli.FAKE_MAINNET, "fetch_challenge_docs",
+                        lambda ch: pytest.fail("must not fetch for an unsupported challenge"))
+    rc = cli.main(["run", "--fake", "--yes", "--start", "template", "--challenge", "knapsack",
+                   "--direction", "go", "--budget-iterations", "1"])
+    assert rc == 2
+    assert "energy_arbitrage" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_chains_must_be_positive(tmp_path, monkeypatch, capsys):
+    # mutation: dropping the check starts a job whose chain index divides by zero
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["run", "--fake", "--yes", "--challenge", "knapsack", "--direction", "go",
+                   "--budget-iterations", "1", "--chains", "0"])
+    assert rc == 2
+    assert "--chains" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+@pytest.mark.parametrize("flags", [["--start", "template"], ["--search", "anneal"],
+                                   ["--chains", "2"]])
+def test_resume_refuses_a_different_start_search_or_chains(tmp_path, monkeypatch, capsys, flags):
+    # mutation: dropping one frozen-field check lets a resume change how the job searches
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    spec = json.loads((run_dir / "job.json").read_text())
+    # mutation: a new job with no flags must keep today's behaviour
+    assert (spec["start"], spec["search"], spec["chains"], spec["anneal"]) == \
+        ("mainnet", "greedy", 1, None)
+    capsys.readouterr()
+    assert cli.main(["run", "--resume", run_dir.name, *flags]) == 2
+    assert "start a new job" in capsys.readouterr().err
+    # mutation: refusing any given value; the job's own value is not a change
+    same = {"--start": "mainnet", "--search": "greedy", "--chains": "1"}[flags[0]]
+    assert cli.main(["run", "--resume", run_dir.name, flags[0], same]) == 1  # already won
+
+
+def test_resume_without_the_flags_keeps_the_jobs_own(tmp_path, monkeypatch, capsys):
+    # mutation: an argparse default of "mainnet" / "greedy" / 1 refuses this resume
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    rc, run_dir = _template_job(tmp_path, ["--search", "anneal", "--chains", "2"])
+    assert rc == 1
+    spec = json.loads((run_dir / "job.json").read_text())
+    assert (spec["start"], spec["search"], spec["chains"]) == ("template", "anneal", 2)
+    assert spec["anneal"] == {"t0": 0.05, "floor": 0.1, "stall": 5}
+    capsys.readouterr()
+    assert cli.main(["run", "--resume", run_dir.name]) != 2
+    assert "start a new job" not in capsys.readouterr().err
+
+
+def test_template_start_refuses_codex_agentic(tmp_path, monkeypatch, capsys):
+    # mutation: not passing the start to _codex_refused at any of its three call sites lets the
+    # opt-in through for a template start
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TALOS_ALLOW_CODEX_AGENTIC", "1")
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: pytest.fail("fetched"))
+    monkeypatch.setattr(cli, "execute_job", lambda *a, **kw: pytest.fail("must not start"))
+    monkeypatch.setattr(cli, "make_provider", lambda *a, **kw: pytest.fail("must not call LLM"))
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **kw: pytest.fail("must not compute"))
+    argv = ["run", "--challenge", "energy_arbitrage", "--direction", "go", "--start", "template",
+            "--budget-iterations", "1"]
+    # a new job, agentic from the config
+    save(tmp_path, Config(provider="codex-cli", model="m", mode="agentic", api_base=None), None)
+    assert cli.main(argv + ["--yes"]) == 2
+    assert "--start template" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+    # a new job, agentic picked in the wizard (the compute budget prompt comes first)
+    save(tmp_path, Config(provider="codex-cli", model="m", mode="single-shot", api_base=None),
+         None)
+    assert cli.main(argv, ask=scripted(["", "agentic"])) == 2
+    assert "--start template" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_template_start_resume_refuses_codex_agentic(tmp_path, monkeypatch, capsys):
+    # mutation: the resume path calling _codex_refused without spec.start
+    monkeypatch.chdir(tmp_path)
+    rc, run_dir = _template_job(tmp_path)
+    assert rc == 1
+    spec = json.loads((run_dir / "job.json").read_text())
+    spec.update(provider="codex-cli", model="m", mode="agentic")
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    save(tmp_path, Config(provider="codex-cli", model="m", mode="agentic", api_base=None), None)
+    monkeypatch.setenv("TALOS_ALLOW_CODEX_AGENTIC", "1")
+    monkeypatch.setattr(cli, "execute_job", lambda *a, **kw: pytest.fail("must not start"))
+    capsys.readouterr()
+    assert cli.main(["run", "--resume", run_dir.name]) == 2
+    assert "--start template" in capsys.readouterr().err
+
+
+def test_a_greedy_rejection_line_names_its_outcome():
+    # mutation: rendering every probability-free accept event as "accepted (improved)", which
+    # is what a greedy rejection (no probability, no temperature) printed before
+    data = {"chain": 1, "node": 4, "parent": 2, "family": "lp", "score": -0.01,
+            "accepted": False, "probability": None, "temperature": None,
+            "outcome": "failed:score"}
+    assert cli._event_line("accept", data) == \
+        "chain 1 #4 <- #2 [lp] -1.000% vs mainnet: rejected (failed:score)"
+
+def test_accept_and_reheat_event_lines():
+    # mutation: swapping the improved and p/T branches, or dropping the rejected wording
+    base = {"chain": 1, "node": 7, "parent": 3, "family": "local_search", "score": -0.0123,
+            "accepted": True, "probability": 0.42, "temperature": 0.031}
+    head = "chain 1 #7 <- #3 [local_search] -1.230% vs mainnet: "
+    assert cli._event_line("accept", base) == head + "accepted (p=0.42, T=0.031)"
+    improved = {**base, "score": 0.004, "probability": None, "temperature": None}
+    assert cli._event_line("accept", improved) == \
+        "chain 1 #7 <- #3 [local_search] +0.400% vs mainnet: accepted (improved)"
+    rejected = {**base, "accepted": False, "probability": 0.05, "temperature": 0.02}
+    assert cli._event_line("accept", rejected) == head + "rejected (p=0.05, T=0.020)"
+    assert cli._event_line("reheat", {"chain": 2, "node": 5, "temperature": 0.05}) == \
+        "chain 2 reheats from #5, T=0.050"
+    assert cli._event_line("iteration_done", {"outcome": "accepted",
+                                              "runs_since_improvement": 1}) == \
+        "kept as the chain's next step (1 in a row)"
+
+
+def test_fake_template_anneal_run_end_to_end(tmp_path, monkeypatch, capsys):
+    # The fake reply is at baseline parity: a job best (a template start's floor is minus
+    # infinity) and never a win (the margin is strict). Chains take turns: 0, then 1.
+    # mutation: not storing the challenge files, not passing --chains through, or a fake
+    # script with no whole-file reply (the edit fails, so no node is scored or accepted)
+    from talos.state import JobStore
+    monkeypatch.chdir(tmp_path)
+    prompts = []
+    script = cli._fake_script
+    monkeypatch.setattr(cli, "_fake_script",
+                        lambda system, user: prompts.append(user) or script(system, user))
+    rc = cli.main(["run", "--fake", "--yes", "--challenge", "energy_arbitrage", "--direction",
+                   "go", "--start", "template", "--search", "anneal", "--chains", "3",
+                   "--budget-iterations", "2"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    state = JobStore(run_dir).load()
+    assert state.status == "exhausted"
+    assert (run_dir / "challenge" / "README.md").is_file()
+    assert (run_dir / "challenge" / "template.rs").is_file()
+    assert [n.chain for n in state.nodes] == [0, 1]
+    assert all(n.score == 0.0 and n.accepted for n in state.nodes)
+    assert state.chains[2].current == 0 and state.chains[2].best == 0
+    assert (run_dir / "package" / "lineage.json").is_file()
+    assert "start template, search anneal, 3 chain(s)" in out
+    assert "chain 0 #1 <- #0 [" in out and "accepted (improved)" in out
+    # mutation: not passing the stored docs to the Loop leaves them out of every prompt
+    assert any("Fake challenge: maximise k." in u for u in prompts)
+    assert not any("let k" in u for u in prompts)  # no byte of the baseline's source
+
+
+def test_template_start_fetch_failure_creates_no_job(tmp_path, monkeypatch, capsys):
+    # mutation: fetching after the run directory exists, or not catching MainnetError, leaves a
+    # job behind (or a traceback) for a run that never started
+    monkeypatch.chdir(tmp_path)
+
+    def unreachable(ch):
+        raise MainnetError("network error fetching template.rs")
+
+    monkeypatch.setattr(cli.FAKE_MAINNET, "fetch_template", unreachable)
+    rc = cli.main(["run", "--fake", "--yes", "--challenge", "energy_arbitrage", "--direction",
+                   "go", "--start", "template", "--budget-iterations", "1"])
+    assert rc == 1
+    assert "mainnet unreachable" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_fake_template_anneal_chains_resume_reads_the_stored_challenge(
+        tmp_path, monkeypatch, capsys):
+    # A fake --start template --search anneal --chains 2 job runs 2 iterations, then resumes
+    # with the iteration cap raised to 5. The fake baseline gets a marker comment, because the
+    # fake whole-file reply (`let k = 1;`) is a candidate's code from iteration 1 on, so the
+    # baseline's own text cannot tell a leak apart. After the first run the docs fetcher returns
+    # different text, so the resumed prompts can only show the docs stored under the run
+    # directory. (A resume fetches template.rs again at the pinned monorepo commit.)
+    # mutation: a resume that refetches or drops the challenge docs, or drops the template, a
+    # resume that edits the baseline's files instead of the template root, or one that restarts
+    # the iteration count at 1
+    from talos.state import JobStore
+    marker = "FAKE_BASELINE_ONLY"
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)  # a resume reads the config; it names the fake provider
+    monkeypatch.setattr(cli.FAKE_MAINNET, "fetch_algorithm_files",
+                        lambda ch, name: {"mod.rs": f"fn solve() {{ let k = 1; }} // {marker}\n"})
+    prompts = []
+    script = cli._fake_script
+    monkeypatch.setattr(cli, "_fake_script",
+                        lambda system, user: prompts.append((system, user)) or script(system, user))
+    rc = cli.main(["run", "--fake", "--yes", "--challenge", "energy_arbitrage", "--direction",
+                   "go", "--start", "template", "--search", "anneal", "--chains", "2",
+                   "--budget-iterations", "2"])
+    assert rc == 1
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert [n.id for n in JobStore(run_dir).load().nodes] == [1, 2]
+    monkeypatch.setattr(cli.FAKE_MAINNET, "fetch_challenge_docs",
+                        lambda ch: {"README.md": "REFETCHED DOC\n"})
+    spec = json.loads((run_dir / "job.json").read_text())
+    spec["budget"]["iterations"] = 5
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    st = json.loads((run_dir / "state.json").read_text())
+    st["status"] = "cancelled"  # an exhausted job is finished; a cancelled one resumes
+    (run_dir / "state.json").write_text(json.dumps(st))
+    first = len(prompts)
+    capsys.readouterr()
+    rc = cli.main(["run", "--resume", run_dir.name])
+    state = JobStore(run_dir).load()
+    # Iteration 3 is chain 0's turn, built on node 1 (k=1, baseline parity); its k=2 beats the
+    # baseline on training and held-out, so the resumed job wins there.
+    assert (rc, state.status, state.iteration) == (0, "won", 3)
+    assert [(n.id, n.chain, n.parent) for n in state.nodes] == [(1, 0, 0), (2, 1, 0), (3, 0, 1)]
+    resumed = prompts[first:]
+    proposals = [(s, u) for s, u in resumed if s.startswith("You are a research engineer")]
+    edits = [(s, u) for s, u in resumed if s.startswith("You are editing")]
+    assert len(proposals) == 1 and len(edits) == 1
+    assert all("Fake challenge: maximise k." in u for s, u in proposals + edits)
+    assert "pub fn solve_challenge(" in proposals[0][0]
+    for system, user in prompts:
+        assert marker not in system + user and "REFETCHED" not in system + user

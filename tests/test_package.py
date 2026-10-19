@@ -1,7 +1,9 @@
+import json
 import zipfile
 from dataclasses import replace
 
 from talos.budget import Budget, Spend
+from talos.lineage import ROOT, Chain, Node
 from talos.package import build_package, evidence_draft, scores_markdown
 from talos.state import BaselineRecord, Candidate, JobSpec, JobState, JobStore
 from talos.types import NonceResult, NonceSet
@@ -232,3 +234,116 @@ def test_package_without_candidate_has_no_submission_folder(tmp_path):
     st.best = None
     # mutation: writing an empty submission/ invites submitting nothing
     assert not (build_package(spec, st, store) / "submission").exists()
+
+
+def _node(id, parent, family, title, outcome, score, accepted, best=False):
+    return Node(id=id, chain=0, parent=parent, family=family, title=title, outcome=outcome,
+                score=score, accepted=accepted, best=best)
+
+
+def test_lineage_files_show_the_best_path_and_families(tmp_path):
+    # mutation: listing every node on the path, or counting rejected nodes as accepted
+    spec, st, store = make(tmp_path)
+    st.nodes = [_node(1, ROOT, "lp", "First", "improved", 0.01, True),
+                _node(2, 1, "lp", "Second", "improved", 0.03, True, best=True),
+                _node(3, 1, "greedy", "Third", "rejected", -0.02, False)]
+    st.chains = [Chain(index=0, current=2, best=2, best_score=0.03)]
+    st.best = replace(st.best, iteration=2)
+    st.validations = [{"outcome": "validated"}, {"outcome": "demoted"}, {"outcome": "validated"}]
+    pkg = build_package(spec, st, store)
+    data = json.loads((pkg / "lineage.json").read_text(encoding="utf-8"))
+    assert set(data) == {"nodes", "chains"} and len(data["nodes"]) == 3
+    md = (pkg / "lineage.md").read_text(encoding="utf-8")
+    first = "#1 [lp] First: +1.000% vs mainnet"
+    second = "#2 [lp] Second: +3.000% vs mainnet"
+    assert first in md and second in md and md.index(first) < md.index(second)
+    assert "#3 [greedy]" not in md.split("| family")[0]
+    assert "| lp | 2 | 2 |" in md and "| greedy | 1 | 0 |" in md
+    assert "Metered validations: 3 (1 demoted)" in md
+
+
+def test_template_package_diffs_against_the_template_and_drops_the_uai_line(tmp_path):
+    # mutation: diffing against the baseline hands the user a patch built from mainnet code
+    spec, st, store = make(tmp_path)
+    marker = "BASELINE_MARKER"
+    st.baseline = replace(st.baseline, files={"mod.rs": f"fn a() {{}}\n// {marker}\n"})
+    spec = replace(spec, start="template", hyperparameters={"t": {"x": 1}})
+    (store.run_dir / "challenge").mkdir()
+    (store.run_dir / "challenge" / "template.rs").write_text("fn a() {}\n", encoding="utf-8")
+    pkg = build_package(spec, st, store)
+    names = {p.name for p in pkg.iterdir()}
+    assert "diff_vs_template.patch" in names
+    assert "diff_vs_baseline.patch" not in names and "hyperparameters.json" not in names
+    patch = (pkg / "diff_vs_template.patch").read_text(encoding="utf-8")
+    assert "template/mod.rs" in patch and marker not in patch
+    readme = (pkg / "README.md").read_text(encoding="utf-8")
+    assert "Unique Algorithm Identifier" not in readme and "never shown to the LLM" in readme
+    assert "candidate ran with none" in readme
+    for p in pkg.rglob("*"):
+        if p.is_file():
+            assert marker not in p.read_text(errors="ignore")
+
+
+def test_package_without_a_best_still_writes_lineage(tmp_path):
+    # mutation: writing lineage.json after the no-best early return drops it
+    spec, st, store = make(tmp_path)
+    st.best = None
+    st.nodes = [_node(1, ROOT, "lp", "First", "rejected", -0.01, False)]
+    st.chains = [Chain(index=0)]
+    pkg = build_package(spec, st, store)
+    assert len(json.loads((pkg / "lineage.json").read_text(encoding="utf-8"))["nodes"]) == 1
+
+
+def test_template_package_without_a_template_copy_still_hands_back(tmp_path):
+    # mutation: falling back to the baseline diff, or reading template.rs unguarded
+    spec, st, store = make(tmp_path)
+    marker = "BASELINE_MARKER"
+    st.baseline = replace(st.baseline, files={"mod.rs": f"fn a() {{}}\n// {marker}\n"})
+    spec = replace(spec, start="template")
+    pkg = build_package(spec, st, store)
+    names = {p.name for p in pkg.iterdir()}
+    assert "README.md" in names and (tmp_path / "package.zip").exists()
+    assert "diff_vs_baseline.patch" not in names and "diff_vs_template.patch" not in names
+    assert "no diff against it is included" in (pkg / "README.md").read_text(encoding="utf-8")
+    for p in pkg.rglob("*"):
+        if p.is_file():
+            assert marker not in p.read_text(errors="ignore")
+
+
+def _tree_hypotheses(st):
+    st.hypotheses = [{"iteration": i, "against": a, "title": t, "description": f"{t} desc",
+                      "strategy_tag": "hybrid", "outcome": o, "chain": c}
+                     for i, a, t, o, c in [(1, 0, "Root step", "improved", 0),
+                                           (2, 0, "Other chain", "improved", 1),
+                                           (3, 1, "Best step", "improved", 0)]]
+    st.nodes = [_node(1, ROOT, "lp", "Root step", "improved", 0.01, True),
+                _node(2, ROOT, "dp", "Other chain", "improved", 0.005, True),
+                _node(3, 1, "lp", "Best step", "improved", 0.03, True, best=True)]
+    st.nodes[1].chain = 1
+    st.chains = [Chain(index=0, current=3, best=3, best_score=0.03),
+                 Chain(index=1, current=2, best=2, best_score=0.005)]
+    st.best = replace(st.best, iteration=3)
+
+
+def test_hypothesis_log_names_parent_nodes_in_a_tree(tmp_path):
+    # mutation: keeping "vs best #N" for a template start, anneal or several chains, or
+    # calling node 0 the baseline in a template start
+    spec, st, store = make(tmp_path)
+    _tree_hypotheses(st)
+    for kw, root in [({"start": "template"}, "vs the empty template"),
+                     ({"search": "anneal"}, "vs the baseline"), ({"chains": 2}, "vs the baseline")]:
+        text = (build_package(replace(spec, **kw), st, store) / "hypotheses.md").read_text(
+            encoding="utf-8")
+        assert "vs best #" not in text
+        assert f"- #1 ({root}) [hybrid] Root step" in text
+        assert "- #3 (vs node #1) [hybrid] Best step" in text
+
+
+def test_evidence_draft_lists_only_the_best_path_in_a_tree(tmp_path):
+    # mutation: listing every improved hypothesis from every chain (today's rule) puts the
+    # other chain's method into the method description of the best node
+    spec, st, store = make(tmp_path)
+    _tree_hypotheses(st)
+    text = evidence_draft(replace(spec, chains=2), st)
+    assert "- Root step: Root step desc\n- Best step: Best step desc" in text
+    assert "Other chain" not in text

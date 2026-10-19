@@ -35,8 +35,10 @@ capabilities dropped, and CPU and memory limits; the one opt-in exception is
 until the budget runs out, it asks the LLM for an edit, compiles it on the compute backend,
 and scores it on training nonces. A candidate that beats the baseline on training is scored
 again on held-out nonces, and wins only if it still beats the baseline there. Baseline and
-candidates always run on the same nonces, fuel, hyperparameters and hardware class, and the
-LLM never sees the `rand_hash` that seeds the nonces.
+candidates always run on the same nonces, fuel and hardware class, and on the same
+hyperparameters except in a `--start template` job, whose candidates run without them (see
+[From-scratch start and annealing search](docs/architecture.md#from-scratch-start-and-annealing-search)).
+The LLM never sees the `rand_hash` that seeds the nonces.
 
 [docs/architecture.md](docs/architecture.md) has the full flowchart, the guards between
 build and scoring, the agentic sandbox and the baseline cache.
@@ -373,7 +375,7 @@ Before the job starts, Talos fetches the challenge's active tracks and fuel from
 draws the nonces, and prints a line such as:
 
 ```
-Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}, 8 nonces per track; hyperparameters: 5/5 tracks from mainnet
+Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}, 8 nonces per track, scoring native, start mainnet, search greedy, 1 chain(s); hyperparameters: 5/5 tracks from mainnet
 ```
 
 The job id is the start time plus the challenge name.
@@ -398,7 +400,19 @@ remaining, or `∞ left` without `--budget-hours`. An iteration that did not imp
 `no improvement (4 in a row)` or `no candidate: did not compile (2 in a row)`; a failed
 compile prints the first `error` line of the compiler output. Lines are cut to the terminal
 width. `runs/<job_id>/timeline.jsonl` records every event with every field in full,
-including hypothesis descriptions and the compiler output.
+including hypothesis descriptions and the compiler output (except the baseline's own compiler
+output in a `--start template` job, which is left out so its source cannot leak).
+
+With `--search anneal`, or with several chains or a template start, each scored candidate
+also prints an `accept` line (chain, node, parent, design family, gap to mainnet, and the
+decision), and a chain that stalls prints a `reheat` line. A candidate kept as its chain's
+next step without improving the job's best reads `kept as the chain's next step`:
+
+```
+[11:02:40] #4 chain 1 #4 <- #2 [rolling-horizon LP] -12.000% vs mainnet: accepted (p=0.42, T=0.031)
+[11:09:15] #6 chain 1 #6 <- #4 [greedy dispatch] -20.000% vs mainnet: rejected (p=0.05, T=0.029)
+[11:31:03] #9 chain 1 reheats from #3, T=0.050
+```
 
 ### Stop
 
@@ -492,14 +506,17 @@ Prompts for anything not given as a flag, unless `--yes` is passed.
 | `--direction-file PATH` | The same, read from a file. Pass one of `--direction` or `--direction-file`, not both. |
 | `--track NAME` | Optimise one active track of the challenge instead of all of them (`all` is the default; the prompt lists the tracks). Training scores that track only. When a candidate wins on training, the confirmation scores that track's held-out nonces plus every other track's training nonces, and no other track may get worse. The LLM still sees and may edit every file. |
 | `--nonces N` | Nonces per track in each of the training and held-out sets (8 is the default; the prompt asks). Every nonce is scored for the baseline on both sets and for every candidate on training, then again on held-out when it wins on training, so the count sets the cost of every evaluation. On hypergraph an L40 spends about 10 minutes per nonce-per-track on the baseline's two sets at the current fuel (measured 2026-09-25); 32 made that baseline 11 hours against the 6-hour C3 job limit. A resume keeps the sets the job was drawn with. |
-| `--hyperparameters mainnet\|none` | `mainnet` (the default) runs the baseline and every candidate with the per-track hyperparameters of the baseline algorithm's best-quality mainnet benchmark at the job's fuel, fixed at job start. A track with no such benchmark runs without any. `none` runs every nonce without hyperparameters. The package lists the values and the benchmark they came from. |
+| `--hyperparameters mainnet\|none` | `mainnet` (the default) runs the baseline and every candidate with the per-track hyperparameters of the baseline algorithm's best-quality mainnet benchmark at the job's fuel, fixed at job start. A track with no such benchmark runs without any. `none` runs every nonce without hyperparameters. The package lists the values and the benchmark they came from. With `--start template`, only the baseline runs with these values: candidates run with none, and the package has no `hyperparameters.json` (its README lists the baseline's values). |
 | `--mode single-shot\|agentic` | Overrides the configured mode for this job. `agentic` needs a CLI provider and uses roughly 5 to 20 times the tokens of `single-shot`. |
 | `--scoring native\|metered` | `native` (the default) scores research candidates with an unmetered runner under a per-track time budget calibrated from the baseline, which is faster; a candidate that improves natively is then scored again on the metered runtime and only becomes the best if it holds up there ([how it works](docs/architecture.md#native-research-scoring)). `metered` scores every candidate with TIG's own `tig-runtime` under the job's fuel limit. The live parity test has not been run: the CPU runner is measured on knapsack only, and the GPU runner has never been compiled; a native build that fails at calibration makes the job score metered. A job keeps its scoring on resume; `--resume` with a different `--scoring` is refused. A job whose `job.json` predates the `scoring` field resumes metered. The calibration is cached at `~/.talos/calibration/<challenge>/<key>.json`, keyed by `talos/calibration.py::calibration_key` (challenge, hardware class, both pins, the baseline's code, the native runner and the baseline's hyperparameters). If it cannot be made, the job scores metered and says so in the timeline. |
+| `--start mainnet\|template` | `mainnet` (the default) starts from the top-adoption mainnet algorithm. `template` starts from TIG's empty template: the LLM sees the challenge's `README.md` and its non-baseline source files from the pinned monorepo (`talos/challenges.py::TEMPLATE_START_FILES`, not the baseline algorithms' directory) and the template, and never the baseline's code. The baseline is still measured and every candidate is scored against it. Candidates run without hyperparameters while the baseline keeps the mainnet ones. `energy_arbitrage` only; refused for other challenges. Refused with `codex-cli` in agentic mode, even with `TALOS_ALLOW_CODEX_AGENTIC=1`. See [From-scratch start and annealing search](docs/architecture.md#from-scratch-start-and-annealing-search). |
+| `--search greedy\|anneal` | `greedy` (the default) edits the best candidate so far. `anneal` edits the chain's current candidate and sometimes accepts a worse one so the search can leave a local optimum. The annealing settings (start temperature 0.05, final temperature 0.1 of that, reheat after 5 iterations without a new chain best) are estimates with no measurement behind them. |
+| `--chains N` | Independent search chains (default 1; a value below 1 is refused). Chains take turns: iteration n runs on chain (n-1) mod N, one at a time; running them concurrently comes in a later change. |
 | `--budget-usd N` | LLM spend cap in USD. |
 | `--budget-hours N` | Wall-clock cap in hours. |
 | `--budget-iterations N` | Iteration cap. |
 | `--budget-compute-usd N` | Estimated compute spend cap in USD. |
-| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track, hyperparameters or nonces. |
+| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track, hyperparameters, nonces, start, search or chains. |
 | `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20 (not asked and not set on the `local` backend, where it is always zero). |
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
@@ -593,11 +610,12 @@ Each job gets a directory under `runs/`:
 
 | Path | Contents |
 |---|---|
-| `runs/<job_id>/job.json` | The job's fixed inputs: challenge, direction, provider, model, mode, budget, nonces, fuel, track, baseline algorithm, hyperparameters, scoring. Written once. |
-| `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log. A `--scoring native` job also records its scoring, its per-track time budgets and a `validations` list: one entry per candidate that improved natively, with its iteration, its outcome (`validated` or `demoted`) and the reason it was demoted. |
-| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. |
+| `runs/<job_id>/job.json` | The job's fixed inputs: challenge, direction, provider, model, mode, budget, nonces, fuel, track, baseline algorithm, hyperparameters, scoring, start, search, chains and the annealing settings. Written once. |
+| `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log, and the lineage tree (`nodes`, one per iteration, and `chains`, each chain's current node, best node and stall count). A `--scoring native` job also records its scoring, its per-track time budgets and a `validations` list: one entry per candidate that improved natively, with its iteration, its outcome (`validated` or `demoted`) and the reason it was demoted. |
+| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. A tree job (anneal, several chains or a template start) adds `accept` (one per scored candidate: chain, node, parent, family, score, decision, probability, temperature) and `reheat`. |
 | `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
 | `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
+| `runs/<job_id>/challenge/` | A `--start template` job only: the challenge files and the template the LLM was shown. |
 | `runs/<job_id>/iterations/<n>/` | Each candidate's files and its hypothesis. |
 | `runs/<job_id>/best/` | The best candidate's files so far. |
 | `runs/<job_id>/package/` | The hand-back package, written when the job stops. |
@@ -608,15 +626,17 @@ The package directory holds:
 | File | Contents |
 |---|---|
 | `submission` | A folder with the candidate to submit: the best algorithm's `.rs` and `.cu` files and TIG's submission `README.md` template, to fill out. Absent when the job produced no candidate. |
-| `diff_vs_baseline.patch` | The candidate as a patch against the baseline. |
+| `diff_vs_baseline.patch` | The candidate as a patch against the baseline. A `--start template` job writes `diff_vs_template.patch` instead, against the empty template. |
+| lineage.json, lineage.md | The search tree: every iteration's node and each chain's state (lineage.json), and the path from the root to the best node with a per-design-family table (lineage.md). Written when the job recorded any node. |
 | `scores.md` | Per-nonce tables for baseline and candidate on training and held-out nonces. A focused job (`--track`) adds a regression-guard table for the other tracks. |
 | `hypotheses.md` | The full hypothesis log with outcomes. |
 | `evidence_draft.md` | A partly filled-in TIG advance-evidence template. |
-| `hyperparameters.json` | The per-track hyperparameters, when the job used them. |
+| `hyperparameters.json` | The per-track hyperparameters, when the job used them. Not written for a `--start template` job, whose candidate ran without them. |
 | `README.md` | The submission steps, with a Hyperparameters section when the job used them. |
 
 Benchmark the submitted algorithm with the same hyperparameters: the measured improvement
-holds only with them.
+holds only with them. A `--start template` candidate was scored without hyperparameters, so
+benchmark it without any.
 
 On the C3 backend each iteration also gets a `runs/<job_id>/c3/<n>/` directory, described in
 [docs/compute-backends.md](docs/compute-backends.md#c3-job-directories). The measured baseline
