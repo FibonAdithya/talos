@@ -1254,21 +1254,27 @@ def test_two_greedy_chains_take_turns_and_keep_their_own_parent(tmp_path):
     # mutation: building chain 1's iteration 2 on the job best (k=5) makes its SEARCH text
     # `let k = 1;` miss, and that iteration fails as failed:edit
     # mutation: leaving parent_gap unset drops the parent line from iteration 3's prompt
-    b = Budget(usd=None, hours=None, iterations=4, compute_usd=None)
+    # mutation: not resetting a chain's stall on a new best leaves chain 0 at 1
+    b = Budget(usd=None, hours=None, iterations=7, compute_usd=None)
     script = [hyp("a"), edit(5),            # 1, chain 0: from the root to k=5
               hyp("b"), edit(3),            # 2, chain 1: from the root to k=3
               hyp("c"), edit(6, frm=5),     # 3, chain 0: from node 1
-              hyp("d"), edit(4, frm=3)]     # 4, chain 1: from node 2
+              hyp("d"), edit(4, frm=3),     # 4, chain 1: from node 2
+              hyp("e"), edit(0, frm=6),     # 5, chain 0: worse, failed:score
+              hyp("f"), edit(1, frm=4),     # 6, chain 1: the baseline's score, failed:score
+              hyp("g"), edit(7, frm=6)]     # 7, chain 0: from node 3, a new best
     loop, fp, fb, store = make(tmp_path, script, scores=heldout_flat, budget=b,
                                spec_kw={"chains": 2})
     st = loop.run()
     assert st.status == "exhausted"
-    assert [h["outcome"] for h in st.hypotheses] == ["improved"] * 4
-    assert [n.chain for n in st.nodes] == [0, 1, 0, 1]
-    assert [n.parent for n in st.nodes] == [0, 0, 1, 2]
-    assert [n.id for n in st.nodes] == [1, 2, 3, 4]
-    assert [h["against"] for h in st.hypotheses] == [0, 0, 1, 2]
-    assert [(c.index, c.best) for c in st.chains] == [(0, 3), (1, 4)]
+    assert [h["outcome"] for h in st.hypotheses] == (
+        ["improved"] * 4 + ["failed:score"] * 2 + ["improved"])
+    assert [n.chain for n in st.nodes] == [0, 1, 0, 1, 0, 1, 0]
+    assert [n.parent for n in st.nodes] == [0, 0, 1, 2, 3, 4, 3]
+    assert [n.id for n in st.nodes] == [1, 2, 3, 4, 5, 6, 7]
+    assert [h["against"] for h in st.hypotheses] == [0, 0, 1, 2, 3, 4, 3]
+    assert [(c.index, c.best) for c in st.chains] == [(0, 7), (1, 4)]
+    assert [c.stall for c in st.chains] == [0, 1]
     system, user = fp.calls[4]  # iteration 3's hypothesis call
     assert "Parent (node #1): +4.000%" in system + user
 
@@ -1341,3 +1347,70 @@ def test_parent_files_come_from_disk_after_a_restart(tmp_path):
     on_disk = (tmp_path / "iterations" / "0001" / "mod.rs").read_text(encoding="utf-8")
     assert "let k = 5;" in on_disk
     assert again._current_files() == {"mod.rs": on_disk}
+
+
+def test_native_chain_best_keeps_its_native_score(tmp_path):
+    # spec §6: in a native job the accept rule compares native scores only, including against a
+    # parent that has since been validated. Node 1 (k=9) scores +8% natively but +6% metered
+    # (one metered nonce errors); iteration 3 on the same chain scores +7% natively.
+    # mutation: setting chain.best_score from rank_score() (the metered +6%) accepts iteration 3
+    # as chain 0's best
+    from talos.challenges import CHALLENGES
+
+    def metered(ch, files, ns):
+        q = quality_from_files(ch, files, ns)
+        return [None] + q[1:] if "let k = 9;" in files["mod.rs"] else q
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
+    script = [hyp("a"), edit(9),            # 1, chain 0: +8% native, +6% metered
+              hyp("b"), edit(11),           # 2, chain 1: +10% both ways, the job best
+              hyp("c"), edit(8, frm=9)]     # 3, chain 0: +7% native
+    loop, fp, _, store = native(tmp_path, script, bench=fb, budget=b, spec_kw={"chains": 2})
+    # No candidate beats the baseline outright (margin 50%), so a job-wide improvement needs a
+    # mean above the best; the error ceiling lets node 1's metered error through validation.
+    loop.rule = replace(CHALLENGES["knapsack"].beat, margin=0.5, error_ceiling=0.5)
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["improved", "improved", "failed:score"]
+    first = st.nodes[0]
+    assert first.score == pytest.approx(0.08) and first.metered_score == pytest.approx(0.06)
+    assert st.best.iteration == 2
+    assert st.chains[0].best == 1 and st.chains[0].best_score == pytest.approx(0.08)
+    assert st.nodes[2].accepted is False
+
+
+def test_a_candidate_failing_native_validation_is_never_accepted(tmp_path):
+    # spec §6: a demoted candidate never becomes a chain state.
+    # mutation: marking the demoted record accepted moves chain 0 onto node 1
+    def metered(ch, files, ns):
+        q = quality_from_files(ch, files, ns)
+        return [x + 1 for x in q] if "let k = 5;" in files["mod.rs"] else q
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(5)], bench=fb, budget=b)
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] == "failed:validation"
+    assert st.nodes[0].accepted is False and st.nodes[0].score == pytest.approx(0.04)
+    assert st.chains[0].best == 0 and st.chains[0].current == 0
+    assert st.chains[0].stall == 1
+
+
+def test_one_chain_on_a_mainnet_start_moves_only_with_the_job_best(tmp_path):
+    # Node 1 (k=9) scores +6% natively (one native nonce errors) and +8% metered, so the job
+    # best is +8% while chain 0's best_score is +6%. Iteration 2 scores +7% natively: above the
+    # chain's score, but not a job-wide improvement.
+    # mutation: chain-only acceptance with one chain on a mainnet start accepts iteration 2
+    from talos.challenges import CHALLENGES
+
+    def native_scores(ch, files, ns):
+        q = quality_from_files(ch, files, ns)
+        return [None] + q[1:] if "let k = 9;" in files["mod.rs"] else q
+    fb = FakeBench(native_scores, metered_scores=quality_from_files)
+    b = Budget(usd=None, hours=None, iterations=2, compute_usd=None)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(9), hyp("b"), edit(8, frm=9)],
+                                bench=fb, budget=b)
+    loop.rule = replace(CHALLENGES["knapsack"].beat, margin=0.5, error_ceiling=0.5)
+    st = loop.run()
+    assert st.best.iteration == 1 and st.best.delta["mean_rel_delta"] == pytest.approx(0.08)
+    assert st.chains[0].best_score == pytest.approx(0.06)
+    assert st.hypotheses[1]["outcome"] == "failed:score"
+    assert st.nodes[1].accepted is False and st.chains[0].best == 1

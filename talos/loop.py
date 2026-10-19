@@ -399,6 +399,11 @@ class Loop:
     def _best_gap(self) -> dict | None:
         return self._candidate_gap(self.state.best) if self.state.best else None
 
+    def _chain_scores_apart(self) -> bool:
+        """Whether a chain's best can differ from the job's. With one chain on a mainnet start
+        the chain's best moves only with state.best, as before chains existed."""
+        return self.spec.chains > 1 or self.spec.start == "template"
+
     def _lineage_fields(self, chain: Chain) -> dict:
         """The lineage part of a new iteration record."""
         return {"chain": chain.index, "against": self._parent_id(chain), "design_family": "",
@@ -407,7 +412,9 @@ class Loop:
     def _add_node(self, n: int, record: dict, improved: bool, scored: dict | None,
                   metered: dict | None) -> None:
         """Appends iteration n's Node and moves its chain. A job-wide improvement always becomes
-        the chain's best, so with one chain the chain's best stays the job's best."""
+        the chain's best, so with one chain the chain's best stays the job's best. A chain's
+        best_score is the score its best was produced with (native in a native job), never the
+        metered score of a validation: spec §6 compares native scores only."""
         chain = self._chain(n)
         node = Node(id=n, chain=chain.index, parent=record["against"],
                     family=record.get("design_family", ""), title=record.get("title", ""),
@@ -422,10 +429,10 @@ class Loop:
         self.state.nodes.append(node)
         if node.accepted:
             chain.current = n
-            rank = node.rank_score()
-            if improved or (rank is not None
-                            and (chain.best_score is None or rank > chain.best_score)):
-                chain.best, chain.best_score, chain.stall = n, rank, 0
+            score = node.score
+            if improved or (score is not None
+                            and (chain.best_score is None or score > chain.best_score)):
+                chain.best, chain.best_score, chain.stall = n, score, 0
                 return
         chain.stall += 1
 
@@ -602,10 +609,9 @@ class Loop:
             self.state.best = cand
             self._write_files(self.store.run_dir / "best", cand.files)
             record.update(outcome="improved", accepted=True)
-        elif chain.best_score is None or delta.mean_rel_delta > chain.best_score:
+        elif self._chain_scores_apart() and (chain.best_score is None
+                                              or delta.mean_rel_delta > chain.best_score):
             # Greedy, per chain: not a job-wide improvement, but better than this chain's best.
-            # With one chain and a mainnet start the chain's best is the job's, so this is only
-            # reached with more than one chain (or a template start).
             record.update(outcome="accepted", accepted=True)
         else:
             record["outcome"] = "failed:score"
@@ -794,14 +800,6 @@ class Loop:
             shutil.rmtree(d)
             self._event("discarded_incomplete", discarded=n)
 
-    def _discard_stale_lineage(self) -> None:
-        """A node is saved together with the iteration count it belongs to, so a node past
-        state.iteration comes from a state rolled back by hand. Such nodes are dropped, and the
-        chains are rebuilt by _chain from state.best, since they may point at a dropped node."""
-        kept = [node for node in self.state.nodes if node.id <= self.state.iteration]
-        if len(kept) != len(self.state.nodes):
-            self.state.nodes, self.state.chains = kept, []
-
     def _resume_pending(self, pending: dict) -> None:
         n = pending["purpose"]
         self._n = n
@@ -824,7 +822,6 @@ class Loop:
         if self.state.status in TERMINAL:
             return self.state  # before the discard: a finished job keeps its winning directory
         self._discard_incomplete_iteration()
-        self._discard_stale_lineage()
         try:
             self.state.status = "researching"
             self._save()

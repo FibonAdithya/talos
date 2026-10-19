@@ -330,7 +330,7 @@ def test_resume_restarts_a_cancelled_job(tmp_path, monkeypatch, capsys):
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     st = json.loads((run_dir / "state.json").read_text())
     st.update(status="cancelled", stop_reason="user requested stop", best=None, iteration=0,
-              confirmed=[], hypotheses=[])
+              confirmed=[], hypotheses=[], nodes=[], chains=[])
     st["spend"]["iterations"] = 0
     (run_dir / "state.json").write_text(json.dumps(st))
     capsys.readouterr()
@@ -411,7 +411,7 @@ def test_resume_after_the_hours_window_shifts_the_clock(tmp_path, monkeypatch, c
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     st = json.loads((run_dir / "state.json").read_text())
     st.update(status="cancelled", stop_reason="user requested stop", best=None, iteration=0,
-              confirmed=[], hypotheses=[])
+              confirmed=[], hypotheses=[], nodes=[], chains=[])
     st["spend"]["iterations"] = 0
     cancelled_at = time.time() - 5 * 3600  # cancelled five hours ago, an hour past the window
     st["spend"]["started_at"] = cancelled_at - 60
