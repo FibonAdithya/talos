@@ -62,7 +62,8 @@ _FENCE_RE = re.compile(r"^[ \t]*```[\w+-]*[ \t]*$")
 def _parse_file_blocks(text: str) -> list[tuple[str, str]]:
     """(path, body) for each `<<<<<<< FILE <path>` ... `>>>>>>> END FILE` block, in order.
     Prose between blocks is ignored. One code-fence line opening the body and one closing it
-    are dropped. A block with no end marker ends the scan."""
+    are dropped. A block with no end marker (a reply cut off by the token limit) raises
+    EditError, so a truncated reply never applies in part."""
     blocks: list[tuple[str, str]] = []
     lines = text.splitlines()
     i, n = 0, len(lines)
@@ -76,7 +77,8 @@ def _parse_file_blocks(text: str) -> list[tuple[str, str]]:
             body.append(lines[i])
             i += 1
         if i >= n:
-            break
+            raise EditError(f"FILE block for {m.group('file')} has no END FILE line "
+                            "(reply truncated?)")
         i += 1
         if body and _FENCE_RE.match(body[0]):
             body = body[1:]

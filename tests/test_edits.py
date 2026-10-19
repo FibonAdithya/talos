@@ -126,3 +126,12 @@ def test_whole_file_last_block_for_a_file_wins():
     out = apply_whole_file_response({"mod.rs": "old\n"},
                                     whole("mod.rs", "one\n") + whole("mod.rs", "two\n"))
     assert out.files == {"mod.rs": "two\n"} and out.applied == 1
+
+
+@pytest.mark.parametrize("before", ["", "<<<<<<< FILE lib.rs\nfn l() {}\n>>>>>>> END FILE\n"])
+def test_whole_file_block_without_an_end_line_raises(before):
+    # a reply cut off by the token limit. mutation: dropping the block silently (with or without
+    # another complete block before it) applies a partial rewrite, or nothing, as if valid
+    cut = before + "<<<<<<< FILE mod.rs\nfn a() {\n    let x = 1;\n"
+    with pytest.raises(EditError, match=r"FILE block for mod\.rs has no END FILE line"):
+        apply_whole_file_response({"mod.rs": "old\n", "lib.rs": "old\n"}, cut)
