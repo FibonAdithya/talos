@@ -8,6 +8,7 @@ from importlib import resources
 from pathlib import Path
 
 from talos.challenges import CHALLENGES
+from talos.lineage import Node
 from talos.scoring import ScoringError, beats, bundle_delta, focus_sets, select
 from talos.state import JobSpec, JobState, JobStore
 from talos.types import NonceResult
@@ -36,12 +37,12 @@ def scores_markdown(baseline: list[NonceResult], candidate: list[NonceResult]) -
     return "\n".join(rows) + "\n" + summary
 
 
-def _diff(base: dict[str, str], cand: dict[str, str]) -> str:
+def _diff(base: dict[str, str], cand: dict[str, str], label: str = "baseline") -> str:
     out = []
     for name in sorted(set(base) | set(cand)):
         a = base.get(name, "").splitlines(keepends=True)
         b = cand.get(name, "").splitlines(keepends=True)
-        out.extend(difflib.unified_diff(a, b, fromfile=f"baseline/{name}", tofile=f"candidate/{name}"))
+        out.extend(difflib.unified_diff(a, b, fromfile=f"{label}/{name}", tofile=f"candidate/{name}"))
     return "".join(out)
 
 
@@ -115,9 +116,51 @@ def _won_training(spec: JobSpec, state: JobState) -> bool:
         return False
 
 
+def _best_path(state: JobState) -> list[Node]:
+    """Nodes from the root's child down to the best node, following parent links."""
+    by_id = {n.id: n for n in state.nodes}
+    node = by_id.get(state.best.iteration) if state.best else None
+    if node is None or not node.best:
+        return []
+    path = []
+    while node is not None and len(path) <= len(by_id):
+        path.append(node)
+        node = by_id.get(node.parent)
+    return path[::-1]
+
+
+def lineage_markdown(spec: JobSpec, state: JobState) -> str:
+    lines = ["# Lineage", "", "## Path from the root to the best node", ""]
+    path = _best_path(state)
+    for n in path:
+        score = n.rank_score()
+        shown = "unscored" if score is None else f"{score:+.3%} vs mainnet"
+        lines.append(f"- #{n.id} [{n.family}] {n.title}: {shown}")
+    if not path:
+        lines.append("(no best node)")
+    lines += ["", "## Families", "", "| family | nodes | accepted | best score |",
+              "|---|---|---|---|"]
+    for family in sorted({n.family for n in state.nodes}):
+        members = [n for n in state.nodes if n.family == family]
+        scores = [s for s in (n.rank_score() for n in members) if s is not None]
+        best = f"{max(scores):+.3%}" if scores else "n/a"
+        lines.append(f"| {family} | {len(members)} | {sum(n.accepted for n in members)} "
+                     f"| {best} |")
+    demoted = sum(1 for v in state.validations if v.get("outcome") == "demoted")
+    lines += ["", f"Metered validations: {len(state.validations)} ({demoted} demoted)", ""]
+    return "\n".join(lines)
+
+
 def _hyperparameters_section(spec: JobSpec) -> str:
     if spec.hyperparameters is None:
         return ""
+    if spec.start == "template":
+        lines = [f"- {t}: " + ("none" if spec.hyperparameters.get(t) is None
+                               else f"`{json.dumps(spec.hyperparameters[t], sort_keys=True)}`")
+                 for t in spec.tracks]
+        return ("\n## Hyperparameters\n\nThe baseline ran with these per-track hyperparameters; "
+                "the candidate ran with none. They are not shipped as a file, because the "
+                "candidate was not tuned for them.\n\n" + "\n".join(lines) + "\n")
     lines = []
     for track in spec.tracks:
         hp = spec.hyperparameters.get(track)
@@ -154,11 +197,16 @@ def _readme(spec: JobSpec, state: JobState) -> str:
     else:
         head += ("This candidate was never scored on the held-out nonces; it did not beat the "
                  "baseline on training.\n\n")
+    if spec.start == "template":
+        head += ("Written from TIG's empty template; the baseline's code was never shown to the "
+                 "LLM.\n\n")
+    uai = ("" if spec.start == "template" else
+           " If the baseline's own README on mainnet "
+           f"(`tig-algorithms/src/{spec.challenge}/{state.baseline.name}/README.md`) lists a "
+           "Unique Algorithm Identifier and this candidate still embodies that method, carry "
+           "it over.")
     head += ("## Submitting\n\n1. Fill out the template `submission/README.md`: algorithm name, "
-             "copyright, submitter. If the baseline's own README on mainnet "
-             f"(`tig-algorithms/src/{spec.challenge}/{state.baseline.name}/README.md`) lists a "
-             "Unique Algorithm Identifier and this candidate still embodies that method, carry "
-             "it over.\n"
+             f"copyright, submitter.{uai}\n"
              "2. Copy the contents of `submission/` into "
              f"`tig-algorithms/src/{spec.challenge}/<your_name>/` in a monorepo checkout.\n"
              "3. Follow docs/guides in the monorepo to submit. For Advance Rewards, complete "
@@ -197,6 +245,13 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     if pkg.exists():
         shutil.rmtree(pkg)
     pkg.mkdir()
+    if state.nodes:
+        (pkg / "lineage.json").write_text(
+            json.dumps({"nodes": [n.to_dict() for n in state.nodes],
+                        "chains": [c.to_dict() for c in state.chains]}, indent=1),
+            encoding="utf-8", newline="\n")
+        (pkg / "lineage.md").write_text(lineage_markdown(spec, state),
+                                        encoding="utf-8", newline="\n")
     if state.best is None:
         (pkg / "README.md").write_text(_readme_no_candidate(spec, state),
                                        encoding="utf-8", newline="\n")
@@ -208,8 +263,14 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
     write_submission(spec, state.best.files, pkg / SUBMISSION_DIR)
-    (pkg / "diff_vs_baseline.patch").write_text(_diff(state.baseline.files, state.best.files),
-                                                encoding="utf-8", newline="\n")
+    if spec.start == "template":
+        template = (store.run_dir / "challenge" / "template.rs").read_text(encoding="utf-8")
+        (pkg / "diff_vs_template.patch").write_text(
+            _diff({"mod.rs": template}, state.best.files, "template"),
+            encoding="utf-8", newline="\n")
+    else:
+        (pkg / "diff_vs_baseline.patch").write_text(
+            _diff(state.baseline.files, state.best.files), encoding="utf-8", newline="\n")
     scores = "\n".join(f"# {heading}\n\n{table}" for heading, table in scores_sections(spec, state))
     (pkg / "scores.md").write_text(scores, encoding="utf-8", newline="\n")
     hyps = "\n".join(_hypothesis_line(h) for h in state.hypotheses)
@@ -218,7 +279,7 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     (pkg / "evidence_draft.md").write_text(evidence_draft(spec, state),
                                            encoding="utf-8", newline="\n")
     (pkg / "README.md").write_text(_readme(spec, state), encoding="utf-8", newline="\n")
-    if spec.hyperparameters is not None:
+    if spec.hyperparameters is not None and spec.start != "template":
         (pkg / "hyperparameters.json").write_text(json.dumps(spec.hyperparameters, indent=1),
                                                   encoding="utf-8", newline="\n")
     shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
