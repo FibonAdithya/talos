@@ -795,6 +795,16 @@ def test_run_refuses_agentic_codex_without_the_opt_in(tmp_path, monkeypatch, cap
     assert cli.main(argv) == 0  # the opt-in lets it through
 
 
+def test_codex_refused_takes_the_start(monkeypatch, capsys):
+    # mutation: ignoring start lets the opt-in through for a template start; pure function, no
+    # subprocess or network
+    monkeypatch.setenv("TALOS_ALLOW_CODEX_AGENTIC", "1")
+    cfg = Config(provider="codex-cli", model="m", mode="agentic", api_base=None)
+    assert cli._codex_refused(cfg) is False
+    assert cli._codex_refused(cfg, "template") is True
+    assert "--start template" in capsys.readouterr().err
+
+
 def test_deploy_bench_failure_never_quotes_the_token_secret():
     # mutation: echoing argv into the error leaks the Modal secret
     def run(cmd, **kw):

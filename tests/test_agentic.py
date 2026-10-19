@@ -9,8 +9,9 @@ from pathlib import Path
 import pytest
 
 from talos.agentic import (AgenticError, CODEX_AGENTIC_ENV, SETTINGS_REL, attach_agentic,
-                           claude_md, prepare_worktree, read_back, rule_root, sandbox_settings)
-from talos.prompts import PromptContext
+                           claude_md, codex_agentic_refused, prepare_worktree, read_back,
+                           rule_root, sandbox_settings)
+from talos.prompts import PromptContext, gap_block
 from talos.state import JobStore
 
 
@@ -435,3 +436,70 @@ def test_a_native_job_tells_its_agent_to_compile_natively():
     assert "`talos compile --challenge knapsack --dir algorithm`" in metered
     # mutation: the flag left out puts a native job's agent on the 287 s metered build
     assert "`talos compile --challenge knapsack --dir algorithm --native`" in native
+
+
+def template_ctx(**kw):
+    return PromptContext(challenge="energy_arbitrage", template_rs="TEMPLATE-RS", direction="go",
+                         tacit="", files={"mod.rs": "fn empty(){}"}, baseline_name="b",
+                         best_delta=float("-inf"), start="template",
+                         challenge_docs={"README.md": "DOC-TEXT"}, **kw)
+
+
+def test_template_worktree_carries_challenge_docs(tmp_path):
+    # mutation: writing only template_rs to CHALLENGE.md leaves the agent with no problem
+    # definition
+    wt = prepare_worktree(template_ctx(), parent=tmp_path)
+    text = (wt / "CHALLENGE.md").read_text()
+    assert "DOC-TEXT" in text
+    assert "tig-challenges/src/energy_arbitrage/README.md" in text
+    assert "TEMPLATE-RS" in text
+
+
+def test_template_claude_md_shows_the_gap_and_family_key():
+    # mutation: keeping "Your current best is" beside the gap block prints "-inf%"
+    c = template_ctx()
+    md = claude_md(c)
+    assert gap_block(c) in md
+    assert "design_family" in md
+    assert "Your current best is" not in md
+    assert "-inf" not in md
+
+
+def test_mainnet_challenge_md_is_unchanged(tmp_path):
+    wt = prepare_worktree(ctx(), parent=tmp_path)
+    assert (wt / "CHALLENGE.md").read_text() == (
+        "# knapsack solver contract (template.rs)\n\n```rust\npub fn solve_challenge(\n```\n")
+
+
+def _write_hypothesis(wt, body):
+    (wt / ".talos" / "hypothesis.json").write_text(json.dumps(body))
+    (wt / "algorithm" / "mod.rs").write_text("fn changed(){}")
+
+
+def test_read_back_reads_design_family(tmp_path):
+    # mutation: dropping design_family from read_back loses the family label
+    c = template_ctx()
+    wt = prepare_worktree(c, parent=tmp_path)
+    _write_hypothesis(wt, {"title": "t", "description": "d", "strategy_tag": "hybrid",
+                           "design_family": " greedy dispatch "})
+    assert read_back(wt, c)[0]["design_family"] == "greedy dispatch"
+    _write_hypothesis(wt, {"title": "t", "description": "d", "strategy_tag": "hybrid"})
+    assert read_back(wt, c)[0]["design_family"] == "unlabelled"
+    _write_hypothesis(wt, {"title": "t", "description": "d", "design_family": "x" * 200})
+    assert read_back(wt, c)[0]["design_family"] == "x" * 80
+
+
+def test_codex_refused_for_template_even_when_opted_in(monkeypatch):
+    # mutation: reusing the env opt-in lets codex run agentic on a template start
+    monkeypatch.setenv(CODEX_AGENTIC_ENV, "1")
+    assert codex_agentic_refused("codex-cli", "agentic", "template") is True
+    assert codex_agentic_refused("codex-cli", "agentic", "mainnet") is False
+    assert codex_agentic_refused("claude-cli", "agentic", "template") is False
+
+
+def test_attach_agentic_refuses_codex_for_a_template_job(monkeypatch):
+    # mutation: attach_agentic not passing loop.spec.start
+    monkeypatch.setenv(CODEX_AGENTIC_ENV, "1")
+    loop = types.SimpleNamespace(spec=types.SimpleNamespace(start="template"))
+    with pytest.raises(AgenticError, match="template"):
+        attach_agentic(loop, "codex-cli", "m")

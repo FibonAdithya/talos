@@ -415,11 +415,13 @@ def _challenge_prompt() -> str:
     return f"Challenge ({', '.join(names)})"
 
 
-def _codex_refused(cfg: Config) -> bool:
+def _codex_refused(cfg: Config, start: str = "mainnet") -> bool:
     """spec §10: say so before a single dollar is spent, not at the first iteration."""
-    from talos.agentic import CODEX_AGENTIC_REFUSAL, codex_agentic_refused
-    if codex_agentic_refused(cfg.provider, cfg.mode):
-        print(CODEX_AGENTIC_REFUSAL, file=sys.stderr)
+    from talos.agentic import (CODEX_AGENTIC_REFUSAL, TEMPLATE_CODEX_REFUSAL,
+                               codex_agentic_refused)
+    if codex_agentic_refused(cfg.provider, cfg.mode, start):
+        print(TEMPLATE_CODEX_REFUSAL if start == "template" else CODEX_AGENTIC_REFUSAL,
+              file=sys.stderr)
         return True
     return False
 
