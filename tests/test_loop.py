@@ -1891,3 +1891,24 @@ def test_a_template_start_calibration_failure_keeps_baseline_output_out_of_the_t
     assert any(f"{failing} build" in e["reason"] for e in fallback)
     assert all("output" not in e for e in fallback)
     assert "E0308" not in (store.run_dir / "timeline.jsonl").read_text()
+
+
+@pytest.mark.parametrize("spec_kw, lines", [({"chains": 2}, True), ({}, False)])
+def test_greedy_emits_one_accept_line_per_iteration_when_chains_score_apart(
+        tmp_path, spec_kw, lines):
+    # mutation: emitting the accept event for anneal only (spec §8 wants a line per iteration
+    # with chain, parent, family, score and outcome); emitting it for the default job too
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
+    script = [hyp("a"), edit(5),                  # 1, chain 0: improved
+              hyp("b"), "no edit blocks here",    # 2: failed:edit
+              hyp("c"), edit(0, frm=5)]           # 3, chain 0: worse, failed:score
+    loop, fp, fb, store = make(tmp_path, script, scores=heldout_flat, budget=b, spec_kw=spec_kw)
+    loop.run()
+    accept = events(store, "accept")
+    if not lines:
+        assert accept == []
+        return
+    assert [(e["node"], e["chain"], e["parent"], e["accepted"], e["outcome"]) for e in accept] == [
+        (1, 0, 0, True, "improved"), (2, 1, 0, False, "failed:edit"),
+        (3, 0, 1, False, "failed:score")]
+    assert accept[2]["score"] is not None and accept[1]["score"] is None

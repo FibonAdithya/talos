@@ -2645,6 +2645,15 @@ def test_template_start_resume_refuses_codex_agentic(tmp_path, monkeypatch, caps
     assert "--start template" in capsys.readouterr().err
 
 
+def test_a_greedy_rejection_line_names_its_outcome():
+    # mutation: rendering every probability-free accept event as "accepted (improved)", which
+    # is what a greedy rejection (no probability, no temperature) printed before
+    data = {"chain": 1, "node": 4, "parent": 2, "family": "lp", "score": -0.01,
+            "accepted": False, "probability": None, "temperature": None,
+            "outcome": "failed:score"}
+    assert cli._event_line("accept", data) == \
+        "chain 1 #4 <- #2 [lp] -1.000% vs mainnet: rejected (failed:score)"
+
 def test_accept_and_reheat_event_lines():
     # mutation: swapping the improved and p/T branches, or dropping the rejected wording
     base = {"chain": 1, "node": 7, "parent": 3, "family": "local_search", "score": -0.0123,

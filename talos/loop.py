@@ -837,10 +837,17 @@ class Loop:
         self.state.pending_job = None
         self._save()
         node = self.state.nodes[-1]
-        if self.spec.search == "anneal" and (node.accepted or node.temperature is not None):
+        # Spec §8: one line per iteration in a tree. Greedy shows it whenever chains score apart
+        # (several chains or a template start); the default job's events stay as they were.
+        if self.spec.search == "anneal":
+            line = node.accepted or node.temperature is not None
+        else:
+            line = self._chain_scores_apart()
+        if line:
             self._event("accept", chain=node.chain, node=node.id, parent=node.parent,
                         family=node.family, score=node.score, accepted=node.accepted,
-                        probability=node.probability, temperature=node.temperature)
+                        probability=node.probability, temperature=node.temperature,
+                        outcome=node.outcome)
         if reheated is not None:
             self._event("reheat", **reheated)
         self._event("iteration_done", outcome=record["outcome"],

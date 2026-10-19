@@ -538,7 +538,8 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
     elif kind == "accept":
         score = "n/a" if data["score"] is None else f"{data['score']:+.3%}"
         if data["probability"] is None:
-            verdict = "accepted (improved)"
+            verdict = ("accepted (improved)" if data["accepted"]
+                       else f"rejected ({data.get('outcome', 'not accepted')})")
         else:
             verdict = (f"{'accepted' if data['accepted'] else 'rejected'} "
                        f"(p={data['probability']:.2f}, T={data['temperature']:.3f})")
