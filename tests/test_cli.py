@@ -2718,3 +2718,56 @@ def test_template_start_fetch_failure_creates_no_job(tmp_path, monkeypatch, caps
     assert rc == 1
     assert "mainnet unreachable" in capsys.readouterr().err
     assert not (tmp_path / "runs").exists()
+
+
+def test_fake_template_anneal_chains_resume_reads_the_stored_challenge(
+        tmp_path, monkeypatch, capsys):
+    # A fake --start template --search anneal --chains 2 job runs 2 iterations, then resumes
+    # with the iteration cap raised to 5. The fake baseline gets a marker comment, because the
+    # fake whole-file reply (`let k = 1;`) is a candidate's code from iteration 1 on, so the
+    # baseline's own text cannot tell a leak apart. After the first run the docs fetcher returns
+    # different text, so the resumed prompts can only show the docs stored under the run
+    # directory. (A resume fetches template.rs again at the pinned monorepo commit.)
+    # mutation: a resume that refetches or drops the challenge docs, or drops the template, a
+    # resume that edits the baseline's files instead of the template root, or one that restarts
+    # the iteration count at 1
+    from talos.state import JobStore
+    marker = "FAKE_BASELINE_ONLY"
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)  # a resume reads the config; it names the fake provider
+    monkeypatch.setattr(cli.FAKE_MAINNET, "fetch_algorithm_files",
+                        lambda ch, name: {"mod.rs": f"fn solve() {{ let k = 1; }} // {marker}\n"})
+    prompts = []
+    script = cli._fake_script
+    monkeypatch.setattr(cli, "_fake_script",
+                        lambda system, user: prompts.append((system, user)) or script(system, user))
+    rc = cli.main(["run", "--fake", "--yes", "--challenge", "energy_arbitrage", "--direction",
+                   "go", "--start", "template", "--search", "anneal", "--chains", "2",
+                   "--budget-iterations", "2"])
+    assert rc == 1
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert [n.id for n in JobStore(run_dir).load().nodes] == [1, 2]
+    monkeypatch.setattr(cli.FAKE_MAINNET, "fetch_challenge_docs",
+                        lambda ch: {"README.md": "REFETCHED DOC\n"})
+    spec = json.loads((run_dir / "job.json").read_text())
+    spec["budget"]["iterations"] = 5
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    st = json.loads((run_dir / "state.json").read_text())
+    st["status"] = "cancelled"  # an exhausted job is finished; a cancelled one resumes
+    (run_dir / "state.json").write_text(json.dumps(st))
+    first = len(prompts)
+    capsys.readouterr()
+    rc = cli.main(["run", "--resume", run_dir.name])
+    state = JobStore(run_dir).load()
+    # Iteration 3 is chain 0's turn, built on node 1 (k=1, baseline parity); its k=2 beats the
+    # baseline on training and held-out, so the resumed job wins there.
+    assert (rc, state.status, state.iteration) == (0, "won", 3)
+    assert [(n.id, n.chain, n.parent) for n in state.nodes] == [(1, 0, 0), (2, 1, 0), (3, 0, 1)]
+    resumed = prompts[first:]
+    proposals = [(s, u) for s, u in resumed if s.startswith("You are a research engineer")]
+    edits = [(s, u) for s, u in resumed if s.startswith("You are editing")]
+    assert len(proposals) == 1 and len(edits) == 1
+    assert all("Fake challenge: maximise k." in u for s, u in proposals + edits)
+    assert "pub fn solve_challenge(" in proposals[0][0]
+    for system, user in prompts:
+        assert marker not in system + user and "REFETCHED" not in system + user
