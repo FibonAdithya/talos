@@ -27,12 +27,13 @@ from talos.budget import Budget, BudgetExhausted, Spend, exhausted
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
-from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF,
+from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, TEMPLATE_START_FILES,
                               c3_hardware_options, c3_hardware_class,
                               c3_image, hardware_options, hardware_class, local_hardware_class)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.diagnostics import first_error
+from talos.lineage import AnnealSettings
 from talos.local_transport import (DockerInfo, DockerTransport, docker_info, has_gpu_runtime,
                                    prepare)
 from talos.mainnet import ChallengeInfo, MainnetError, TrackHyperparameters, fetch_challenge_info
@@ -41,6 +42,7 @@ from talos.nonces import HOLDOUT_START, NONCES_PER_TRACK, draw_nonce_sets, new_r
 from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provider
 from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
+from talos.prompts import WHOLE_FILE_FORMAT
 from talos.state import JobSpec, JobState, JobStore, user_tacit
 from talos.types import Usage
 
@@ -444,6 +446,8 @@ def _fake_script(system: str, user: str) -> str:
     if '"strategy_tag" (one of' in system:
         return ('{"title": "bump k", "description": "raise k by one", '
                 '"strategy_tag": "local_search"}')
+    if WHOLE_FILE_FORMAT in system:  # a template start: the whole file, at baseline parity
+        return "<<<<<<< FILE mod.rs\nfn solve() { let k = 1; }\n>>>>>>> END FILE\n"
     k = int(re.search(r"let k = (\d+);", user).group(1))
     return f"<<<<<<< SEARCH mod.rs\nlet k = {k};\n=======\nlet k = {k + 1};\n>>>>>>> REPLACE\n"
 
@@ -483,6 +487,7 @@ OUTCOME_TEXT = {
     "failed:dead_code": "no candidate: new code never called",
     "failed:runtime": "rejected: error rate over the ceiling",
     "failed:validation": "rejected: failed metered validation",
+    "accepted": "kept as the chain's next step",
 }
 
 
@@ -530,6 +535,18 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
             text = "new best"
         else:
             text += f" ({data['runs_since_improvement']} in a row)"
+    elif kind == "accept":
+        score = "n/a" if data["score"] is None else f"{data['score']:+.3%}"
+        if data["probability"] is None:
+            verdict = "accepted (improved)"
+        else:
+            verdict = (f"{'accepted' if data['accepted'] else 'rejected'} "
+                       f"(p={data['probability']:.2f}, T={data['temperature']:.3f})")
+        text = (f"chain {data['chain']} #{data['node']} <- #{data['parent']} "
+                f"[{data['family']}] {score} vs mainnet: {verdict}")
+    elif kind == "reheat":
+        text = (f"chain {data['chain']} reheats from #{data['node']}, "
+                f"T={data['temperature']:.3f}")
     elif kind == "reset":
         text = f"switching strategy to: {data['forced_tag']}"
     elif kind == "distilled":
@@ -693,7 +710,15 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
             print(flush=True)  # a blank line between iterations
         print(prefix + text, flush=True)
 
-    loop = Loop(spec, state, store, provider, bench, template_rs="", on_event=on_event)
+    challenge_docs = None
+    if spec.start == "template":
+        # Only the names on the challenge's list: nothing else in the run directory is a doc.
+        docs_dir = store.run_dir / "challenge"
+        challenge_docs = {f: (docs_dir / f).read_text(encoding="utf-8")
+                          for f in TEMPLATE_START_FILES[spec.challenge]
+                          if (docs_dir / f).is_file()}
+    loop = Loop(spec, state, store, provider, bench, template_rs="", on_event=on_event,
+                challenge_docs=challenge_docs)
     if cfg.mode == "agentic":
         attach_agentic(loop, cfg.provider, cfg.model)
     previous_sigint = signal.signal(signal.SIGINT,
@@ -800,8 +825,15 @@ def cmd_run(args, ask) -> int:
             print(f"job {spec.job_id} was started with {spec.scoring} scoring; start a new job "
                   f"to change scoring", file=sys.stderr)
             return 2
+        for flag, given, stored in (("start", args.start, spec.start),
+                                    ("search", args.search, spec.search),
+                                    ("chains", args.chains, spec.chains)):
+            if given is not None and given != stored:
+                print(f"job {spec.job_id} was started with --{flag} {stored}; start a new job "
+                      f"to change {flag}", file=sys.stderr)
+                return 2
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
-        if _codex_refused(cfg):
+        if _codex_refused(cfg, spec.start):
             return 2
         return execute_job(spec, store, cfg, resume=True)
     if args.mode:
@@ -810,11 +842,20 @@ def cmd_run(args, ask) -> int:
                   f"not {cfg.provider!r}", file=sys.stderr)
             return 2
         cfg = replace(cfg, mode=args.mode)
-    if _codex_refused(cfg):
+    start, search = args.start or "mainnet", args.search or "greedy"
+    chains = 1 if args.chains is None else args.chains
+    if chains < 1:
+        print(f"--chains must be 1 or more, not {chains}", file=sys.stderr)
+        return 2
+    if _codex_refused(cfg, start):
         return 2
     challenge = args.challenge or ask(_challenge_prompt(), "vehicle_routing")
     if challenge not in CHALLENGES:
         print(f"unknown challenge {challenge!r}", file=sys.stderr)
+        return 2
+    if start == "template" and challenge not in TEMPLATE_START_FILES:
+        print(f"--start template supports {', '.join(TEMPLATE_START_FILES)} only, not "
+              f"{challenge}", file=sys.stderr)
         return 2
     if args.direction and args.direction_file:
         print("pass either --direction or --direction-file, not both", file=sys.stderr)
@@ -864,7 +905,7 @@ def cmd_run(args, ask) -> int:
             print(f"unknown mode {mode!r}", file=sys.stderr)
             return 2
         cfg = replace(cfg, mode=mode)
-        if _codex_refused(cfg):
+        if _codex_refused(cfg, start):
             return 2
     # A dollar cap on an unpriced model is a cap that can never fire: the provider reports no
     # cost, so llm_usd never rises. Refuse rather than run a job with no effective cap at all.
@@ -933,6 +974,16 @@ def cmd_run(args, ask) -> int:
         print(f"nonces per track must be between 1 and {HOLDOUT_START}, not {nonces}",
               file=sys.stderr)
         return 2
+    docs = template = None
+    if start == "template":
+        # Before the job exists: a failed fetch leaves no run directory behind.
+        api = FAKE_MAINNET if cfg.provider == "fake" else mainnet_api
+        try:
+            docs = api.fetch_challenge_docs(challenge)
+            template = api.fetch_template(challenge)
+        except MainnetError as e:
+            print(f"mainnet unreachable: {e}", file=sys.stderr)
+            return 1
     if cfg.provider != "fake":
         recommend_image_update(challenge)
     rand_hash = new_rand_hash()
@@ -949,9 +1000,16 @@ def cmd_run(args, ask) -> int:
                    created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
                    track=track, baseline_algorithm=algorithm, hyperparameters=hyperparameters,
                    hyperparameters_source=hp_source, dev_image_tag=DEV_IMAGE_TAG,
-                   scoring=args.scoring or "native")
+                   scoring=args.scoring or "native", start=start, search=search,
+                   chains=chains,
+                   anneal=AnnealSettings().to_dict() if search == "anneal" else None)
     store = JobStore(root / "runs" / job_id)
     store.write_spec(spec)
+    if docs is not None:
+        docs_dir = store.run_dir / "challenge"
+        docs_dir.mkdir()
+        for name, text in {**docs, "template.rs": template}.items():
+            (docs_dir / name).write_text(text, encoding="utf-8", newline="\n")
     (store.run_dir / "tacit.md").write_text(user_tacit(direction),
                                             encoding="utf-8", newline="\n")
     scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
@@ -964,7 +1022,8 @@ def cmd_run(args, ask) -> int:
         used = sum(1 for v in hyperparameters.values() if v is not None)
         hp_line = f"hyperparameters: {used}/{len(info.tracks)} tracks from mainnet"
     print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}, "
-          f"{nonces} nonces per track, scoring {spec.scoring}; {hp_line}")
+          f"{nonces} nonces per track, scoring {spec.scoring}, start {start}, search {search}, "
+          f"{chains} chain(s); {hp_line}")
     return execute_job(spec, store, cfg, resume=False)
 
 
@@ -1105,6 +1164,12 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--scoring", choices=["metered", "native"],
                    help="research scoring: native (fast, validated on metered; the default) or "
                         "metered (TIG's runtime for every candidate)")
+    r.add_argument("--start", choices=["mainnet", "template"],
+                   help="start from mainnet's top algorithm (the default) or from the empty "
+                        "template")
+    r.add_argument("--search", choices=["greedy", "anneal"],
+                   help="keep only improvements (greedy, the default) or anneal")
+    r.add_argument("--chains", type=int, help="independent search chains (default 1)")
     r.add_argument("--budget-usd", type=float)
     r.add_argument("--budget-hours", type=float)
     r.add_argument("--budget-iterations", type=int)
