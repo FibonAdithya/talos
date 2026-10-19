@@ -296,3 +296,25 @@ def test_hyperparameters_block_absent_for_template_start():
     # mutation: a hard-coded Hyperparameters header regardless of ctx.hyperparameters
     _, user = hypothesis_prompts(ctx(start="template", hyperparameters=None))
     assert "Hyperparameters:" not in user
+
+
+TREE_FAILURES = [{"title": "Root fail", "outcome": "failed:score", "against": 0},
+                 {"title": "Node fail", "outcome": "failed:compile", "against": 3}]
+
+
+@pytest.mark.parametrize("kw, root", [
+    ({"start": "template"}, "the empty template"),
+    ({"search": "anneal"}, "the baseline"),
+    ({"chains": 2}, "the baseline"),
+])
+def test_recall_in_a_tree_names_parent_nodes_not_bests(kw, root):
+    # mutation: keying the tree wording on start alone (anneal/chains keep "best #3"), labelling
+    # node 0 "the baseline" in a template start, or keeping the "earlier best" title
+    _, user = hypothesis_prompts(ctx(anchor=5, failed_hypotheses=TREE_FAILURES, **kw))
+    assert "earlier best" not in user and "best #" not in user
+    current, _, other = user.partition("Tried against other code and did NOT help there; ")
+    assert other.startswith("do not repeat unless the current code removes the reason")
+    assert f"- Root fail [failed:score, against {root}]" in other
+    assert "- Node fail [failed:compile, against node #3]" in other
+    _, distill = distill_prompts(ctx(**kw), TREE_FAILURES)
+    assert f"against {root}]" in distill and "against node #3]" in distill

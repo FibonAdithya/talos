@@ -308,3 +308,33 @@ def test_template_package_without_a_template_copy_still_hands_back(tmp_path):
     for p in pkg.rglob("*"):
         if p.is_file():
             assert marker not in p.read_text(errors="ignore")
+
+
+def _tree_hypotheses(st):
+    st.hypotheses = [{"iteration": i, "against": a, "title": t, "description": f"{t} desc",
+                      "strategy_tag": "hybrid", "outcome": o, "chain": c}
+                     for i, a, t, o, c in [(1, 0, "Root step", "improved", 0),
+                                           (2, 0, "Other chain", "improved", 1),
+                                           (3, 1, "Best step", "improved", 0)]]
+    st.nodes = [_node(1, ROOT, "lp", "Root step", "improved", 0.01, True),
+                _node(2, ROOT, "dp", "Other chain", "improved", 0.005, True),
+                _node(3, 1, "lp", "Best step", "improved", 0.03, True, best=True)]
+    st.nodes[1].chain = 1
+    st.chains = [Chain(index=0, current=3, best=3, best_score=0.03),
+                 Chain(index=1, current=2, best=2, best_score=0.005)]
+    st.best = replace(st.best, iteration=3)
+
+
+def test_hypothesis_log_names_parent_nodes_in_a_tree(tmp_path):
+    # mutation: keeping "vs best #N" for a template start, anneal or several chains, or
+    # calling node 0 the baseline in a template start
+    spec, st, store = make(tmp_path)
+    _tree_hypotheses(st)
+    for kw, root in [({"start": "template"}, "vs the empty template"),
+                     ({"search": "anneal"}, "vs the baseline"), ({"chains": 2}, "vs the baseline")]:
+        text = (build_package(replace(spec, **kw), st, store) / "hypotheses.md").read_text(
+            encoding="utf-8")
+        assert "vs best #" not in text
+        assert f"- #1 ({root}) [hybrid] Root step" in text
+        assert "- #3 (vs node #1) [hybrid] Best step" in text
+

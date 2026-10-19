@@ -9,6 +9,7 @@ from pathlib import Path
 
 from talos.challenges import CHALLENGES
 from talos.lineage import Node
+from talos.prompts import in_tree, parent_label
 from talos.scoring import ScoringError, beats, bundle_delta, focus_sets, select
 from talos.state import JobSpec, JobState, JobStore
 from talos.types import NonceResult
@@ -217,8 +218,13 @@ def _readme(spec: JobSpec, state: JobState, template_missing: bool = False) -> s
     return head + _hyperparameters_section(spec)
 
 
-def _hypothesis_line(h: dict) -> str:
-    line = (f"- #{h['iteration']} (vs best #{h.get('against', '?')}) [{h.get('strategy_tag', '')}] "
+def _hypothesis_line(spec: JobSpec, h: dict) -> str:
+    against = h.get("against")
+    if in_tree(spec.start, spec.search, spec.chains) and isinstance(against, int):
+        parent = f"vs {parent_label(against, spec.start, True)}"
+    else:
+        parent = f"vs best #{h.get('against', '?')}"
+    line = (f"- #{h['iteration']} ({parent}) [{h.get('strategy_tag', '')}] "
             f"{h.get('title', '')}: {h.get('description', '')} -> {h.get('outcome', '')}")
     error = h.get("error")
     if error:
@@ -279,7 +285,7 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
             _diff(state.baseline.files, state.best.files), encoding="utf-8", newline="\n")
     scores = "\n".join(f"# {heading}\n\n{table}" for heading, table in scores_sections(spec, state))
     (pkg / "scores.md").write_text(scores, encoding="utf-8", newline="\n")
-    hyps = "\n".join(_hypothesis_line(h) for h in state.hypotheses)
+    hyps = "\n".join(_hypothesis_line(spec, h) for h in state.hypotheses)
     (pkg / "hypotheses.md").write_text("# Hypotheses\n\n" + hyps + "\n",
                                        encoding="utf-8", newline="\n")
     (pkg / "evidence_draft.md").write_text(evidence_draft(spec, state),

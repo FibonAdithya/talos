@@ -65,6 +65,8 @@ class PromptContext:
     parent_gap: dict | None = None
     best_gap: dict | None = None
     whole_file: bool = False
+    search: str = "greedy"
+    chains: int = 1
 
 
 def _files_block(files: dict[str, str]) -> str:
@@ -136,17 +138,33 @@ def hyperparameters_block(ctx: PromptContext) -> str:
     return text
 
 
-def _parent(h: dict) -> str:
-    return "the baseline" if h["against"] == 0 else f"best #{h['against']}"
+def in_tree(start: str, search: str, chains: int) -> bool:
+    """Whether an attempt's parent can be a node that never was the job's best: a template
+    start, annealing or several chains. Otherwise every parent is the baseline or a best."""
+    return start == "template" or search == "anneal" or chains > 1
 
 
-def describe_attempt(h: dict, labelled: bool = False) -> str:
+def parent_label(against: int, start: str, tree: bool) -> str:
+    """The code an attempt was built on: node 0 is the baseline, or the empty template in a
+    template start; any other node is a best, or just a node in a tree."""
+    if against == 0:
+        return "the empty template" if start == "template" else "the baseline"
+    return f"node #{against}" if tree else f"best #{against}"
+
+
+def _parent(h: dict, ctx: PromptContext | None) -> str:
+    if ctx is None:
+        return parent_label(h["against"], "mainnet", False)
+    return parent_label(h["against"], ctx.start, in_tree(ctx.start, ctx.search, ctx.chains))
+
+
+def describe_attempt(h: dict, labelled: bool = False, ctx: PromptContext | None = None) -> str:
     """One line per failed attempt, with what the run measured: a title plus the outcome told
     the model nothing about a +0.14% track, a -0.37% track and a 14x runtime. `labelled` names
-    the best the attempt failed against."""
+    the code the attempt failed against, in `ctx`'s wording."""
     tag = h.get("outcome", "")
     if labelled and "against" in h:
-        tag += f", against {_parent(h)}"
+        tag += f", against {_parent(h, ctx)}"
     line = f"- {h.get('title', '')} [{tag}]"
     if "mean_rel_delta" in h:
         line += (f" mean {h['mean_rel_delta']:+.2%}, worst track {h.get('worst_track', '?')} "
@@ -168,9 +186,11 @@ def recall_block(ctx: PromptContext) -> str:
         parts.append("Already tried against this exact code and did NOT help; do not repeat:\n"
                      + "\n".join(describe_attempt(h) for h in current))
     if earlier:
-        parts.append("Tried against an earlier best and did NOT help there; do not repeat "
+        other = ("other code" if in_tree(ctx.start, ctx.search, ctx.chains)
+                 else "an earlier best")
+        parts.append(f"Tried against {other} and did NOT help there; do not repeat "
                      "unless the current code removes the reason it failed:\n"
-                     + "\n".join(describe_attempt(h, labelled=True) for h in earlier))
+                     + "\n".join(describe_attempt(h, labelled=True, ctx=ctx) for h in earlier))
     return "\n\n".join(parts)
 
 
@@ -275,7 +295,8 @@ def edit_repair_prompts(ctx: PromptContext, files: dict[str, str],
 def distill_prompts(ctx: PromptContext, failed: list[dict]) -> tuple[str, str]:
     system = ("You distill one reusable lesson from failed optimisation attempts. Reply with "
               "exactly one line starting with \"LESSON: \" or the single word NONE.")
-    lines = "\n".join(f"{describe_attempt(h, labelled=True)}\n  {h.get('description', '')}"
+    lines = "\n".join(f"{describe_attempt(h, labelled=True, ctx=ctx)}\n"
+                      f"  {h.get('description', '')}"
                       for h in failed)
     user = (f"Challenge: {ctx.challenge}. Direction: {ctx.direction}\n\nFailed attempts:\n"
             f"{lines}\n\nWhat general lesson, independent of these exact constants, should "

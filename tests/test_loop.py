@@ -1848,3 +1848,28 @@ def test_template_that_never_compiles(tmp_path):
     assert st.chains[0].current == 0
     readme = (build_package(loop.spec, st, store) / "README.md").read_text()
     assert "No candidate" in readme
+
+
+def test_anneal_recall_names_the_parent_node_not_an_earlier_best(tmp_path):
+    # mutation: Loop._context not passing search/chains to PromptContext keeps today's
+    # "Tried against an earlier best" title in an anneal job, where a parent need not be a best
+    from talos.lineage import AnnealSettings
+    script = [hyp("Old idea"), "no edit blocks here",  # 1: failed:edit against the root
+              hyp("Winner"), edit(2),                   # 2: improved; the chain moves to node 2
+              hyp("Next"), edit(3, frm=2)]
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, script, budget=b,
+                               spec_kw={"search": "anneal",
+                                        "anneal": AnnealSettings().to_dict()},
+                               scores=lambda ch, files, ns: [
+                                   q + 900 for q in quality_from_files(ch, files, ns)],
+                               thresholds=Thresholds(recall=0, distill=99, reset=99))
+    loop.state.baseline = baseline(q=1000)  # so k=2 is +0.1%: a new best, not a win
+    loop.rule = BeatRule(margin=0.005)
+    loop.run()
+    proposals = [u for s, u in fp.calls if s.startswith("You are a research engineer")]
+    assert len(proposals) == 3
+    assert "Tried against other code and did NOT help there" in proposals[2]
+    # a failed:edit record carries no title: the edit failed before the hypothesis was stored
+    assert "[failed:edit, against the baseline]" in proposals[2]
+    assert "earlier best" not in proposals[2]

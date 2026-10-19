@@ -516,7 +516,8 @@ class Loop:
                                            if self.spec.track else []),
                              hyperparameters=self._candidate_hyperparameters(),
                              scoring=self._scoring(), start=self.spec.start,
-                             challenge_docs=self.challenge_docs)
+                             challenge_docs=self.challenge_docs, search=self.spec.search,
+                             chains=self.spec.chains)
 
     # ── single-shot propose + edit ────────────────────────────────────
 
