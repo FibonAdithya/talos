@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 from talos.budget import Budget, Spend
+from talos.lineage import Chain, Node
 from talos.types import NonceResult, NonceSet
 
 STATUSES = ("queued", "measuring_baseline", "researching", "confirming", "paused",
@@ -44,6 +45,10 @@ class JobSpec:
     # cannot be reused with a newer runtime, even when the monorepo pin is unchanged.
     dev_image_tag: str | None = None
     scoring: str = "metered"  # research scoring, `talos run --scoring`; frozen with the job
+    start: str = "mainnet"  # `talos run --start`: "mainnet" baseline or "template" from scratch
+    search: str = "greedy"  # `talos run --search`: "greedy" or "anneal"
+    chains: int = 1  # `talos run --chains`: independent annealing chains
+    anneal: dict | None = None  # AnnealSettings.to_dict(); None unless search == "anneal"
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -149,6 +154,9 @@ class JobState:
     fuel_budgets_us: dict[str, int] | None = None  # track -> native solve budget, microseconds
     # One entry per metered validation of a would-be best: iteration, outcome, reason.
     validations: list[dict] = field(default_factory=list)
+    # The lineage tree and one cursor per chain; empty for a job that does not anneal.
+    nodes: list[Node] = field(default_factory=list)
+    chains: list[Chain] = field(default_factory=list)
 
     @classmethod
     def fresh(cls, spend: Spend) -> "JobState":
@@ -165,7 +173,9 @@ class JobState:
                 "stop_reason": self.stop_reason, "tacit": self.tacit,
                 "strategy_counts": self.strategy_counts, "pending_job": self.pending_job,
                 "hardware": self.hardware, "scoring": self.scoring,
-                "fuel_budgets_us": self.fuel_budgets_us, "validations": self.validations}
+                "fuel_budgets_us": self.fuel_budgets_us, "validations": self.validations,
+                "nodes": [n.to_dict() for n in self.nodes],
+                "chains": [c.to_dict() for c in self.chains]}
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobState":
@@ -180,7 +190,9 @@ class JobState:
                    pending_job=d.get("pending_job"),
                    hardware=d.get("hardware", d.get("gpu")),
                    scoring=d.get("scoring"), fuel_budgets_us=d.get("fuel_budgets_us"),
-                   validations=d.get("validations", []))
+                   validations=d.get("validations", []),
+                   nodes=[Node.from_dict(n) for n in d.get("nodes", [])],
+                   chains=[Chain.from_dict(c) for c in d.get("chains", [])])
 
 
 def _atomic_write(path: Path, text: str) -> None:

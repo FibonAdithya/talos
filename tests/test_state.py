@@ -4,6 +4,7 @@ from dataclasses import replace
 import pytest
 
 from talos.budget import Budget, Spend
+from talos.lineage import AnnealSettings, Chain, Node
 from talos.state import JobSpec, JobState, JobStore, TERMINAL
 from talos.types import NonceSet
 
@@ -175,3 +176,41 @@ def test_job_spec_scoring_defaults_to_metered_for_an_old_job_json():
     d.pop("scoring")
     # mutation: a required field would make every job.json written before this unreadable
     assert JobSpec.from_dict(d).scoring == "metered"
+
+
+def test_new_spec_fields_round_trip():
+    # mutation: a field missing from the dataclass (TypeError) or from_dict dropping one
+    s = replace(spec(), start="template", search="anneal", chains=3,
+                anneal=AnnealSettings().to_dict())
+    back = JobSpec.from_dict(json.loads(json.dumps(s.to_dict())))
+    assert back == s
+    assert (back.start, back.search, back.chains) == ("template", "anneal", 3)
+    assert back.anneal == AnnealSettings().to_dict()
+
+
+def test_tree_round_trips_through_state(tmp_path):
+    # mutation: to_dict omitting "nodes" (or "chains")
+    store = JobStore(tmp_path)
+    state = JobState.fresh(Spend(started_at=1.0))
+    state.nodes = [Node(id=1, chain=0, parent=0, family="tabu", title="t", outcome="improved",
+                        score=1.5, tracks={"n=1": 1.5}, accepted=True, probability=1.0)]
+    state.chains = [Chain(index=0, current=1, best=1, best_score=1.5),
+                    Chain(index=1, stall=2, reheated_at=0.4)]
+    store.save(state)
+    loaded = store.load()
+    assert loaded.nodes == state.nodes and loaded.chains == state.chains
+    assert loaded.nodes and loaded.chains
+
+
+def test_job_from_before_lineage_loads_with_defaults():
+    # mutation: d["nodes"] instead of d.get("nodes", []), or a required spec field
+    sd = spec().to_dict()
+    for key in ("start", "search", "chains", "anneal"):
+        del sd[key]
+    td = JobState.fresh(Spend(started_at=1.0)).to_dict()
+    for key in ("nodes", "chains"):
+        del td[key]
+    loaded_spec, loaded_state = JobSpec.from_dict(sd), JobState.from_dict(td)
+    assert (loaded_spec.start, loaded_spec.search, loaded_spec.chains,
+            loaded_spec.anneal) == ("mainnet", "greedy", 1, None)
+    assert loaded_state.nodes == [] and loaded_state.chains == []
