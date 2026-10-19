@@ -375,7 +375,7 @@ Before the job starts, Talos fetches the challenge's active tracks and fuel from
 draws the nonces, and prints a line such as:
 
 ```
-Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}, 8 nonces per track; hyperparameters: 5/5 tracks from mainnet
+Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}, 8 nonces per track, scoring native, start mainnet, search greedy, 1 chain(s); hyperparameters: 5/5 tracks from mainnet
 ```
 
 The job id is the start time plus the challenge name.

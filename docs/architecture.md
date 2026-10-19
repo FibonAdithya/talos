@@ -71,8 +71,11 @@ track must be above the margin and no other track may get worse (`beats_focused`
 ## From-scratch start and annealing search
 
 `talos run` takes three flags that change where the search starts and which candidate it edits
-next: `--start {mainnet,template}`, `--search {greedy,anneal}` and `--chains N`. The defaults
-(`mainnet`, `greedy`, 1) behave as before they existed. The tree lives in `state.json` as `nodes`
+next: `--start {mainnet,template}`, `--search {greedy,anneal}` and `--chains N`. With the defaults
+(`mainnet`, `greedy`, 1) the search makes the same decisions as before these flags existed:
+it edits the job's best, and the win rule is unchanged. The prompts do change for every job:
+the hypothesis asks for a `design_family`, and the "current best" sentence is replaced by the
+gap of the parent and of the best to the mainnet baseline. The tree lives in `state.json` as `nodes`
 and `chains` (`talos/lineage.py::Node`, `talos/lineage.py::Chain`), and the three settings are
 frozen in `job.json`; a resume with a different value is refused.
 
