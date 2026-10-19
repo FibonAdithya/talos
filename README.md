@@ -400,7 +400,19 @@ remaining, or `∞ left` without `--budget-hours`. An iteration that did not imp
 `no improvement (4 in a row)` or `no candidate: did not compile (2 in a row)`; a failed
 compile prints the first `error` line of the compiler output. Lines are cut to the terminal
 width. `runs/<job_id>/timeline.jsonl` records every event with every field in full,
-including hypothesis descriptions and the compiler output.
+including hypothesis descriptions and the compiler output (except the baseline's own compiler
+output in a `--start template` job, which is left out so its source cannot leak).
+
+With `--search anneal`, or with several chains or a template start, each scored candidate
+also prints an `accept` line (chain, node, parent, design family, gap to mainnet, and the
+decision), and a chain that stalls prints a `reheat` line. A candidate kept as its chain's
+next step without improving the job's best reads `kept as the chain's next step`:
+
+```
+[11:02:40] #4 chain 1 #4 <- #2 [rolling-horizon LP] -12.000% vs mainnet: accepted (p=0.42, T=0.031)
+[11:09:15] #6 chain 1 #6 <- #4 [greedy dispatch] -20.000% vs mainnet: rejected (p=0.05, T=0.029)
+[11:31:03] #9 chain 1 reheats from #3, T=0.050
+```
 
 ### Stop
 
@@ -600,7 +612,7 @@ Each job gets a directory under `runs/`:
 |---|---|
 | `runs/<job_id>/job.json` | The job's fixed inputs: challenge, direction, provider, model, mode, budget, nonces, fuel, track, baseline algorithm, hyperparameters, scoring, start, search, chains and the annealing settings. Written once. |
 | `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log, and the lineage tree (`nodes`, one per iteration, and `chains`, each chain's current node, best node and stall count). A `--scoring native` job also records its scoring, its per-track time budgets and a `validations` list: one entry per candidate that improved natively, with its iteration, its outcome (`validated` or `demoted`) and the reason it was demoted. |
-| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. |
+| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. A tree job (anneal, several chains or a template start) adds `accept` (one per scored candidate: chain, node, parent, family, score, decision, probability, temperature) and `reheat`. |
 | `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
 | `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
 | `runs/<job_id>/challenge/` | A `--start template` job only: the challenge files and the template the LLM was shown. |
