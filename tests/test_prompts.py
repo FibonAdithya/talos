@@ -1,8 +1,9 @@
 import pytest
 
-from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts, distill_prompts,
-                           describe_attempt, edit_prompts, edit_repair_prompts,
-                           hypothesis_prompts,
+from talos.prompts import (PromptContext, SEARCH_REPLACE_FORMAT, STRATEGY_TAGS,
+                           WHOLE_FILE_FORMAT, challenge_block, compile_fix_prompts,
+                           distill_prompts, describe_attempt, edit_prompts, edit_repair_prompts,
+                           gap_block, hypothesis_prompts,
                            parse_distillation, parse_hypothesis)
 
 
@@ -79,7 +80,8 @@ def test_edit_prompt_shows_files_and_format():
 def test_parse_hypothesis_tolerates_prose_and_validates_tag():
     text = 'Sure.\n{"title": "A", "description": "B", "strategy_tag": "local_search"}\nThanks'
     h = parse_hypothesis(text)
-    assert h == {"title": "A", "description": "B", "strategy_tag": "local_search"}
+    assert h == {"title": "A", "description": "B", "strategy_tag": "local_search",
+                 "design_family": "unlabelled"}
     # mutation: accepting an unknown tag breaks strategy_counts bookkeeping
     bad = '{"title": "A", "description": "B", "strategy_tag": "magic"}'
     assert parse_hypothesis(bad)["strategy_tag"] == "hybrid"
@@ -94,13 +96,14 @@ def test_parse_hypothesis_survives_braces_in_description():
             '"strategy_tag": "data_structure"}')
     h = parse_hypothesis(text)
     assert h == {"title": "A", "description": "Use {x: y} sets for lookups",
-                 "strategy_tag": "data_structure"}
+                 "strategy_tag": "data_structure", "design_family": "unlabelled"}
     # a leading JSON object without title/description must be skipped in favour of the
     # next, valid one
     text2 = ('{"note": 1}\n{"title": "A", "description": "B", '
              '"strategy_tag": "local_search"}')
     assert parse_hypothesis(text2) == {"title": "A", "description": "B",
-                                        "strategy_tag": "local_search"}
+                                        "strategy_tag": "local_search",
+                                        "design_family": "unlabelled"}
 
 
 def test_compile_fix_and_repair_prompts_carry_inputs():
@@ -225,3 +228,71 @@ def test_a_focused_prompt_shows_only_the_focus_tracks_hyperparameters():
     # mutation: listing every track spends the focused prompt on tracks it must not tune for
     assert 'track t: {"x":1}' in user and '{"x":2}' not in user
     assert "guard tracks run with their own values" in user
+
+
+def test_hypothesis_asks_for_a_design_family():
+    # mutation: never requesting the key makes every node "unlabelled"
+    system, _ = hypothesis_prompts(ctx())
+    assert "design_family" in system
+    assert "\"strategy_tag\" (one of" in system
+
+
+def test_parse_hypothesis_design_family():
+    # mutation: dropping the key from the result, or the "unlabelled" default
+    text = ('{"title": "A", "description": "B", "strategy_tag": "hybrid", '
+            '"design_family": "rolling-horizon LP"}')
+    assert parse_hypothesis(text)["design_family"] == "rolling-horizon LP"
+    assert parse_hypothesis('{"title": "A", "description": "B"}')["design_family"] == "unlabelled"
+    blank = '{"title": "A", "description": "B", "design_family": "  "}'
+    assert parse_hypothesis(blank)["design_family"] == "unlabelled"
+    long = '{"title": "A", "description": "B", "design_family": "' + "x" * 200 + '"}'
+    assert len(parse_hypothesis(long)["design_family"]) == 80
+
+
+def test_gap_block_shows_parent_and_best_per_track():
+    # mutation: unsorted tracks, or the parent and best gaps swapped
+    c = ctx(parent_gap={"node": 3, "mean": -0.12, "tracks": {"b": -0.2, "a": -0.04}},
+            best_gap={"node": 5, "mean": -0.05, "tracks": {"a": -0.05, "b": -0.05}})
+    text = gap_block(c)
+    assert 'Parent (node #3): -12.000% vs mainnet "qk_v3"; track a -4.000%; track b -20.000%' \
+        in text
+    assert 'Best so far (node #5): -5.000% vs mainnet "qk_v3"; track a -5.000%' in text
+    none = gap_block(ctx(start="mainnet"))
+    assert "Parent: the mainnet baseline itself (+0.000%)" in none
+    assert "Best so far: none yet" in none
+    assert "not available to you" not in none
+    tmpl = gap_block(ctx(start="template"))
+    assert "Parent: the empty template (not scored yet)" in tmpl
+    assert tmpl.endswith("The baseline's code is not available to you; only its score is.")
+
+
+def test_template_start_shows_challenge_docs_and_hides_baseline_code():
+    # mutation: challenge_block ignoring start, dropping the path header, or omitting it from
+    # one of the prompts
+    c = ctx(start="template", challenge_docs={"mod.rs": "MODRS-DOC", "README.md": "CHALLENGE-DOC"})
+    _, hyp_user = hypothesis_prompts(c)
+    _, edit_user = edit_prompts(c, {"title": "t", "description": "d"})
+    _, fix_user = compile_fix_prompts(c, c.files, "error")
+    for user in (hyp_user, edit_user, fix_user):
+        assert "CHALLENGE-DOC" in user and "tig-challenges/src/knapsack/README.md" in user
+    block = challenge_block(c)
+    assert block.index("README.md ---") < block.index("tig-challenges/src/knapsack/mod.rs ---")
+    assert "The baseline's code is not available to you" in hyp_user
+    assert challenge_block(ctx(start="mainnet", challenge_docs={"README.md": "X"})) == ""
+    _, mainnet_user = hypothesis_prompts(ctx(start="mainnet", challenge_docs={"README.md": "X"}))
+    assert "tig-challenges" not in mainnet_user
+
+
+def test_edit_prompt_switches_to_whole_file_format():
+    # mutation: ignoring whole_file, or emitting both formats
+    hyp = {"title": "t", "description": "d"}
+    whole, _ = edit_prompts(ctx(whole_file=True), hyp)
+    assert WHOLE_FILE_FORMAT in whole and SEARCH_REPLACE_FORMAT not in whole
+    search, _ = edit_prompts(ctx(whole_file=False), hyp)
+    assert SEARCH_REPLACE_FORMAT in search and WHOLE_FILE_FORMAT not in search
+
+
+def test_hyperparameters_block_absent_for_template_start():
+    # mutation: a hard-coded Hyperparameters header regardless of ctx.hyperparameters
+    _, user = hypothesis_prompts(ctx(start="template", hyperparameters=None))
+    assert "Hyperparameters:" not in user

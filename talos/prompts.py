@@ -51,17 +51,58 @@ class PromptContext:
     baseline_name: str
     best_delta: float
     failed_hypotheses: list[dict] = field(default_factory=list)
-    anchor: int = 0  # the iteration of the current best; 0 is the baseline
+    anchor: int = 0  # the parent node id; 0 is the root
     forced_tag: str | None = None
     is_gpu: bool = False
     track: str | None = None
     guard_tracks: list[str] = field(default_factory=list)
     hyperparameters: dict[str, dict | None] | None = None
     scoring: str = "metered"
+    start: str = "mainnet"
+    challenge_docs: dict[str, str] = field(default_factory=dict)
+    # {"node": int, "mean": float, "tracks": {track: delta}}; None means not scored (the
+    # template root, or no best yet)
+    parent_gap: dict | None = None
+    best_gap: dict | None = None
+    whole_file: bool = False
 
 
 def _files_block(files: dict[str, str]) -> str:
     return "\n\n".join(f"--- {name} ---\n{text}" for name, text in sorted(files.items()))
+
+
+def _gap_line(prefix: str, gap: dict, baseline_name: str) -> str:
+    line = f"{prefix} (node #{gap['node']}): {gap['mean']:+.3%} vs mainnet \"{baseline_name}\""
+    for track, delta in sorted(gap["tracks"].items()):
+        line += f"; track {track} {delta:+.3%}"
+    return line
+
+
+def gap_block(ctx: PromptContext) -> str:
+    """Where the parent and the best node stand against the mainnet baseline."""
+    if ctx.parent_gap is not None:
+        parent = _gap_line("Parent", ctx.parent_gap, ctx.baseline_name)
+    elif ctx.start == "template":
+        parent = "Parent: the empty template (not scored yet)"
+    else:
+        parent = "Parent: the mainnet baseline itself (+0.000%)"
+    best = ("Best so far: none yet" if ctx.best_gap is None
+            else _gap_line("Best so far", ctx.best_gap, ctx.baseline_name))
+    text = f"{parent}\n{best}"
+    if ctx.start == "template":
+        text += "\nThe baseline's code is not available to you; only its score is."
+    return text
+
+
+def challenge_block(ctx: PromptContext) -> str:
+    """The challenge definition files of a template start; empty otherwise."""
+    if ctx.start != "template":
+        return ""
+    names = sorted(ctx.challenge_docs, key=lambda n: (n != "README.md", n))
+    sections = [f"--- tig-challenges/src/{ctx.challenge}/{n} ---\n{ctx.challenge_docs[n]}"
+                for n in names]
+    return ("The challenge definition (from the pinned TIG monorepo; read it, do not edit it):"
+            "\n\n" + "\n\n".join(sections))
 
 
 def focus_sentence(ctx: PromptContext) -> str:
@@ -136,18 +177,21 @@ def recall_block(ctx: PromptContext) -> str:
 def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
     scope = f"on track \"{ctx.track}\"" if ctx.track else "across every active track"
     focus = (focus_sentence(ctx) + "\n\n") if ctx.track else ""
+    role = ("writing a Rust solver from the empty template for"
+            if ctx.start == "template" else "improving a Rust solver for")
     system = (
-        f"You are a research engineer improving a Rust solver for the TIG challenge "
+        f"You are a research engineer {role} the TIG challenge "
         f"\"{ctx.challenge}\". The goal is to beat the current mainnet state of the art on "
         f"TIG's own benchmark: higher verifier quality per nonce under a fixed fuel budget, "
         f"{scope}.\n\n{focus}"
         f"The solver must keep this contract (template.rs):\n```rust\n{ctx.template_rs}\n```\n\n"
         f"Propose ONE specific change. Reply with a JSON object with keys \"title\" "
-        f"(short), \"description\" (what to change and why it should raise quality), and "
+        f"(short), \"description\" (what to change and why it should raise quality), "
+        f"\"design_family\" (a short name for the overall approach, such as "
+        f"\"rolling-horizon LP\"), and "
         f"\"strategy_tag\" (one of: {', '.join(STRATEGY_TAGS)}). No other text."
     )
-    parts = [f"Baseline to beat: mainnet algorithm \"{ctx.baseline_name}\". "
-             f"Your current best is {ctx.best_delta:+.3%} relative to it on the training nonces.",
+    parts = [f"Baseline to beat: mainnet algorithm \"{ctx.baseline_name}\".\n{gap_block(ctx)}",
              f"Direction from the user:\n{ctx.direction}"]
     if ctx.tacit.strip():
         parts.append(f"Tacit knowledge (lessons so far):\n{ctx.tacit}")
@@ -160,6 +204,9 @@ def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
     hp = hyperparameters_block(ctx)
     if hp:
         parts.append(hp)
+    challenge = challenge_block(ctx)
+    if challenge:
+        parts.append(challenge)
     parts.append("Current algorithm source:\n" + _files_block(ctx.files))
     return system, "\n\n".join(parts)
 
@@ -167,14 +214,16 @@ def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
 def edit_prompts(ctx: PromptContext, hypothesis: dict) -> tuple[str, str]:
     system = (
         f"You are editing a Rust solver for the TIG challenge \"{ctx.challenge}\".\n\n"
-        f"{SEARCH_REPLACE_FORMAT}\n\n{_rust_rules()}"
+        f"{WHOLE_FILE_FORMAT if ctx.whole_file else SEARCH_REPLACE_FORMAT}\n\n{_rust_rules()}"
     )
+    challenge = challenge_block(ctx)
     focus = focus_sentence(ctx)
     hp = hyperparameters_block(ctx)
     user = (f"Implement this hypothesis:\nTitle: {hypothesis['title']}\n"
             f"Description: {hypothesis['description']}\n\n"
             + (focus + "\n\n" if focus else "")
             + (hp + "\n\n" if hp else "")
+            + (challenge + "\n\n" if challenge else "")
             + f"Current algorithm source files:\n{_files_block(ctx.files)}")
     return system, user
 
@@ -184,9 +233,11 @@ def compile_fix_prompts(ctx: PromptContext, files: dict[str, str],
     system = (f"You are fixing a Rust compile error in a TIG \"{ctx.challenge}\" solver.\n\n"
               f"{SEARCH_REPLACE_FORMAT}\n\n{_rust_rules()}")
     # 12000 holds the eight errors of run 20260916-095103 iteration 5; 6000 showed the last few.
+    challenge = challenge_block(ctx)
     user = (f"The build failed with:\n```\n{relevant(compiler_output)[-12000:]}\n```\n\n"
             f"{_file_names_line(files)}\n\n"
-            f"Current files:\n{_files_block(files)}\n\nEmit edit blocks that fix the build "
+            + (challenge + "\n\n" if challenge else "")
+            + f"Current files:\n{_files_block(files)}\n\nEmit edit blocks that fix the build "
             f"without abandoning the intended change.")
     return system, user
 
@@ -244,7 +295,9 @@ def parse_hypothesis(text: str) -> dict:
         if isinstance(d, dict) and "title" in d and "description" in d:
             tag = d.get("strategy_tag")
             return {"title": str(d["title"]), "description": str(d["description"]),
-                    "strategy_tag": tag if tag in STRATEGY_TAGS else "hybrid"}
+                    "strategy_tag": tag if tag in STRATEGY_TAGS else "hybrid",
+                    "design_family":
+                        str(d.get("design_family") or "unlabelled").strip()[:80] or "unlabelled"}
     raise ValueError("no hypothesis JSON object found in response")
 
 
