@@ -503,3 +503,16 @@ def test_attach_agentic_refuses_codex_for_a_template_job(monkeypatch):
     loop = types.SimpleNamespace(spec=types.SimpleNamespace(start="template"))
     with pytest.raises(AgenticError, match="template"):
         attach_agentic(loop, "codex-cli", "m")
+
+
+def test_claude_md_goal_sentence_closes_and_names_a_template_start():
+    # mutation: dropping the ")" again, or keeping "improving a Rust solver" for a template start
+    goal = ('baseline "b" on TIG\'s benchmark (higher verifier quality per nonce under a\n'
+            'fixed fuel budget on every active track).')
+    mainnet = claude_md(ctx())
+    assert goal in mainnet
+    assert 'You are improving a Rust solver for the TIG challenge "knapsack".' in mainnet
+    template = claude_md(ctx(start="template"))
+    assert goal in template and "improving a Rust solver" not in template
+    assert ('You are writing a Rust solver from the empty template for the TIG challenge '
+            '"knapsack".') in template
