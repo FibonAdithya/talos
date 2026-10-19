@@ -8,7 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from statistics import mean
 
-from talos.challenges import MONOREPO_REF
+from talos.challenges import MONOREPO_REF, TEMPLATE_START_FILES
 
 MAINNET_API = "https://mainnet-api.tig.foundation"
 GH_REPO = "tig-foundation/tig-monorepo"
@@ -193,3 +193,12 @@ def fetch_algorithm_files(name: str, algorithm: str, get_text=_get_text,
 
 def fetch_template(name: str, get_text=_get_text) -> str:
     return get_text(f"{GH_RAW}/{MONOREPO_REF}/tig-algorithms/src/{name}/template.rs")
+
+
+def fetch_challenge_docs(name: str, get_text=_get_text) -> dict[str, str]:
+    """The challenge's own files at the pinned monorepo commit, for a template start. The
+    reference-algorithm policy does not apply: nothing here is an algorithm."""
+    if name not in TEMPLATE_START_FILES:
+        raise MainnetError(f"challenge {name!r} has no file list for a template start")
+    base = f"{GH_RAW}/{MONOREPO_REF}/tig-challenges/src/{name}"
+    return {f: get_text(f"{base}/{f}") for f in TEMPLATE_START_FILES[name]}

@@ -452,7 +452,8 @@ FAKE_MAINNET = types.SimpleNamespace(
         t: TrackHyperparameters({"fake_boost": 1}, "fake-benchmark", "0xfake", 100.0)
         for t in tracks},
     fetch_algorithm_files=lambda ch, name: {"mod.rs": "fn solve() { let k = 1; }\n"},
-    fetch_template=lambda ch: "pub fn solve_challenge(")
+    fetch_template=lambda ch: "pub fn solve_challenge(",
+    fetch_challenge_docs=lambda ch: {"README.md": "Fake challenge: maximise k.\n"})
 
 
 def unpriced(provider: str, model: str) -> bool:
