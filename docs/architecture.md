@@ -64,6 +64,65 @@ rate is under the challenge's ceiling. The default margin is 0, so any improveme
 tie does not; per-challenge rules live in `talos/challenges.py`. With `--track`, the focus
 track must be above the margin and no other track may get worse (`beats_focused`).
 
+## From-scratch start and annealing search
+
+`talos run` takes three flags that change where the search starts and which candidate it edits
+next: `--start {mainnet,template}`, `--search {greedy,anneal}` and `--chains N`. The defaults
+(`mainnet`, `greedy`, 1) behave as before they existed. The tree lives in `state.json` as `nodes`
+and `chains` (`talos/lineage.py::Node`, `talos/lineage.py::Chain`), and the three settings are
+frozen in `job.json`; a resume with a different value is refused.
+
+### Template start
+
+`--start template` supports `energy_arbitrage` only. The root of every chain is TIG's empty
+template (`talos/loop.py::Loop._root_files`), and a candidate has exactly one file, `mod.rs`.
+The LLM sees the challenge's `README.md` and non-baseline source files at the pinned monorepo
+commit (`talos/challenges.py::TEMPLATE_START_FILES`) plus the template, never the baseline's
+code. The baseline is still measured, with the mainnet hyperparameters, and candidates run with
+none (`talos/loop.py::Loop._candidate_hyperparameters`); see AGENTS.md invariants 1 and 2. In
+single-shot mode the first candidate of a chain, and any candidate whose hypothesis names a
+design family that no node on the chain has used, is written as a whole file
+(`talos/loop.py::Loop._whole_file`); other edits are search/replace blocks. Codex agentic is
+refused (`talos/agentic.py::codex_agentic_refused`).
+
+### Chains and the accept rule
+
+Chains take turns: iteration n runs on chain (n-1) mod N (`talos/lineage.py::chain_for`).
+Concurrency is a later change. Greedy edits a chain's best node; anneal edits its current node.
+A candidate that improves on the job's best always becomes the chain's best. Otherwise, under
+`--search anneal` (`talos/loop.py::Loop._anneal_step`), it is accepted when its score is at
+least its parent's, and when it is lower by `drop`, with probability `exp(-drop / T)`
+(`talos/lineage.py::decide`). The draw is seeded from the job id, the chain and the iteration
+(`talos/lineage.py::draw`), never from `rand_hash`, so a resumed job decides as the original
+did. Under greedy with several chains or a template start, a candidate better than its own
+chain's best is accepted into the chain without being a job-wide improvement.
+
+In a `--scoring native` job the comparisons between nodes use the score a candidate was produced
+with, which is the native score. A candidate that improves on the job's best is still validated
+on the metered runtime, and one that fails there is never a chain state. An accepted-worse
+candidate is never validated, confirmed or packaged as the result, so "won" means what it meant
+before.
+
+### Temperature and reheating
+
+`T = t0 * (1 - (1 - floor) * progress)` (`talos/lineage.py::temperature`), where `progress` is
+the largest spent fraction over the capped budget dimensions (`talos/lineage.py::spent_fraction`),
+measured from the chain's last reheat. After `stall` iterations on a chain without a new chain
+best, the chain returns to its best node and its cooling restarts from `t0` over the budget that
+remains (`talos/loop.py::Loop._reheat`). The defaults, `t0 = 0.05`, `floor = 0.1` and
+`stall = 5` (`talos/lineage.py::AnnealSettings`), are ESTIMATES: nothing has been measured to
+support them.
+
+### What the tree records
+
+Each iteration adds a node with its parent, chain, design family, title, outcome, score, per-track
+scores, metered score, whether it was accepted, and for an anneal decision the
+probability (empty when acceptance was automatic), draw and temperature. A reheat is a `reheat`
+timeline event and an anneal decision an `accept` event. The package writes the tree as
+lineage.json and lineage.md; a template job
+writes `diff_vs_template.patch` and no `hyperparameters.json`
+(`talos/package.py::build_package`).
+
 ## Native research scoring
 
 `talos run --scoring native` (the default) changes how research candidates are scored, not how

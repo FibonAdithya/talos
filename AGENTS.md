@@ -83,6 +83,11 @@ progress.
    the other tracks' training nonces against the cached baseline training results
    for those same nonces, and the confirmation rule is
    `talos/scoring.py::beats_focused`.
+   A second deliberate exception: with `--start template` the candidates run with
+   hyperparameters `None` while the baseline keeps the mainnet map
+   (`talos/loop.py::Loop._candidate_hyperparameters`), because a solver written
+   from the empty template is not tuned for the mainnet algorithm's values.
+   The package then ships no `hyperparameters.json`.
    The one deliberate asymmetry is the per-nonce timeout: the baseline runs under the
    flat `talos/inside.py::NONCE_TIMEOUT_S`, a candidate under the tighter per-track cap
    from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a `timeout` error,
@@ -106,6 +111,13 @@ progress.
    zip (`tests/test_package.py`) and the redacted bench output
    (`tests/test_bench.py`) for the hash. Nothing greps the agentic mode's
    copied transcript (`talos/agentic.py::_copy_transcript`) for it.
+   With `--start template` the baseline's source never reaches the LLM either: the
+   root of every chain is the empty template, and the baseline's files are not read
+   to build a prompt, a timeline entry, an iteration directory or an agentic
+   worktree (`talos/loop.py::Loop._root_files`; tested in `tests/test_loop.py`).
+   The agentic worktree of a template job also holds no baseline code. Codex is
+   refused for template starts even with `TALOS_ALLOW_CODEX_AGENTIC=1`
+   (`talos/agentic.py::codex_agentic_refused`).
 3. **The monorepo commit and dev image tag are pins, and both are part of
    every cache key.** `MONOREPO_REF` and `DEV_IMAGE_TAG` in
    `talos/challenges.py` enter the Modal artifact hash

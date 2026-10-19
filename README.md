@@ -495,11 +495,14 @@ Prompts for anything not given as a flag, unless `--yes` is passed.
 | `--hyperparameters mainnet\|none` | `mainnet` (the default) runs the baseline and every candidate with the per-track hyperparameters of the baseline algorithm's best-quality mainnet benchmark at the job's fuel, fixed at job start. A track with no such benchmark runs without any. `none` runs every nonce without hyperparameters. The package lists the values and the benchmark they came from. |
 | `--mode single-shot\|agentic` | Overrides the configured mode for this job. `agentic` needs a CLI provider and uses roughly 5 to 20 times the tokens of `single-shot`. |
 | `--scoring native\|metered` | `native` (the default) scores research candidates with an unmetered runner under a per-track time budget calibrated from the baseline, which is faster; a candidate that improves natively is then scored again on the metered runtime and only becomes the best if it holds up there ([how it works](docs/architecture.md#native-research-scoring)). `metered` scores every candidate with TIG's own `tig-runtime` under the job's fuel limit. The live parity test has not been run: the CPU runner is measured on knapsack only, and the GPU runner has never been compiled; a native build that fails at calibration makes the job score metered. A job keeps its scoring on resume; `--resume` with a different `--scoring` is refused. A job whose `job.json` predates the `scoring` field resumes metered. The calibration is cached at `~/.talos/calibration/<challenge>/<key>.json`, keyed by `talos/calibration.py::calibration_key` (challenge, hardware class, both pins, the baseline's code, the native runner and the baseline's hyperparameters). If it cannot be made, the job scores metered and says so in the timeline. |
+| `--start mainnet\|template` | `mainnet` (the default) starts from the top-adoption mainnet algorithm. `template` starts from TIG's empty template: the LLM sees the challenge's `README.md` and its non-baseline source files from the pinned monorepo (`talos/challenges.py::TEMPLATE_START_FILES`, not the baseline algorithms' directory) and the template, and never the baseline's code. The baseline is still measured and every candidate is scored against it. Candidates run without hyperparameters while the baseline keeps the mainnet ones. `energy_arbitrage` only; refused for other challenges. Refused with `codex-cli` in agentic mode, even with `TALOS_ALLOW_CODEX_AGENTIC=1`. See [From-scratch start and annealing search](docs/architecture.md#from-scratch-start-and-annealing-search). |
+| `--search greedy\|anneal` | `greedy` (the default) edits the best candidate so far. `anneal` edits the chain's current candidate and sometimes accepts a worse one so the search can leave a local optimum. The annealing settings (start temperature 0.05, final temperature 0.1 of that, reheat after 5 iterations without a new chain best) are estimates with no measurement behind them. |
+| `--chains N` | Independent search chains (default 1). Chains take turns: iteration n runs on chain (n-1) mod N, one at a time; running them concurrently comes in a later change. |
 | `--budget-usd N` | LLM spend cap in USD. |
 | `--budget-hours N` | Wall-clock cap in hours. |
 | `--budget-iterations N` | Iteration cap. |
 | `--budget-compute-usd N` | Estimated compute spend cap in USD. |
-| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track, hyperparameters or nonces. |
+| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track, hyperparameters, nonces, start, search or chains. |
 | `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20 (not asked and not set on the `local` backend, where it is always zero). |
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
@@ -598,6 +601,7 @@ Each job gets a directory under `runs/`:
 | `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. |
 | `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
 | `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
+| `runs/<job_id>/challenge/` | A `--start template` job only: the challenge files and the template the LLM was shown. |
 | `runs/<job_id>/iterations/<n>/` | Each candidate's files and its hypothesis. |
 | `runs/<job_id>/best/` | The best candidate's files so far. |
 | `runs/<job_id>/package/` | The hand-back package, written when the job stops. |
@@ -608,11 +612,12 @@ The package directory holds:
 | File | Contents |
 |---|---|
 | `submission` | A folder with the candidate to submit: the best algorithm's `.rs` and `.cu` files and TIG's submission `README.md` template, to fill out. Absent when the job produced no candidate. |
-| `diff_vs_baseline.patch` | The candidate as a patch against the baseline. |
+| `diff_vs_baseline.patch` | The candidate as a patch against the baseline. A `--start template` job writes `diff_vs_template.patch` instead, against the empty template. |
+| lineage.json, lineage.md | The search tree: every iteration's node and each chain's state (lineage.json), and the path from the root to the best node with a per-design-family table (lineage.md). Written when the job recorded any node. |
 | `scores.md` | Per-nonce tables for baseline and candidate on training and held-out nonces. A focused job (`--track`) adds a regression-guard table for the other tracks. |
 | `hypotheses.md` | The full hypothesis log with outcomes. |
 | `evidence_draft.md` | A partly filled-in TIG advance-evidence template. |
-| `hyperparameters.json` | The per-track hyperparameters, when the job used them. |
+| `hyperparameters.json` | The per-track hyperparameters, when the job used them. Not written for a `--start template` job, whose candidate ran without them. |
 | `README.md` | The submission steps, with a Hyperparameters section when the job used them. |
 
 Benchmark the submitted algorithm with the same hyperparameters: the measured improvement
