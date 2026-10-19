@@ -73,7 +73,8 @@ progress.
    own `gpu=[...]` list, would score candidates on hardware the baseline never
    ran on, which is why `modal_app/talos_bench.py::register` pins each function
    to one GPU.
-   Both sides also run with identical hyperparameters: the per-track map is
+   Both sides also run with identical hyperparameters, except in a `--start template`
+   job (the third asymmetry below): the per-track map is
    frozen into `job.json` (`talos/state.py::JobSpec`) together with the
    algorithm it belongs to, every request takes it from there
    (`talos/loop.py::Loop._request`, `talos/baseline.py::resolve_baseline`), and
@@ -83,14 +84,9 @@ progress.
    the other tracks' training nonces against the cached baseline training results
    for those same nonces, and the confirmation rule is
    `talos/scoring.py::beats_focused`.
-   A second deliberate exception: with `--start template` the candidates run with
-   hyperparameters `None` while the baseline keeps the mainnet map
-   (`talos/loop.py::Loop._candidate_hyperparameters`), because a solver written
-   from the empty template is not tuned for the mainnet algorithm's values.
-   The package then ships no `hyperparameters.json`.
-   The one deliberate asymmetry is the per-nonce timeout: the baseline runs under the
-   flat `talos/inside.py::NONCE_TIMEOUT_S`, a candidate under the tighter per-track cap
-   from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a `timeout` error,
+   There are three deliberate asymmetries. The first is the per-nonce timeout: the
+   baseline runs under the flat `talos/inside.py::NONCE_TIMEOUT_S`, a candidate under the
+   tighter per-track cap from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a `timeout` error,
    never a quality, so it can only fail a candidate, never flatter one.
    With `--scoring native` there is a second, bounded asymmetry. Research candidates run
    natively (`talos/inside.py::run_nonce_native`) under a per-track time budget calibrated
@@ -101,6 +97,12 @@ progress.
    on those metered results. The calibration key (`talos/calibration.py::calibration_key`)
    carries the hardware class, both pins, the baseline's code, the native runner's digest
    (`talos/native_runner.py::runner_digest`) and the baseline's hyperparameters.
+   The third: with `--start template` the candidates run with hyperparameters `None`
+   while the baseline keeps the mainnet map
+   (`talos/loop.py::Loop._candidate_hyperparameters`), because a solver written from the
+   empty template is not tuned for the mainnet algorithm's values. The package then ships
+   no `hyperparameters.json`. This changes the conditions a template candidate's delta is
+   measured under, and it is a decision of the repo owner (design spec 2026-10-19 §5).
 2. **The job's `rand_hash` lives in `job.json` and nowhere the agent can
    read.** It seeds every nonce; an LLM that sees it can tune to the exact
    nonces it is scored on. It is stripped from the spec the prompts see
