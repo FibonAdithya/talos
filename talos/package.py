@@ -81,6 +81,13 @@ def evidence_draft(spec: JobSpec, state: JobState) -> str:
     # deviation from brief: also include outcome "won" (a winning iteration's hypothesis
     # record carries outcome "won", not "improved" — see JobState.confirmed, Task 11)
     winners = [h for h in state.hypotheses if h.get("outcome") in ("improved", "won")]
+    if state.nodes and in_tree(spec.start, spec.search, spec.chains):
+        # In a tree, improvements on other chains or branches are not part of the best's method:
+        # only the steps from the root down to the best node are. A greedy one-chain mainnet job
+        # keeps the list above, which is the same path there and also covers iterations from
+        # before nodes were recorded.
+        by_iteration = {h.get("iteration"): h for h in state.hypotheses}
+        winners = [by_iteration[n.id] for n in _best_path(state) if n.id in by_iteration]
     method = "\n".join(f"- {h['title']}: {h['description']}" for h in winners) or "(none recorded)"
     filled = template.replace(
         "PLEASE IDENTIFY WHICH TIG CHALLENGE THE METHOD ADDRESSES.\n\n> YOUR RESPONSE HERE",

@@ -338,3 +338,12 @@ def test_hypothesis_log_names_parent_nodes_in_a_tree(tmp_path):
         assert f"- #1 ({root}) [hybrid] Root step" in text
         assert "- #3 (vs node #1) [hybrid] Best step" in text
 
+
+def test_evidence_draft_lists_only_the_best_path_in_a_tree(tmp_path):
+    # mutation: listing every improved hypothesis from every chain (today's rule) puts the
+    # other chain's method into the method description of the best node
+    spec, st, store = make(tmp_path)
+    _tree_hypotheses(st)
+    text = evidence_draft(replace(spec, chains=2), st)
+    assert "- Root step: Root step desc\n- Best step: Best step desc" in text
+    assert "Other chain" not in text
