@@ -1,5 +1,6 @@
 import json
 import math
+import re
 import types
 from dataclasses import replace
 
@@ -9,6 +10,7 @@ from talos.budget import Budget, BudgetExhausted, Spend
 from talos.bench import FakeBench
 from talos.challenges import BeatRule
 from talos.loop import Loop, Thresholds
+from talos.prompts import SEARCH_REPLACE_FORMAT, WHOLE_FILE_FORMAT
 from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
                              ProviderTimeout)
 from talos.providers.fake import FakeProvider
@@ -62,7 +64,7 @@ def quality_from_files(challenge, files, ns):
 
 def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=None, holdout_n=4,
          track=None, two_tracks=False, scoring="metered", fuel=1, budgets=None, bench=None,
-         spec_kw=None):
+         spec_kw=None, template_rs="pub fn solve_challenge(", challenge_docs=None):
     store = JobStore(tmp_path)
     sp = spec(budget, track=track, two_tracks=two_tracks, scoring=scoring, fuel=fuel,
               **(spec_kw or {}))
@@ -76,8 +78,9 @@ def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=No
         st.fuel_budgets_us = budgets or {"t": 1_000_000}
     fb = bench if bench is not None else FakeBench(scores)
     fp = FakeProvider(script)
-    loop = Loop(sp, st, store, fp, fb, template_rs="pub fn solve_challenge(",
-                clock=lambda: 0.0, sleep=lambda s: None, thresholds=thresholds or Thresholds())
+    loop = Loop(sp, st, store, fp, fb, template_rs=template_rs,
+                clock=lambda: 0.0, sleep=lambda s: None, thresholds=thresholds or Thresholds(),
+                **({"challenge_docs": challenge_docs} if challenge_docs is not None else {}))
     return loop, fp, fb, store
 
 
@@ -1640,3 +1643,208 @@ def test_one_anneal_chain_on_a_mainnet_start_keeps_the_job_best_as_its_best(tmp_
     assert st.nodes[1].probability is None  # accepted outright, no draw needed
     assert st.chains[0].current == 2
     assert st.chains[0].best == 1 and st.chains[0].best_score == pytest.approx(0.06)
+
+
+# ── template start ───────────────────────────────────────────────────
+
+TEMPLATE_RS = "pub fn solve_challenge() { todo!() }\n"
+BASELINE_ONLY = "BASELINE-ONLY-7f3a"
+
+
+def hypf(title, family=None):
+    """A hypothesis reply, with a design_family when one is given."""
+    d = {"title": title, "description": "d", "strategy_tag": "local_search"}
+    if family is not None:
+        d["design_family"] = family
+    return json.dumps(d)
+
+
+def whole(k):
+    """A whole-file reply writing mod.rs with `let k = {k};`."""
+    return f"<<<<<<< FILE mod.rs\nfn solve() {{ let k = {k}; }}\n>>>>>>> END FILE\n"
+
+
+def make_template(tmp_path, script, iterations=4, spec_kw=None, **kw):
+    """A from-scratch anneal job. The root is the empty template as mod.rs. The baseline scores
+    200 on every nonce, so k=11 (quality 110) is -45%, and its code carries a marker that must
+    never be shown."""
+    from talos.lineage import AnnealSettings
+    sk = {"start": "template", "search": "anneal", "anneal": AnnealSettings().to_dict(),
+          **(spec_kw or {})}
+    kw.setdefault("budget", Budget(usd=None, hours=None, iterations=iterations,
+                                   compute_usd=None))
+    loop, fp, fb, store = make(tmp_path, script, spec_kw=sk, template_rs=TEMPLATE_RS,
+                               challenge_docs={"README.md": "doc"}, **kw)
+    loop.state.baseline = replace(
+        baseline(q=200), files={"mod.rs": f"fn solve() {{ let k = 1; }} // {BASELINE_ONLY}\n"})
+    return loop, fp, fb, store
+
+
+def edit_systems(fp):
+    return [system for system, _ in fp.calls if system.startswith("You are editing")]
+
+
+def test_template_start_first_candidate_is_written_whole_from_the_template(tmp_path):
+    # mutation: _root_files() returning the baseline's files edits the baseline, not the template
+    # mutation: whole_file left False at the root asks for diffs against an empty template
+    # mutation: _context() without start or challenge_docs drops the challenge definition
+    loop, fp, fb, store = make_template(tmp_path, [hypf("lp", "lp"), whole(11)], iterations=1)
+    st = loop.run()
+    system, user = fp.calls[1]  # the edit call
+    assert "pub fn solve_challenge() { todo!() }" in user
+    assert WHOLE_FILE_FORMAT in system
+    assert "--- tig-challenges/src/knapsack/README.md ---\ndoc" in user
+    assert st.best.iteration == 1 and "let k = 11;" in st.best.files["mod.rs"]
+    assert set(st.best.files) == {"mod.rs"}
+
+
+def test_template_start_never_shows_baseline_code(tmp_path, monkeypatch):
+    # mutation: _root_files() returning state.baseline.files
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 1.0)  # never accept
+
+    def swap(frm, to):
+        return f"<<<<<<< SEARCH mod.rs\nlet k = {frm};\n=======\nlet k = {to};\n>>>>>>> REPLACE\n"
+
+    script = [hyp("a"), whole("BUG"), swap("BUG", "BUG2"),  # 1: no build after its fix round
+              hyp("b"), whole(11),                          # 2: from the root, the first best
+              hyp("c"), edit(5, frm=11),                    # 3: worse, rejected
+              hyp("d"), edit(6, frm=11),                    # 4: worse, rejected; then distill
+              "LESSON: start from a feasible schedule.",
+              hyp("e"), edit(7, frm=11)]                    # 5: lets the distill call run
+    # five iterations: with a budget of four, the distill call after iteration 4 is refused
+    loop, fp, fb, store = make_template(tmp_path, script, iterations=5,
+                                        thresholds=Thresholds(distill=2, compile_fix_rounds=1))
+    fb._compile_ok = lambda files: "BUG" not in files["mod.rs"]
+    st = loop.run()
+    assert all(BASELINE_ONLY not in system + user for system, user in fp.calls)
+    assert BASELINE_ONLY not in (store.run_dir / "timeline.jsonl").read_text()
+    written = [p for p in (store.run_dir / "iterations").rglob("*") if p.is_file()]
+    assert written and all(BASELINE_ONLY not in p.read_text() for p in written)
+    # the run went through every prompt kind: hypothesis, edit, compile fix and distill
+    assert [h["outcome"] for h in st.hypotheses] == [
+        "failed:compile", "improved", "failed:score", "failed:score", "failed:score"]
+    assert len(fp.calls) == 12
+    assert "start from a feasible schedule" in st.tacit
+
+
+def test_template_candidates_run_without_hyperparameters(tmp_path):
+    hp = {"t": {"x": 1}}
+    loop, fp, fb, store = make_template(
+        tmp_path, [hyp("a"), whole(11), hyp("b"), edit(12, frm=11)], iterations=2,
+        spec_kw={"hyperparameters": hp})
+    loop.run()
+    assert len(fb.calls) == 2
+    # mutation: _request passing spec.hyperparameters
+    assert all(c.hyperparameters is None for c in fb.calls)
+    # mutation: _context() passing spec.hyperparameters shows the mainnet keys to the model
+    assert all("Hyperparameters:" not in user for _system, user in fp.calls)
+
+
+def test_template_baseline_keeps_the_spec_hyperparameters(tmp_path):
+    # mutation: measure_baseline passing _candidate_hyperparameters() scores the baseline
+    # without the map it is published with
+    hp = {"t": {"x": 1}}
+    loop, fp, fb, store = make_template(tmp_path, [hyp("a"), whole(11)], iterations=1,
+                                        spec_kw={"hyperparameters": hp})
+    loop.spec = replace(loop.spec, baseline_algorithm={"name": "pinned", "id": "p1",
+                                                       "adoption": 3})
+    loop.state.baseline = None
+    mainnet = types.SimpleNamespace(
+        fetch_algorithm_files=lambda ch, name: BASE_FILES,
+        fetch_template=lambda ch: TEMPLATE_RS)
+    loop.measure_baseline(tmp_path / "cache", "cpu4-mem8192", mainnet=mainnet)
+    assert fb.calls[0].hyperparameters == hp
+    loop.run()
+    assert len(fb.calls) == 2 and fb.calls[1].hyperparameters is None
+
+
+def test_template_best_below_mainnet_is_kept_and_shown(tmp_path):
+    loop, fp, fb, store = make_template(
+        tmp_path, [hyp("a"), whole(11), hyp("b"), edit(5, frm=11)], iterations=2)
+    st = loop.run()
+    # mutation: _best_delta() returning 0.0 drops every from-scratch best
+    assert st.best.iteration == 1
+    assert st.best.delta["mean_rel_delta"] == pytest.approx(-0.45)
+    _system, user = fp.calls[2]  # iteration 2's hypothesis call
+    assert "Best so far (node #1): -45.000%" in user
+    # a best below mainnet is never confirmed
+    assert fb.holdout_runs == 0 and st.confirmed == [] and st.status == "exhausted"
+
+
+def test_template_new_family_gets_whole_file_and_same_family_gets_diffs(tmp_path):
+    # mutation: whole-file only at the root makes iteration 3's whole-file reply fail to apply
+    # mutation: whole-file for every template edit makes iteration 2's diff reply fail
+    script = [hypf("a", "lp"), whole(11),          # 1: root
+              hypf("b", "lp"), edit(12, frm=11),   # 2: same family as node 1
+              hyp("c"), whole(13),                 # 3: unlabelled, new on this chain
+              hyp("d"), edit(14, frm=13)]          # 4: unlabelled again
+    loop, fp, fb, store = make_template(tmp_path, script, iterations=4)
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["improved"] * 4
+    systems = edit_systems(fp)
+    assert [WHOLE_FILE_FORMAT in s for s in systems] == [True, False, True, False]
+    assert [SEARCH_REPLACE_FORMAT in s for s in systems] == [False, True, False, True]
+    assert [n.family for n in st.nodes] == ["lp", "lp", "unlabelled", "unlabelled"]
+
+
+def test_template_greedy_second_chain_keeps_its_own_worse_best(tmp_path):
+    # mutation: dropping the greedy chain-only acceptance leaves chain 1 at the root, so
+    # iteration 4 asks for a whole file, its diff reply parses as no FILE block, and it fails
+    # failed:edit with parent 0
+    # mutation: collecting design families from every chain asks iteration 3 for a diff, and
+    # its whole-file reply fails failed:edit
+    script = [hypf("a", "greedy"), whole(21),        # 1, chain 0: root, -40%, the job best
+              hypf("b", "lp"), whole(11),            # 2, chain 1: root, -45%, chain 1's best
+              hypf("c", "lp"), whole(20),            # 3, chain 0: new family here, worse
+              hypf("d", "lp"), edit(10, frm=11)]     # 4, chain 1: from node 2, worse
+    loop, fp, fb, store = make_template(tmp_path, script, iterations=4,
+                                        spec_kw={"search": "greedy", "chains": 2})
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == [
+        "improved", "accepted", "failed:score", "failed:score"]
+    assert st.nodes[1].outcome == "accepted"
+    assert st.chains[1].best == 2 and st.chains[1].best_score == pytest.approx(-0.45)
+    assert st.nodes[3].parent == 2 and st.nodes[3].outcome != "failed:edit"
+    assert st.best.iteration == 1
+
+
+def test_template_native_first_candidate_validates_below_mainnet(tmp_path):
+    # mutation: validation_failure given 0.0 instead of _best_delta() demotes it not_improved
+    loop, fp, fb, store = make_template(tmp_path, [hyp("a"), whole(11)], iterations=1,
+                                        scoring="native")
+    st = loop.run()
+    assert [v["outcome"] for v in st.validations] == ["validated"]
+    assert st.best.iteration == 1
+    assert st.best.delta["mean_rel_delta"] == pytest.approx(-0.45)
+
+
+def never_compiling_script(system, user):
+    """A reply for every prompt kind, so compile-fix rounds and distillation cannot put a fixed
+    list out of step."""
+    if '"strategy_tag" (one of' in system:
+        return hyp("try")
+    if WHOLE_FILE_FORMAT in system:
+        return whole(11)
+    m = re.search(r"let k = (\d+);", user)
+    if system.startswith("You are fixing") and m:
+        k = int(m.group(1))
+        return edit(k + 1, frm=k)
+    return "LESSON: make it build first."
+
+
+def test_template_that_never_compiles(tmp_path):
+    # mutation: a reheat that reads chain.best_score or the root's score crashes on None
+    from talos.lineage import AnnealSettings
+    from talos.package import build_package
+    loop, fp, fb, store = make_template(
+        tmp_path, never_compiling_script, iterations=5,
+        spec_kw={"anneal": AnnealSettings(stall=2).to_dict()})
+    fb._compile_ok = lambda files: False
+    st = loop.run()
+    assert st.status == "exhausted" and st.best is None
+    assert [h["outcome"] for h in st.hypotheses] == ["failed:compile"] * 5
+    assert len(st.nodes) == 5 and all(n.accepted is False for n in st.nodes)
+    assert events(store, "reheat")
+    assert st.chains[0].current == 0
+    readme = (build_package(loop.spec, st, store) / "README.md").read_text()
+    assert "No candidate" in readme

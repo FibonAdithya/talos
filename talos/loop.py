@@ -6,7 +6,7 @@ import json
 import math
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -15,7 +15,7 @@ from talos.baseline import resolve_baseline
 from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, EvalResult
 from talos.budget import BudgetExhausted, exhausted
 from talos.challenges import CHALLENGES
-from talos.edits import EditError, EditOutcome, apply_edit_response
+from talos.edits import EditError, EditOutcome, apply_edit_response, apply_whole_file_response
 from talos.diagnostics import dead_new_functions, defined_functions, first_error
 from talos.inside import NONCE_TIMEOUT_S
 from talos.lineage import (ROOT, AnnealSettings, Chain, Node, chain_for, decide, draw,
@@ -94,10 +94,13 @@ class Loop:
     def __init__(self, spec: JobSpec, state: JobState, store: JobStore, provider, bench,
                  template_rs: str, clock=time.time, sleep=time.sleep,
                  on_event: Callable[[str, dict], None] | None = None,
-                 thresholds: Thresholds | None = None):
+                 thresholds: Thresholds | None = None,
+                 challenge_docs: dict[str, str] | None = None):
         self.spec, self.state, self.store = spec, state, store
         self.provider, self.bench = provider, bench
         self.template_rs = template_rs
+        # The challenge definition files shown to a template start (prompts.challenge_block).
+        self.challenge_docs = dict(challenge_docs or {})
         self.clock, self.sleep = clock, sleep
         self.on_event = on_event or (lambda kind, data: None)
         self.t = thresholds or Thresholds()
@@ -165,12 +168,17 @@ class Loop:
                           holdout=holdout, fuel=self.spec.fuel, baseline_training=base,
                           rule=self.rule, prior_functions=prior,
                           timeouts=self._timeouts(baseline_training),
-                          hyperparameters=self.spec.hyperparameters)
+                          hyperparameters=self._candidate_hyperparameters())
         if scoring == "native":
             # Held-out is decided on the metered validation run, never on native results.
             req.holdout, req.baseline_training = [], None
             req.mode, req.fuel_budgets_us = "native", self.state.fuel_budgets_us
         return req
+
+    def _candidate_hyperparameters(self) -> dict | None:
+        """What a candidate runs with. A template start writes its own solver, so the mainnet
+        algorithm's hyperparameters mean nothing to it; the baseline keeps them."""
+        return None if self.spec.start == "template" else self.spec.hyperparameters
 
     def _timeouts(self, baseline_training) -> dict[str, int] | None:
         if self.t.runtime_ceiling <= 0 or not baseline_training:
@@ -341,7 +349,12 @@ class Loop:
         return self.state.best.training if self.state.best else self.state.baseline.training
 
     def _best_delta(self) -> float:
-        return self.state.best.delta["mean_rel_delta"] if self.state.best else 0.0
+        """The score a candidate must exceed to become the best. With no best yet that is the
+        baseline's 0.0 on a mainnet start, and minus infinity on a template start, so the first
+        scored candidate becomes the best however far below mainnet it is."""
+        if self.state.best:
+            return self.state.best.delta["mean_rel_delta"]
+        return -math.inf if self.spec.start == "template" else 0.0
 
     # ── lineage tree ──────────────────────────────────────────────────
 
@@ -362,10 +375,15 @@ class Loop:
         return chain.current if self.spec.search == "anneal" else chain.best
 
     def _root_files(self) -> dict[str, str]:
+        """A template start's root is TIG's empty template as mod.rs. The baseline's code is
+        never read here for it, so it reaches no prompt, timeline entry or iteration directory."""
+        if self.spec.start == "template":
+            return {"mod.rs": self.template_rs}
         return dict(self.state.baseline.files)
 
     def _root_score(self) -> float | None:
-        return 0.0  # the mainnet baseline scores 0 against itself
+        """The mainnet baseline scores 0 against itself; the empty template is not scored."""
+        return None if self.spec.start == "template" else 0.0
 
     def _node(self, node_id: int) -> Node | None:
         return next((node for node in self.state.nodes if node.id == node_id), None)
@@ -496,8 +514,9 @@ class Loop:
                              track=self.spec.track,
                              guard_tracks=([t for t in self.spec.tracks if t != self.spec.track]
                                            if self.spec.track else []),
-                             hyperparameters=self.spec.hyperparameters,
-                             scoring=self._scoring())
+                             hyperparameters=self._candidate_hyperparameters(),
+                             scoring=self._scoring(), start=self.spec.start,
+                             challenge_docs=self.challenge_docs)
 
     # ── single-shot propose + edit ────────────────────────────────────
 
@@ -505,9 +524,14 @@ class Loop:
         system, user = hypothesis_prompts(ctx)
         hypothesis = parse_hypothesis(self._llm(system, user).text)
         self._event("hypothesis", **hypothesis)
-        system, user = edit_prompts(ctx, hypothesis)
+        whole_file = self._whole_file(ctx, hypothesis)
+        # A copy: _score_candidate reuses ctx for the compile-fix prompts, which stay diffs.
+        system, user = edit_prompts(replace(ctx, whole_file=whole_file), hypothesis)
         text = self._llm(system, user).text
-        outcome = apply_edit_response(ctx.files, text)
+        if whole_file:
+            outcome = apply_whole_file_response(ctx.files, text)
+        else:
+            outcome = apply_edit_response(ctx.files, text)
         for _ in range(self.t.edit_repair_rounds):
             if not outcome.misses:
                 break
@@ -532,6 +556,16 @@ class Loop:
         if outcome.applied == 0:
             raise EditError("no edit block applied")
         return hypothesis, outcome.files
+
+    def _whole_file(self, ctx: PromptContext, hypothesis: dict) -> bool:
+        """Template starts only: the edit is a whole-file write from the root, or when the
+        hypothesis names a design family no node on this chain has used. A mainnet start always
+        edits with search/replace."""
+        if self.spec.start != "template":
+            return False
+        chain = self._chain(self._n)
+        families = {node.family for node in self.state.nodes if node.chain == chain.index}
+        return ctx.anchor == ROOT or hypothesis["design_family"] not in families
 
     # ── one iteration ─────────────────────────────────────────────────
 
