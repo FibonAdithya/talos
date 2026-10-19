@@ -596,8 +596,8 @@ Each job gets a directory under `runs/`:
 
 | Path | Contents |
 |---|---|
-| `runs/<job_id>/job.json` | The job's fixed inputs: challenge, direction, provider, model, mode, budget, nonces, fuel, track, baseline algorithm, hyperparameters, scoring. Written once. |
-| `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log. A `--scoring native` job also records its scoring, its per-track time budgets and a `validations` list: one entry per candidate that improved natively, with its iteration, its outcome (`validated` or `demoted`) and the reason it was demoted. |
+| `runs/<job_id>/job.json` | The job's fixed inputs: challenge, direction, provider, model, mode, budget, nonces, fuel, track, baseline algorithm, hyperparameters, scoring, start, search, chains and the annealing settings. Written once. |
+| `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log, and the lineage tree (`nodes`, one per iteration, and `chains`, each chain's current node, best node and stall count). A `--scoring native` job also records its scoring, its per-track time budgets and a `validations` list: one entry per candidate that improved natively, with its iteration, its outcome (`validated` or `demoted`) and the reason it was demoted. |
 | `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. |
 | `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
 | `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
@@ -621,7 +621,8 @@ The package directory holds:
 | `README.md` | The submission steps, with a Hyperparameters section when the job used them. |
 
 Benchmark the submitted algorithm with the same hyperparameters: the measured improvement
-holds only with them.
+holds only with them. A `--start template` candidate was scored without hyperparameters, so
+benchmark it without any.
 
 On the C3 backend each iteration also gets a `runs/<job_id>/c3/<n>/` directory, described in
 [docs/compute-backends.md](docs/compute-backends.md#c3-job-directories). The measured baseline

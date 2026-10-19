@@ -135,7 +135,8 @@ progress.
    runner change never reuses a binary cached on the Modal volume.
 4. **An edit outside the algorithm files fails the whole iteration; its
    in-scope blocks are never applied either.** `talos/edits.py::apply_edit_response`
-   reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration
+   (and `talos/edits.py::apply_whole_file_response` for a template start's whole-file
+   replies) reports rejected paths and `talos/loop.py::Loop.iterate` fails the iteration
    on any of them, including in a compile-fix round. The only spelling accepted
    besides the bare file name is the candidate's own directory, with or without the
    directories above it (`.../talos_cand/<name>`, `talos_cand/<name>`;
@@ -240,6 +241,7 @@ nobody.
 | CLI entry point, wizards, flags | `talos/cli.py::main` |
 | Per-challenge pins, beat rules, hardware | `talos/challenges.py::CHALLENGES` |
 | One iteration of the research loop | `talos/loop.py::Loop.iterate`, confirmation in `talos/loop.py::Loop._confirm` |
+| Lineage tree, chains, annealing accept rule and temperature | `talos/lineage.py::decide`, `talos/lineage.py::temperature`, `talos/loop.py::Loop._anneal_step` |
 | How a candidate is compared to the baseline | `talos/scoring.py::bundle_delta`, `talos/scoring.py::beats` |
 | What a job persists, and the run directory layout | `talos/state.py::JobStore`, `README.md#where-results-land` |
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |

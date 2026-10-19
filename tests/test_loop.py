@@ -1684,6 +1684,19 @@ def edit_systems(fp):
     return [system for system, _ in fp.calls if system.startswith("You are editing")]
 
 
+def test_whole_file_reply_naming_a_new_file_fails_the_iteration(tmp_path):
+    # AGENTS.md invariant 4 for whole-file replies: one out-of-scope FILE block fails the whole
+    # iteration, and the in-scope mod.rs block in the same reply is never applied or scored.
+    # mutation: dropping the `if outcome.rejected` check after apply_whole_file_response scores
+    # the mod.rs block and makes it the best
+    reply = whole(11) + "<<<<<<< FILE helpers.rs\nfn h() {}\n>>>>>>> END FILE\n"
+    loop, fp, fb, store = make_template(tmp_path, [hypf("lp", "lp"), reply], iterations=1)
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] == "failed:edit"
+    assert "helpers.rs" in st.hypotheses[0]["error"]
+    assert st.best is None and fb.calls == []
+
+
 def test_template_start_first_candidate_is_written_whole_from_the_template(tmp_path):
     # mutation: _root_files() returning the baseline's files edits the baseline, not the template
     # mutation: whole_file left False at the root asks for diffs against an empty template
