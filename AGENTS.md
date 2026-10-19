@@ -86,8 +86,8 @@ progress.
    `talos/scoring.py::beats_focused`.
    There are three deliberate asymmetries. The first is the per-nonce timeout: the
    baseline runs under the flat `talos/inside.py::NONCE_TIMEOUT_S`, a candidate under the
-   tighter per-track cap from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a `timeout` error,
-   never a quality, so it can only fail a candidate, never flatter one.
+   tighter per-track cap from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a
+   `timeout` error, never a quality, so it can only fail a candidate, never flatter one.
    With `--scoring native` there is a second, bounded asymmetry. Research candidates run
    natively (`talos/inside.py::run_nonce_native`) under a per-track time budget calibrated
    from the baseline's metered fuel (`talos/calibration.py::budgets_us`), while the baseline
