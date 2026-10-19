@@ -25,6 +25,16 @@ Rules: the SEARCH text must match the current file exactly once; keep each block
 emit several blocks for several places; never emit whole-file rewrites; never touch files
 other than the algorithm files shown."""
 
+WHOLE_FILE_FORMAT = """\
+Respond ONLY with one block per file you change, in exactly this format:
+
+<<<<<<< FILE path/to/file.rs
+<the complete new contents of the file>
+>>>>>>> END FILE
+
+Rules: give each file in full, never a diff or an excerpt; a file you do not give is left
+unchanged; touch only the algorithm files shown."""
+
 
 @lru_cache(maxsize=1)
 def _rust_rules() -> str:

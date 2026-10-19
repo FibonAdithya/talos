@@ -1,6 +1,6 @@
 import pytest
 
-from talos.edits import EditError, apply_edit_response
+from talos.edits import EditError, apply_edit_response, apply_whole_file_response
 
 FILES = {"mod.rs": "fn a() {}\nfn b() {}\n", "ls.rs": "fn c() {}\n"}
 
@@ -65,3 +65,64 @@ def test_candidate_path_without_the_leading_directories_is_in_scope():
     # a directory that merely ends in the name is someone else's
     out = apply_edit_response(FILES, blk("old_talos_cand/mod.rs", "fn a() {}", "fn a() { 1 }"))
     assert out.applied == 0 and out.rejected == ["old_talos_cand/mod.rs"]
+
+
+def whole(path, body):
+    return f"<<<<<<< FILE {path}\n{body}>>>>>>> END FILE\n"
+
+
+def test_whole_file_replaces_the_named_file():
+    # mutation: not writing the body into `files`, or counting blocks that were not applied
+    out = apply_whole_file_response({"mod.rs": "old\n"}, whole("mod.rs", "fn a() {}\n"))
+    assert out.files == {"mod.rs": "fn a() {}\n"}
+    assert out.applied == 1 and out.misses == [] and out.rejected == []
+
+
+def test_whole_file_accepts_the_candidate_directory_spelling():
+    # mutation: matching the block name against `files` directly instead of through _resolve
+    out = apply_whole_file_response({"mod.rs": "old\n"}, whole("talos_cand/mod.rs", "new\n"))
+    assert out.files == {"mod.rs": "new\n"} and out.applied == 1
+
+
+def test_whole_file_rejects_a_new_file_name():
+    # mutation: adding names that are not in `files` grows the file set
+    out = apply_whole_file_response({"mod.rs": "old\n"},
+                                    whole("mod.rs", "new\n") + whole("helpers.rs", "x\n"))
+    assert out.rejected == ["helpers.rs"]
+    assert "helpers.rs" not in out.files
+    assert out.files == {"mod.rs": "new\n"} and out.applied == 1
+
+
+def test_whole_file_rejects_another_algorithms_directory():
+    # mutation: resolving by basename instead of through _resolve
+    out = apply_whole_file_response({"mod.rs": "old\n"}, whole("other_algo/mod.rs", "new\n"))
+    assert out.rejected == ["other_algo/mod.rs"]
+    assert out.files == {"mod.rs": "old\n"} and out.applied == 0
+
+
+def test_whole_file_without_blocks_raises():
+    # mutation: returning an outcome with applied == 0 instead of raising
+    with pytest.raises(EditError, match="no FILE blocks"):
+        apply_whole_file_response({"mod.rs": "old\n"}, "I rewrote mod.rs, trust me.")
+
+
+def test_whole_file_strips_a_code_fence_inside_the_block():
+    # mutation: copying the block body verbatim hands the compiler a stray fence
+    out = apply_whole_file_response(
+        {"mod.rs": "old\n"}, whole("mod.rs", "```rust\nfn a() {}\nfn b() {}\n```\n"))
+    assert out.files["mod.rs"] == "fn a() {}\nfn b() {}\n"
+
+
+def test_whole_file_keeps_inner_fences_and_ignores_prose():
+    # mutation: stripping every fence-looking line, or reading prose lines as body
+    body = "fn a() {}\n// ```\n```\nfn b() {}\n"
+    out = apply_whole_file_response({"mod.rs": "old\n"},
+                                    "Here you go:\n" + whole("mod.rs", body) + "Done.\n")
+    assert out.files["mod.rs"] == body
+
+
+def test_whole_file_last_block_for_a_file_wins():
+    # mutation: first block wins, or applied counts blocks rather than files
+    out = apply_whole_file_response({"mod.rs": "old\n"},
+                                    whole("mod.rs", "one\n") + whole("mod.rs", "two\n"))
+    assert out.files == {"mod.rs": "two\n"} and out.applied == 1
