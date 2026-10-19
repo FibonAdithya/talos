@@ -18,6 +18,7 @@ from talos.challenges import CHALLENGES
 from talos.edits import EditError, EditOutcome, apply_edit_response
 from talos.diagnostics import dead_new_functions, defined_functions, first_error
 from talos.inside import NONCE_TIMEOUT_S
+from talos.lineage import ROOT, Chain, Node, chain_for
 from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
                            dead_code_fix_prompts, distill_prompts, edit_prompts,
                            edit_repair_prompts, hypothesis_prompts,
@@ -332,7 +333,8 @@ class Loop:
     # ── context ───────────────────────────────────────────────────────
 
     def _current_files(self) -> dict[str, str]:
-        return dict(self.state.best.files if self.state.best else self.state.baseline.files)
+        """The files of the parent that iteration self._n edits."""
+        return self._node_files(self._parent_id(self._chain(self._n)))
 
     def _current_training(self):
         return self.state.best.training if self.state.best else self.state.baseline.training
@@ -340,8 +342,92 @@ class Loop:
     def _best_delta(self) -> float:
         return self.state.best.delta["mean_rel_delta"] if self.state.best else 0.0
 
-    def _anchor(self) -> int:
-        return self.state.best.iteration if self.state.best else 0
+    # ── lineage tree ──────────────────────────────────────────────────
+
+    def _chain(self, n: int) -> Chain:
+        """The chain iteration n belongs to. The chains are created on first use."""
+        if not self.state.chains:
+            self.state.chains = [Chain(index=i, best_score=self._root_score())
+                                 for i in range(self.spec.chains)]
+            if self.state.best is not None:
+                # A job saved before the lineage tree has a best but no chains. Chain 0 continues
+                # from that best; starting it at the root would edit the baseline again.
+                first = self.state.chains[0]
+                first.current = first.best = self.state.best.iteration
+                first.best_score = self._best_delta()
+        return self.state.chains[chain_for(n, self.spec.chains)]
+
+    def _parent_id(self, chain: Chain) -> int:
+        return chain.current if self.spec.search == "anneal" else chain.best
+
+    def _root_files(self) -> dict[str, str]:
+        return dict(self.state.baseline.files)
+
+    def _root_score(self) -> float | None:
+        return 0.0  # the mainnet baseline scores 0 against itself
+
+    def _node(self, node_id: int) -> Node | None:
+        return next((node for node in self.state.nodes if node.id == node_id), None)
+
+    def _node_files(self, node_id: int) -> dict[str, str]:
+        """A node's sources: the root's files, the job best's, or the files saved in the
+        node's iteration directory. A best kept from before the lineage tree has no directory
+        of its own guaranteed, so state.best is checked before the disk."""
+        root = self._root_files()
+        if node_id == ROOT:
+            return root
+        if self.state.best is not None and self.state.best.iteration == node_id:
+            return dict(self.state.best.files)
+        # Not store.iteration_dir: it creates the directory.
+        it_dir = self.store.run_dir / "iterations" / f"{node_id:04d}"
+        return {name: (it_dir / name).read_bytes().decode("utf-8") for name in root}
+
+    @staticmethod
+    def _candidate_gap(cand: Candidate) -> dict:
+        return {"node": cand.iteration, "mean": cand.delta["mean_rel_delta"],
+                "tracks": {t["track"]: t["rel_delta"] for t in cand.delta["tracks"]}}
+
+    def _parent_gap(self, parent: int) -> dict | None:
+        if parent == ROOT:
+            return None
+        node = self._node(parent)
+        if node is not None:
+            return {"node": parent, "mean": node.rank_score(), "tracks": node.tracks or {}}
+        best = self.state.best  # a best kept from before the lineage tree has no Node
+        return self._candidate_gap(best) if best and best.iteration == parent else None
+
+    def _best_gap(self) -> dict | None:
+        return self._candidate_gap(self.state.best) if self.state.best else None
+
+    def _lineage_fields(self, chain: Chain) -> dict:
+        """The lineage part of a new iteration record."""
+        return {"chain": chain.index, "against": self._parent_id(chain), "design_family": "",
+                "accepted": False, "probability": None, "draw": None, "temperature": None}
+
+    def _add_node(self, n: int, record: dict, improved: bool, scored: dict | None,
+                  metered: dict | None) -> None:
+        """Appends iteration n's Node and moves its chain. A job-wide improvement always becomes
+        the chain's best, so with one chain the chain's best stays the job's best."""
+        chain = self._chain(n)
+        node = Node(id=n, chain=chain.index, parent=record["against"],
+                    family=record.get("design_family", ""), title=record.get("title", ""),
+                    outcome=record["outcome"],
+                    score=scored["mean_rel_delta"] if scored else None,
+                    tracks=({t["track"]: t["rel_delta"] for t in scored["tracks"]}
+                            if scored else None),
+                    metered_score=metered["mean_rel_delta"] if metered else None,
+                    accepted=record["accepted"], probability=record["probability"],
+                    draw=record["draw"], temperature=record["temperature"],
+                    best=self.state.best is not None and self.state.best.iteration == n)
+        self.state.nodes.append(node)
+        if node.accepted:
+            chain.current = n
+            rank = node.rank_score()
+            if improved or (rank is not None
+                            and (chain.best_score is None or rank > chain.best_score)):
+                chain.best, chain.best_score, chain.stall = n, rank, 0
+                return
+        chain.stall += 1
 
     def _failed(self) -> list[dict]:
         """Every failure of the job, whichever best it was tried against (issue #33)."""
@@ -354,14 +440,19 @@ class Loop:
         return min(STRATEGY_TAGS, key=lambda tag: counts.get(tag, 0))
 
     def _context(self) -> PromptContext:
+        chain = self._chain(self._n)
+        parent = self._parent_id(chain)
         recall = self.state.runs_since_improvement >= self.t.recall
-        failed = self._failed() if recall else []
+        # Each chain recalls only its own failures; a record from before chains is chain 0's.
+        failed = ([h for h in self._failed() if h.get("chain", 0) == chain.index]
+                  if recall else [])
         return PromptContext(challenge=self.spec.challenge, template_rs=self.template_rs,
                              direction=self.spec.direction, tacit=self.state.tacit,
-                             files=self._current_files(),
+                             files=self._node_files(parent),
                              baseline_name=self.state.baseline.name,
                              best_delta=self._best_delta(), failed_hypotheses=failed,
-                             anchor=self._anchor(),
+                             anchor=parent, parent_gap=self._parent_gap(parent),
+                             best_gap=self._best_gap(),
                              forced_tag=self._forced_tag(),
                              is_gpu=CHALLENGES[self.spec.challenge].is_gpu,
                              track=self.spec.track,
@@ -411,9 +502,8 @@ class Loop:
         self._n = n
         it_dir = self.store.iteration_dir(n)
         ctx = self._context()
-        anchor = self._anchor()
-        record = {"iteration": n, "against": anchor, "title": "", "description": "",
-                  "strategy_tag": "", "outcome": "started"}
+        record = {"iteration": n, **self._lineage_fields(self._chain(n)), "title": "",
+                  "description": "", "strategy_tag": "", "outcome": "started"}
         try:
             hypothesis, files = self.propose_and_edit(ctx)
         # A CLI timeout fails this iteration only, as the agentic path's AgenticError does; every
@@ -497,7 +587,7 @@ class Loop:
                     runtime_ratio=record.get("runtime_ratio"))
         if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a failure
             record.update(outcome="failed:runtime", error_rate=delta.error_rate)
-            self._finish_iteration(n, record, improved=False)
+            self._finish_iteration(n, record, improved=False, scored=cand.delta)
             return
         # spec §7.7: a candidate that beats the baseline on training becomes the best, whether or
         # not the held-out set goes on to confirm it. Confirming a candidate that is not best would
@@ -507,15 +597,21 @@ class Loop:
         if improved and self._scoring() == "native":
             self._validate_and_finish(n, record, cand, base_tr)
             return
+        chain = self._chain(n)
         if improved:
             self.state.best = cand
             self._write_files(self.store.run_dir / "best", cand.files)
-            record["outcome"] = "improved"
+            record.update(outcome="improved", accepted=True)
+        elif chain.best_score is None or delta.mean_rel_delta > chain.best_score:
+            # Greedy, per chain: not a job-wide improvement, but better than this chain's best.
+            # With one chain and a mainnet start the chain's best is the job's, so this is only
+            # reached with more than one chain (or a template start).
+            record.update(outcome="accepted", accepted=True)
         else:
             record["outcome"] = "failed:score"
         # The record and the iteration bump are persisted BEFORE the confirmation is read out of
         # the result, so a kill between the two never loses the iteration.
-        self._finish_iteration(n, record, improved=improved)
+        self._finish_iteration(n, record, improved=improved, scored=cand.delta)
         if wins:
             self._confirm(cand, res.holdout, res.holdout_reason)
 
@@ -549,17 +645,18 @@ class Loop:
             self._note_demotion(reason, res.training, cand.training)
             record.update(outcome="failed:validation", error=reason)
             self._event("demoted", reason=reason)
-            self._finish_iteration(n, record, improved=False)
+            self._finish_iteration(n, record, improved=False, scored=cand.delta)
             return
         best = Candidate(iteration=n, files=cand.files, artifact_id=res.compile.artifact_id,
                          training=res.training, delta=d.to_dict(), hypothesis=cand.hypothesis)
         self.state.best = best
         self._write_files(self.store.run_dir / "best", best.files)
-        record.update(outcome="improved", mean_rel_delta=d.mean_rel_delta,
+        record.update(outcome="improved", accepted=True, mean_rel_delta=d.mean_rel_delta,
                       worst_rel_delta=d.worst_rel_delta,
                       runtime_ratio=runtime_ratio(base_tr, res.training))
         self._event("validated", mean_rel_delta=d.mean_rel_delta)
-        self._finish_iteration(n, record, improved=True)
+        # The node keeps the native score it was produced with beside the metered one.
+        self._finish_iteration(n, record, improved=True, scored=cand.delta, metered=best.delta)
         if beats(base_tr, res.training, self.rule):
             self._confirm(best, res.holdout, res.holdout_reason)
 
@@ -634,12 +731,20 @@ class Loop:
         held-out run, so it is the last one — but check rather than assume."""
         if self.state.hypotheses and self.state.hypotheses[-1].get("iteration") == iteration:
             self.state.hypotheses[-1]["outcome"] = "won"
+        if self.state.nodes and self.state.nodes[-1].id == iteration:
+            self.state.nodes[-1].outcome = "won"
 
-    def _finish_iteration(self, n: int, record: dict, improved: bool) -> None:
+    def _finish_iteration(self, n: int, record: dict, improved: bool,
+                          scored: dict | None = None, metered: dict | None = None) -> None:
+        """`scored` is the delta the candidate was scored with (native in a native job) and
+        `metered` its validated metered delta; both None for an iteration with no score."""
         self.state.iteration = n
         self.state.spend.iterations += 1
         self.state.hypotheses.append(record)
         self._n = n
+        # Before the save below, so an event handler's stop or an interrupted distill never
+        # loses a chain's move.
+        self._add_node(n, record, improved, scored, metered)
         if improved:
             self.state.runs_since_improvement = 0
         else:
@@ -689,13 +794,21 @@ class Loop:
             shutil.rmtree(d)
             self._event("discarded_incomplete", discarded=n)
 
+    def _discard_stale_lineage(self) -> None:
+        """A node is saved together with the iteration count it belongs to, so a node past
+        state.iteration comes from a state rolled back by hand. Such nodes are dropped, and the
+        chains are rebuilt by _chain from state.best, since they may point at a dropped node."""
+        kept = [node for node in self.state.nodes if node.id <= self.state.iteration]
+        if len(kept) != len(self.state.nodes):
+            self.state.nodes, self.state.chains = kept, []
+
     def _resume_pending(self, pending: dict) -> None:
         n = pending["purpose"]
         self._n = n
         self._event("resumed_pending", job_id=pending.get("job_id"))
-        anchor = self._anchor()
         hypothesis = pending["hypothesis"]
-        record = {"iteration": n, "against": anchor, **hypothesis, "outcome": "started"}
+        record = {"iteration": n, **self._lineage_fields(self._chain(n)), **hypothesis,
+                  "outcome": "started"}
         if pending.get("native_training"):
             files = pending["files"]
             native = [NonceResult.from_dict(r) for r in pending["native_training"]]
@@ -711,6 +824,7 @@ class Loop:
         if self.state.status in TERMINAL:
             return self.state  # before the discard: a finished job keeps its winning directory
         self._discard_incomplete_iteration()
+        self._discard_stale_lineage()
         try:
             self.state.status = "researching"
             self._save()

@@ -22,14 +22,17 @@ HO2 = [NonceSet("t", HASH, 1_000_000, 4), NonceSet("u", HASH, 1_000_000, 4)]
 BASE_FILES = {"mod.rs": "fn solve() { let k = 1; }\n"}
 
 
-def spec(budget=None, track=None, two_tracks=False, scoring="metered", fuel=1):
+def spec(budget=None, track=None, two_tracks=False, scoring="metered", fuel=1, **spec_kw):
+    """Any other JobSpec field (start, search, chains, anneal, hyperparameters) is passed
+    through as given."""
     tracks = ["t", "u"] if two_tracks else ["t"]
     return JobSpec(job_id="j", challenge="knapsack", direction="go", provider="fake", model="m",
                    mode="single-shot",
                    budget=budget or Budget(usd=None, hours=None, iterations=20, compute_usd=None),
                    rand_hash=HASH, tracks=tracks, training=TR2 if two_tracks else TR,
                    holdout=HO2 if two_tracks else HO, fuel=fuel, created_at=0.0,
-                   monorepo_ref="r", challenge_id="c003", track=track, scoring=scoring)
+                   monorepo_ref="r", challenge_id="c003", track=track, scoring=scoring,
+                   **spec_kw)
 
 
 def baseline(q=100, holdout_n=4, tracks=("t",)):
@@ -57,9 +60,11 @@ def quality_from_files(challenge, files, ns):
 
 
 def make(tmp_path, script, scores=quality_from_files, budget=None, thresholds=None, holdout_n=4,
-         track=None, two_tracks=False, scoring="metered", fuel=1, budgets=None, bench=None):
+         track=None, two_tracks=False, scoring="metered", fuel=1, budgets=None, bench=None,
+         spec_kw=None):
     store = JobStore(tmp_path)
-    sp = spec(budget, track=track, two_tracks=two_tracks, scoring=scoring, fuel=fuel)
+    sp = spec(budget, track=track, two_tracks=two_tracks, scoring=scoring, fuel=fuel,
+              **(spec_kw or {}))
     store.write_spec(sp)
     st = JobState.fresh(Spend(started_at=0.0))
     st.baseline = baseline(holdout_n=holdout_n, tracks=("t", "u") if two_tracks else ("t",))
@@ -1215,3 +1220,124 @@ def test_provider_timeout_in_a_compile_fix_is_a_compile_failure(tmp_path):
     assert st.status == "won" and st.best.iteration == 2
     assert st.hypotheses[0]["outcome"] == "failed:compile"
     assert len(fb.calls) == 2  # the broken edit once, no re-evaluation, then the winning edit
+
+
+# ── lineage tree and chains ───────────────────────────────────────────
+
+
+def heldout_flat(challenge, files, ns):
+    """quality_from_files on training; the baseline's 100 on held-out, so no candidate is ever
+    confirmed and the job keeps researching."""
+    if ns.start >= 1_000_000:
+        return [100 for _ in ns.nonces()]
+    return quality_from_files(challenge, files, ns)
+
+
+def test_default_job_is_unchanged_and_records_a_tree(tmp_path):
+    # mutation: not appending a Node, or building it with the wrong parent, chain or flags
+    loop, fp, fb, store = make(tmp_path, [hyp("bump k"), edit(5)])
+    st = loop.run()
+    assert st.status == "won" and st.best.iteration == 1 and st.confirmed == [1]
+    node = st.nodes[0]
+    assert (node.id, node.parent, node.chain) == (1, 0, 0)
+    assert node.accepted is True and node.best is True
+    # mutation: leaving the node's outcome at "improved" when _mark_won rewrites the record
+    assert node.outcome == "won" == st.hypotheses[0]["outcome"]
+    assert node.score == pytest.approx(0.04) and node.tracks == {"t": pytest.approx(0.04)}
+    assert st.chains[0].best == 1 and st.chains[0].best_score == pytest.approx(0.04)
+    rec = st.hypotheses[0]
+    assert (rec["chain"], rec["against"], rec["accepted"]) == (0, 0, True)
+    assert rec["design_family"] == "unlabelled"  # hyp() gives none; parse_hypothesis fills it
+
+
+def test_two_greedy_chains_take_turns_and_keep_their_own_parent(tmp_path):
+    # mutation: building chain 1's iteration 2 on the job best (k=5) makes its SEARCH text
+    # `let k = 1;` miss, and that iteration fails as failed:edit
+    # mutation: leaving parent_gap unset drops the parent line from iteration 3's prompt
+    b = Budget(usd=None, hours=None, iterations=4, compute_usd=None)
+    script = [hyp("a"), edit(5),            # 1, chain 0: from the root to k=5
+              hyp("b"), edit(3),            # 2, chain 1: from the root to k=3
+              hyp("c"), edit(6, frm=5),     # 3, chain 0: from node 1
+              hyp("d"), edit(4, frm=3)]     # 4, chain 1: from node 2
+    loop, fp, fb, store = make(tmp_path, script, scores=heldout_flat, budget=b,
+                               spec_kw={"chains": 2})
+    st = loop.run()
+    assert st.status == "exhausted"
+    assert [h["outcome"] for h in st.hypotheses] == ["improved"] * 4
+    assert [n.chain for n in st.nodes] == [0, 1, 0, 1]
+    assert [n.parent for n in st.nodes] == [0, 0, 1, 2]
+    assert [n.id for n in st.nodes] == [1, 2, 3, 4]
+    assert [h["against"] for h in st.hypotheses] == [0, 0, 1, 2]
+    assert [(c.index, c.best) for c in st.chains] == [(0, 3), (1, 4)]
+    system, user = fp.calls[4]  # iteration 3's hypothesis call
+    assert "Parent (node #1): +4.000%" in system + user
+
+
+def test_recall_is_per_chain(tmp_path):
+    # mutation: an unfiltered _failed() shows chain 0's failure to chain 1
+    # The positive control ("fail-c1" present) catches recall never being shown, which would
+    # make the absence check pass on its own.
+    b = Budget(usd=None, hours=None, iterations=4, compute_usd=None)
+    script = [hyp("fail-c0"), edit(1),      # 1, chain 0: no change, failed:score
+              hyp("fail-c1"), edit(1),      # 2, chain 1: no change, failed:score
+              hyp("third"), edit(1),        # 3, chain 0
+              hyp("fourth"), edit(1)]       # 4, chain 1
+    loop, fp, fb, store = make(tmp_path, script, budget=b, spec_kw={"chains": 2},
+                               thresholds=Thresholds(recall=2, distill=99))
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["failed:score"] * 4
+    assert [h["chain"] for h in st.hypotheses] == [0, 1, 0, 1]
+    system, user = fp.calls[6]  # iteration 4's hypothesis call
+    assert "fail-c1" in user
+    assert "fail-c0" not in system + user
+    # a failed iteration is never accepted and raises its chain's stall
+    assert [n.accepted for n in st.nodes] == [False] * 4
+    assert [(c.best, c.stall) for c in st.chains] == [(0, 2), (0, 2)]
+
+
+def test_job_from_before_lineage_resumes_on_its_best(tmp_path):
+    # Review Focus 3: a job saved before the lineage tree has a best but no nodes or chains.
+    # mutation: seeding chain 0 at ROOT makes the SEARCH text `let k = 5;` miss against the
+    # baseline's `let k = 1;`
+    # mutation: reading the best's files only from disk raises FileNotFoundError (there is no
+    # iterations/0001/ here)
+    from talos.scoring import bundle_delta
+    from talos.state import Candidate
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("next"), edit(6, frm=5)], budget=b)
+    st = loop.state
+    rows = [NonceResult("t", n, True, 104, 1) for n in range(4)]
+    st.iteration = 1
+    st.best = Candidate(iteration=1, files={"mod.rs": "fn solve() { let k = 5; }\n"},
+                        artifact_id="old", training=rows,
+                        delta=bundle_delta(st.baseline.training, rows).to_dict(),
+                        hypothesis={"title": "old", "description": "d",
+                                    "strategy_tag": "local_search"})
+    st.hypotheses = [{"iteration": 1, "against": 0, "title": "old", "outcome": "improved"}]
+    assert st.nodes == [] and st.chains == []
+    assert not (tmp_path / "iterations" / "0001").exists()
+    st = loop.run()
+    assert st.hypotheses[-1]["outcome"] != "failed:edit"
+    assert st.nodes[0].parent == 1 and st.nodes[0].id == 2
+    assert st.chains[0].best == 2 and st.best.iteration == 2
+
+
+def test_parent_files_come_from_disk_after_a_restart(tmp_path):
+    # Chain 0's best (node 1) is not the job best (node 2, on chain 1), so after a restart its
+    # files can only come from iterations/0001/.
+    # mutation: keeping parent files only in memory loses them across the restart
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
+    script = [hyp("a"), edit(5),            # 1, chain 0: k=5
+              hyp("b"), edit(7),            # 2, chain 1: k=7, the job best
+              hyp("c"), edit(0, frm=5)]     # 3, chain 0: k=0 is worse, failed:score
+    loop, fp, fb, store = make(tmp_path, script, scores=heldout_flat, budget=b,
+                               spec_kw={"chains": 2})
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["improved", "improved", "failed:score"]
+    assert st.best.iteration == 2 and st.chains[0].best == 1
+    again = Loop(store.read_spec(), store.load(), store, FakeProvider([]),
+                 FakeBench(quality_from_files), template_rs="x",
+                 clock=lambda: 0.0, sleep=lambda s: None)
+    on_disk = (tmp_path / "iterations" / "0001" / "mod.rs").read_text(encoding="utf-8")
+    assert "let k = 5;" in on_disk
+    assert again._current_files() == {"mod.rs": on_disk}
