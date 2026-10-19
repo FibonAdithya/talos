@@ -18,7 +18,8 @@ from talos.challenges import CHALLENGES
 from talos.edits import EditError, EditOutcome, apply_edit_response
 from talos.diagnostics import dead_new_functions, defined_functions, first_error
 from talos.inside import NONCE_TIMEOUT_S
-from talos.lineage import ROOT, Chain, Node, chain_for
+from talos.lineage import (ROOT, AnnealSettings, Chain, Node, chain_for, decide, draw,
+                           spent_fraction, temperature)
 from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
                            dead_code_fix_prompts, distill_prompts, edit_prompts,
                            edit_repair_prompts, hypothesis_prompts,
@@ -399,6 +400,35 @@ class Loop:
     def _best_gap(self) -> dict | None:
         return self._candidate_gap(self.state.best) if self.state.best else None
 
+    def _node_score(self, node_id: int) -> float | None:
+        """The score a node was produced with (native in a native job), which the accept rule
+        compares against. A best kept from before the lineage tree has no Node."""
+        if node_id == ROOT:
+            return self._root_score()
+        node = self._node(node_id)
+        if node is not None:
+            return node.score
+        best = self.state.best
+        return self._best_delta() if best is not None and best.iteration == node_id else None
+
+    def _anneal_settings(self) -> AnnealSettings:
+        return (AnnealSettings.from_dict(self.spec.anneal) if self.spec.anneal
+                else AnnealSettings())
+
+    def _spent(self) -> float:
+        return spent_fraction(self.spec.budget, self.state.spend, self.clock())
+
+    def _anneal_step(self, n: int, record: dict, score: float) -> None:
+        """Accepts or rejects a scored candidate that is not a job-wide improvement: always when
+        it is no worse than its parent, otherwise with probability exp(-drop / T). The draw is
+        keyed on the job, the chain and the iteration, so a resumed job decides the same way."""
+        chain = self._chain(n)
+        t = temperature(self._anneal_settings(), self._spent(), chain.reheated_at)
+        u = draw(self.spec.job_id, chain.index, n)
+        accepted, p = decide(self._node_score(record["against"]), score, t, u)
+        record.update(outcome="accepted" if accepted else "failed:score", accepted=accepted,
+                      probability=p, draw=u, temperature=t)
+
     def _chain_scores_apart(self) -> bool:
         """Whether a chain's best can differ from the job's. With one chain on a mainnet start
         the chain's best moves only with state.best, as before chains existed."""
@@ -430,7 +460,7 @@ class Loop:
         if node.accepted:
             chain.current = n
             score = node.score
-            if improved or (score is not None
+            if improved or (self._chain_scores_apart() and score is not None
                             and (chain.best_score is None or score > chain.best_score)):
                 chain.best, chain.best_score, chain.stall = n, score, 0
                 return
@@ -441,7 +471,8 @@ class Loop:
         return [h for h in self.state.hypotheses if h.get("outcome", "").startswith("failed")]
 
     def _forced_tag(self) -> str | None:
-        if self.state.runs_since_improvement < self.t.reset:
+        """Annealing never forces a strategy tag: reheating takes the place of the rotation."""
+        if self.spec.search == "anneal" or self.state.runs_since_improvement < self.t.reset:
             return None
         counts = self.state.strategy_counts
         return min(STRATEGY_TAGS, key=lambda tag: counts.get(tag, 0))
@@ -609,6 +640,8 @@ class Loop:
             self.state.best = cand
             self._write_files(self.store.run_dir / "best", cand.files)
             record.update(outcome="improved", accepted=True)
+        elif self.spec.search == "anneal":
+            self._anneal_step(n, record, delta.mean_rel_delta)
         elif self._chain_scores_apart() and (chain.best_score is None
                                               or delta.mean_rel_delta > chain.best_score):
             # Greedy, per chain: not a job-wide improvement, but better than this chain's best.
@@ -751,6 +784,7 @@ class Loop:
         # Before the save below, so an event handler's stop or an interrupted distill never
         # loses a chain's move.
         self._add_node(n, record, improved, scored, metered)
+        reheated = self._reheat(n)
         if improved:
             self.state.runs_since_improvement = 0
         else:
@@ -762,12 +796,36 @@ class Loop:
                 self.state.strategy_counts.get(record["strategy_tag"], 0) + 1)
         self.state.pending_job = None
         self._save()
+        node = self.state.nodes[-1]
+        if self.spec.search == "anneal" and (node.accepted or node.temperature is not None):
+            self._event("accept", chain=node.chain, node=node.id, parent=node.parent,
+                        family=node.family, score=node.score, accepted=node.accepted,
+                        probability=node.probability, temperature=node.temperature)
+        if reheated is not None:
+            self._event("reheat", **reheated)
         self._event("iteration_done", outcome=record["outcome"],
                     runs_since_improvement=self.state.runs_since_improvement)
         if not improved and self.state.runs_since_improvement == self.t.distill:
             self._distill()
-        if not improved and self.state.runs_since_improvement >= self.t.reset:
+        if (self.spec.search != "anneal" and not improved
+                and self.state.runs_since_improvement >= self.t.reset):
             self._event("reset", forced_tag=self._forced_tag())
+
+    def _reheat(self, n: int) -> dict | None:
+        """Anneal only. After `stall` iterations with no new chain best, the chain goes back to
+        its best and cooling restarts over the budget left. Runs after the iteration is counted,
+        so the spent fraction includes it. Returns the reheat event's fields, or None."""
+        if self.spec.search != "anneal":
+            return None
+        settings = self._anneal_settings()
+        chain = self._chain(n)
+        if chain.stall < settings.stall:
+            return None
+        chain.current = chain.best
+        chain.reheated_at = self._spent()
+        chain.stall = 0
+        return {"chain": chain.index, "node": chain.current,
+                "temperature": temperature(settings, chain.reheated_at, chain.reheated_at)}
 
     def _distill(self) -> None:
         failed = self._failed()

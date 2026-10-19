@@ -1,4 +1,5 @@
 import json
+import math
 import types
 from dataclasses import replace
 
@@ -1414,3 +1415,228 @@ def test_one_chain_on_a_mainnet_start_moves_only_with_the_job_best(tmp_path):
     assert st.chains[0].best_score == pytest.approx(0.06)
     assert st.hypotheses[1]["outcome"] == "failed:score"
     assert st.nodes[1].accepted is False and st.chains[0].best == 1
+
+
+# ── simulated annealing ──────────────────────────────────────────────
+
+
+def annealing(tmp_path, script, settings=None, stop_after=None, on_done=None, **kw):
+    """An anneal job on heldout_flat (no win is ever confirmed, so the job keeps iterating). It
+    stops itself after `stop_after` iterations, so the default 20-iteration budget sets the
+    temperature schedule. `on_done(store)` runs on every iteration_done event."""
+    from talos.lineage import AnnealSettings
+    kw.setdefault("scores", heldout_flat)
+    spec_kw = {"search": "anneal", "anneal": (settings or AnnealSettings()).to_dict(),
+               **kw.pop("spec_kw", {})}
+    loop, fp, fb, store = make(tmp_path, script, spec_kw=spec_kw, **kw)
+    done = []
+
+    def on_event(kind, data):
+        if kind != "iteration_done":
+            return
+        done.append(data)
+        if on_done is not None:
+            on_done(store)
+        if stop_after is not None and len(done) == stop_after:
+            loop.request_stop()
+    loop.on_event = on_event
+    return loop, fp, fb, store
+
+
+def events(store, kind):
+    lines = (store.run_dir / "timeline.jsonl").read_text().splitlines()
+    return [e for e in map(json.loads, lines) if e["kind"] == kind]
+
+
+# Iteration 1 moves k=1 to k=6 (+5%, the job best). Iteration 2 moves k=6 back to k=1: 0.0
+# against the baseline, so not a win, and 0.05 below its parent.
+WORSE_AFTER_BEST = [hyp("up"), edit(6), hyp("back"), edit(1, frm=6)]
+
+
+def test_anneal_accepts_a_worse_candidate_when_the_draw_is_under_p(tmp_path, monkeypatch):
+    # mutation: making an accepted-worse node the job best
+    # mutation: computing T from the post-increment iteration count (2/20, T = 0.0455)
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    loop, fp, fb, store = annealing(tmp_path, WORSE_AFTER_BEST, stop_after=2)
+    st = loop.run()
+    assert st.status == "cancelled"
+    node = st.nodes[1]
+    assert node.accepted and node.outcome == "accepted" and node.parent == 1
+    assert st.chains[0].current == 2
+    # spend.iterations == 1 at the decision: T = 0.05 * (1 - 0.9 * 1/20)
+    assert node.temperature == pytest.approx(0.04775)
+    assert node.probability == pytest.approx(math.exp(-0.05 / node.temperature))
+    assert node.draw == 0.0
+    assert st.best.iteration == 1
+    accept = [e for e in events(store, "accept") if e["node"] == 2]
+    assert len(accept) == 1 and accept[0]["accepted"] is True and accept[0]["parent"] == 1
+    assert accept[0]["probability"] == pytest.approx(node.probability)
+
+
+def test_anneal_rejects_when_the_draw_is_over_p(tmp_path, monkeypatch):
+    # mutation: accepting every worse candidate
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.999999)
+    loop, fp, fb, store = annealing(tmp_path, WORSE_AFTER_BEST, stop_after=2)
+    st = loop.run()
+    assert not st.nodes[1].accepted and st.nodes[1].outcome == "failed:score"
+    assert st.nodes[1].probability is not None
+    assert st.chains[0].current == 1
+
+
+def test_accepted_worse_candidate_is_never_confirmed(tmp_path, monkeypatch):
+    # mutation: confirming any accepted node. Only iteration 1, which beat the baseline, was.
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    loop, fp, fb, store = annealing(tmp_path, WORSE_AFTER_BEST, stop_after=2)
+    st = loop.run()
+    assert st.nodes[1].accepted
+    assert fb.holdout_runs == 1 and st.false_positives == [1]
+
+
+def test_anneal_builds_on_the_current_state_not_the_best(tmp_path, monkeypatch):
+    # mutation: parent = chain.best (k=6) makes iteration 3's SEARCH text `let k = 1;` miss
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    script = WORSE_AFTER_BEST + [hyp("lower"), edit(0, frm=1)]  # 3: k=0, -1%, not a win
+    loop, fp, fb, store = annealing(tmp_path, script, stop_after=3)
+    st = loop.run()
+    assert st.nodes[2].parent == 2
+    assert st.hypotheses[2]["outcome"] != "failed:edit"
+    assert st.nodes[2].score == pytest.approx(-0.01)
+
+
+# Iteration 1 is the job best; iterations 2 and 3 are accepted-worse (draw 0.0), each lower
+# than the last, so with stall=2 chain 0 reheats after iteration 3.
+STALLING = WORSE_AFTER_BEST + [hyp("lower"), edit(0, frm=1)]
+
+
+def test_stall_reheats_back_to_the_chain_best(tmp_path, monkeypatch):
+    # mutation: `>` instead of `>=` against stall leaves chain 0 on node 3
+    # mutation: reheating without resetting the stall count leaves it at 2
+    from talos.lineage import AnnealSettings
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    loop, fp, fb, store = annealing(tmp_path, STALLING, settings=AnnealSettings(stall=2),
+                                    stop_after=3)
+    st = loop.run()
+    assert [n.outcome for n in st.nodes] == ["improved", "accepted", "accepted"]
+    reheats = events(store, "reheat")
+    assert len(reheats) == 1 and reheats[0]["iteration"] == 3
+    assert reheats[0]["node"] == 1 and reheats[0]["temperature"] == pytest.approx(0.05)
+    chain = st.chains[0]
+    assert chain.current == 1 and chain.stall == 0
+    assert chain.reheated_at == pytest.approx(3 / 20)  # iterations budget 20
+
+
+def test_anneal_never_forces_a_strategy_tag(tmp_path):
+    # mutation: _forced_tag() still rotating tags under anneal puts "MUST be" in a prompt and
+    # emits reset events
+    script = []
+    for i in range(6):
+        script += [hyp(f"h{i}"), "no edit blocks here"]
+    loop, fp, fb, store = annealing(tmp_path, script, stop_after=6,
+                                    thresholds=Thresholds(reset=5, distill=99))
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["failed:edit"] * 6
+    assert st.runs_since_improvement == 6  # past the reset threshold, so a greedy job would force
+    assert events(store, "reset") == []
+    assert not any("MUST be" in system + user for system, user in fp.calls)
+
+
+def test_native_demoted_candidate_is_not_a_chain_state(tmp_path):
+    # mutation: running the anneal accept rule on a demoted candidate; decide(0.0, +0.04)
+    # would accept it
+    def metered(ch, files, ns):
+        return ["out_of_fuel"] + quality_from_files(ch, files, ns)[1:]
+    fb = FakeBench(heldout_flat, metered_scores=metered)
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, _, store = annealing(tmp_path, [hyp("a"), edit(5)], bench=fb, budget=b,
+                                   scoring="native")
+    st = loop.run()
+    assert st.validations[0]["reason"] == "fuel_proxy_miss"
+    node = st.nodes[0]
+    assert node.accepted is False and node.outcome == "failed:validation"
+    assert st.chains[0].current == 0 and st.chains[0].best == 0
+
+
+# Five iterations decided by the real draw (job "j", chain 0), with stall=2:
+#   1: k=6, +5%, the job best
+#   2: k=6 -> 1, drop 0.05, T=0.041, p=0.295, u=0.317: rejected
+#   3: k=6 -> 0, drop 0.06, T=0.032, p=0.153, u=0.122: accepted; stall 2, reheat to node 1
+#   4: k=6 -> 1, drop 0.05, T=0.05 (just reheated), p=0.368, u=0.303: accepted
+#   5: k=1 -> 0, drop 0.01, T=0.0275, p=0.695, u=0.818: rejected; stall 2, reheat
+# (ESTIMATE, arithmetic; the test compares two runs rather than these numbers.)
+RESUME_SCRIPT = [hyp("1"), edit(6), hyp("2"), edit(1, frm=6), hyp("3"), edit(0, frm=6),
+                 hyp("4"), edit(1, frm=6), hyp("5"), edit(0, frm=1)]
+
+
+def test_resumed_anneal_makes_the_same_decisions(tmp_path):
+    # Review Focus 1: a job stopped after iteration 3 and resumed decides as one that never
+    # stopped.
+    # mutation: an unseeded draw
+    # mutation: a draw keyed on anything but (job_id, chain, iteration), for example
+    # state.iteration read after the increment
+    from talos.lineage import AnnealSettings, draw
+    settings = AnnealSettings(stall=2)
+    b = Budget(usd=None, hours=None, iterations=5, compute_usd=None)
+    th = Thresholds(distill=99)  # two provider calls per iteration, no distill call
+    loop, *_ = annealing(tmp_path / "straight", RESUME_SCRIPT, settings=settings, budget=b,
+                         thresholds=th)
+    st = loop.run()
+    assert st.status == "exhausted"
+    straight = [(n.accepted, n.draw, n.parent) for n in st.nodes]
+    decided = [n for n in st.nodes if n.probability is not None]
+    assert decided, "no node was decided by a draw; the comparison would test nothing"
+    assert [n.draw for n in decided] == [draw("j", 0, n.id) for n in decided]
+    assert {n.accepted for n in decided} == {True, False}
+    assert [n.outcome for n in st.nodes] == [
+        "improved", "failed:score", "accepted", "accepted", "failed:score"]
+
+    loop, _, _, store = annealing(tmp_path / "resumed", RESUME_SCRIPT, settings=settings,
+                                  budget=b, thresholds=th, stop_after=3)
+    assert loop.run().status == "cancelled"
+    again = Loop(store.read_spec(), store.load(), store, FakeProvider(RESUME_SCRIPT[6:]),
+                 FakeBench(heldout_flat), template_rs="x", clock=lambda: 0.0,
+                 sleep=lambda s: None, thresholds=th)
+    again.state.status = "researching"  # as execute_job does on resume
+    resumed = again.run()
+    assert resumed.status == "exhausted"
+    assert [(n.accepted, n.draw, n.parent) for n in resumed.nodes] == straight
+    assert resumed.chains == st.chains
+
+
+def test_tree_and_reheat_are_saved_before_iteration_done(tmp_path, monkeypatch):
+    # mutation: appending the node or applying the reheat after _finish_iteration's save, which
+    # a hard kill at that point would lose
+    from talos.lineage import AnnealSettings
+    monkeypatch.setattr("talos.loop.draw", lambda job_id, chain, iteration: 0.0)
+    seen = []
+
+    def on_done(store):
+        saved = store.load()
+        seen.append((len(saved.nodes), saved.chains[0].current, saved.chains[0].stall))
+    loop, *_ = annealing(tmp_path, STALLING, settings=AnnealSettings(stall=2), stop_after=3,
+                         on_done=on_done)
+    loop.run()
+    assert seen == [(1, 1, 0), (2, 2, 1), (3, 1, 0)]
+
+
+def test_one_anneal_chain_on_a_mainnet_start_keeps_the_job_best_as_its_best(tmp_path):
+    # As test_one_chain_on_a_mainnet_start_moves_only_with_the_job_best, under anneal: node 1
+    # is +6% natively (the job best, +8% metered); iteration 2 is +7% natively, no worse than
+    # its parent, so annealing accepts it, but it is not a job-wide improvement.
+    # mutation: dropping the _chain_scores_apart() gate makes node 2 chain 0's best, so a
+    # reheat would return to code that is not the job's best
+    from talos.challenges import CHALLENGES
+
+    def native_scores(ch, files, ns):
+        q = heldout_flat(ch, files, ns)
+        return [None] + q[1:] if "let k = 9;" in files["mod.rs"] else q
+    fb = FakeBench(native_scores, metered_scores=heldout_flat)
+    b = Budget(usd=None, hours=None, iterations=2, compute_usd=None)
+    loop, fp, _, store = annealing(tmp_path, [hyp("a"), edit(9), hyp("b"), edit(8, frm=9)],
+                                   bench=fb, budget=b, scoring="native")
+    loop.rule = replace(CHALLENGES["knapsack"].beat, margin=0.5, error_ceiling=0.5)
+    st = loop.run()
+    assert st.best.iteration == 1
+    assert [n.outcome for n in st.nodes] == ["improved", "accepted"]
+    assert st.nodes[1].probability is None  # accepted outright, no draw needed
+    assert st.chains[0].current == 2
+    assert st.chains[0].best == 1 and st.chains[0].best_score == pytest.approx(0.06)
