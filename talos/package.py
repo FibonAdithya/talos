@@ -42,7 +42,8 @@ def _diff(base: dict[str, str], cand: dict[str, str], label: str = "baseline") -
     for name in sorted(set(base) | set(cand)):
         a = base.get(name, "").splitlines(keepends=True)
         b = cand.get(name, "").splitlines(keepends=True)
-        out.extend(difflib.unified_diff(a, b, fromfile=f"{label}/{name}", tofile=f"candidate/{name}"))
+        out.extend(difflib.unified_diff(a, b, fromfile=f"{label}/{name}",
+                                        tofile=f"candidate/{name}"))
     return "".join(out)
 
 
@@ -175,7 +176,7 @@ def _hyperparameters_section(spec: JobSpec) -> str:
             "also in hyperparameters.json).\n\n" + "\n".join(lines) + "\n")
 
 
-def _readme(spec: JobSpec, state: JobState) -> str:
+def _readme(spec: JobSpec, state: JobState, template_missing: bool = False) -> str:
     confirmed = state.best.iteration in state.confirmed
     false_positive = state.best.iteration in state.false_positives
     head = ("# Talos hand-back\n\n"
@@ -200,6 +201,8 @@ def _readme(spec: JobSpec, state: JobState) -> str:
     if spec.start == "template":
         head += ("Written from TIG's empty template; the baseline's code was never shown to the "
                  "LLM.\n\n")
+        if template_missing:
+            head += "The template copy was not found, so no diff against it is included.\n\n"
     uai = ("" if spec.start == "template" else
            " If the baseline's own README on mainnet "
            f"(`tig-algorithms/src/{spec.challenge}/{state.baseline.name}/README.md`) lists a "
@@ -263,11 +266,14 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
     write_submission(spec, state.best.files, pkg / SUBMISSION_DIR)
+    template_missing = False
     if spec.start == "template":
-        template = (store.run_dir / "challenge" / "template.rs").read_text(encoding="utf-8")
-        (pkg / "diff_vs_template.patch").write_text(
-            _diff({"mod.rs": template}, state.best.files, "template"),
-            encoding="utf-8", newline="\n")
+        template_path = store.run_dir / "challenge" / "template.rs"
+        template_missing = not template_path.is_file()
+        if not template_missing:
+            (pkg / "diff_vs_template.patch").write_text(
+                _diff({"mod.rs": template_path.read_text(encoding="utf-8")}, state.best.files,
+                      "template"), encoding="utf-8", newline="\n")
     else:
         (pkg / "diff_vs_baseline.patch").write_text(
             _diff(state.baseline.files, state.best.files), encoding="utf-8", newline="\n")
@@ -278,7 +284,8 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
                                        encoding="utf-8", newline="\n")
     (pkg / "evidence_draft.md").write_text(evidence_draft(spec, state),
                                            encoding="utf-8", newline="\n")
-    (pkg / "README.md").write_text(_readme(spec, state), encoding="utf-8", newline="\n")
+    (pkg / "README.md").write_text(_readme(spec, state, template_missing),
+                                   encoding="utf-8", newline="\n")
     if spec.hyperparameters is not None and spec.start != "template":
         (pkg / "hyperparameters.json").write_text(json.dumps(spec.hyperparameters, indent=1),
                                                   encoding="utf-8", newline="\n")

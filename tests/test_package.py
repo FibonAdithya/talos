@@ -275,7 +275,7 @@ def test_template_package_diffs_against_the_template_and_drops_the_uai_line(tmp_
     assert "diff_vs_template.patch" in names
     assert "diff_vs_baseline.patch" not in names and "hyperparameters.json" not in names
     patch = (pkg / "diff_vs_template.patch").read_text(encoding="utf-8")
-    assert "template/mod.rs" in patch and "let k = 1" not in patch
+    assert "template/mod.rs" in patch and marker not in patch
     readme = (pkg / "README.md").read_text(encoding="utf-8")
     assert "Unique Algorithm Identifier" not in readme and "never shown to the LLM" in readme
     assert "candidate ran with none" in readme
@@ -292,3 +292,19 @@ def test_package_without_a_best_still_writes_lineage(tmp_path):
     st.chains = [Chain(index=0)]
     pkg = build_package(spec, st, store)
     assert len(json.loads((pkg / "lineage.json").read_text(encoding="utf-8"))["nodes"]) == 1
+
+
+def test_template_package_without_a_template_copy_still_hands_back(tmp_path):
+    # mutation: falling back to the baseline diff, or reading template.rs unguarded
+    spec, st, store = make(tmp_path)
+    marker = "BASELINE_MARKER"
+    st.baseline = replace(st.baseline, files={"mod.rs": f"fn a() {{}}\n// {marker}\n"})
+    spec = replace(spec, start="template")
+    pkg = build_package(spec, st, store)
+    names = {p.name for p in pkg.iterdir()}
+    assert "README.md" in names and (tmp_path / "package.zip").exists()
+    assert "diff_vs_baseline.patch" not in names and "diff_vs_template.patch" not in names
+    assert "no diff against it is included" in (pkg / "README.md").read_text(encoding="utf-8")
+    for p in pkg.rglob("*"):
+        if p.is_file():
+            assert marker not in p.read_text(errors="ignore")
