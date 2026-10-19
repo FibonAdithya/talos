@@ -17,7 +17,7 @@ flowchart TD
     setup["talos setup<br/>writes talos.config.json and .talos/secrets.json<br/>deploys the Modal app (Modal backend only)"]
     start["talos run<br/>fetch challenge tracks and max fuel from mainnet<br/>by default, pin the top-adoption algorithm and the per-track<br/>hyperparameters of its best mainnet benchmark"]
     spec["Draw training and held-out nonces from a secret rand_hash<br/>freeze them, the fuel, hyperparameters and budget into runs/JOB_ID/job.json"]
-    baseline["Measure the top-adoption algorithm on the same nonces<br/>and hyperparameters as every candidate<br/>cached in ~/.talos/baselines/"]
+    baseline["Measure the top-adoption algorithm on the same nonces<br/>and hyperparameters as every candidate<br/>(a --start template candidate runs without hyperparameters)<br/>cached in ~/.talos/baselines/"]
     budget{"Budget left?"}
     propose["LLM writes a hypothesis and an edit<br/>single-shot: one API call<br/>agentic: a sandboxed claude or codex session"]
     scope{"Edit touches only<br/>the algorithm files?"}
@@ -53,8 +53,12 @@ flowchart TD
     stop --> package
 ```
 
-Baseline and candidates are always scored on the same nonces, fuel, hyperparameters and
-hardware class, so the delta between them measures the edit and nothing else. The
+Baseline and candidates are always scored on the same nonces, fuel and hardware class, and
+on the same hyperparameters except in a `--start template` job, so the delta between them
+measures the edit and nothing else. In a template job the candidates run without
+hyperparameters while the baseline keeps the mainnet map (see
+[Template start](#template-start)), so the delta there also includes the effect of those
+values on the baseline. The
 `rand_hash` that seeds the nonces is never shown to the LLM, so it cannot tune to the exact
 nonces it is scored on.
 
