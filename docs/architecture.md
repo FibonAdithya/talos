@@ -141,6 +141,16 @@ candidate is built into the `talos-native` runner (`talos/native_runner.py::rend
 solve has run for a time budget (exit 87). The loop then scores research candidates natively
 and only an improving one is scored on the metered runtime.
 
+Some algorithms budget their own work by reading TIG's counter through
+`extern "C" { static __fuel_remaining: u64; }` (mainnet's energy_arbitrage `gridflow` and
+job_scheduling `ember_stromboli` at the pinned monorepo). The runner defines that symbol
+(`talos/native_runner.py::_FUEL`), or their native build would fail to link. It starts at the
+job's fuel (`--fuel`). With a budget it falls linearly with elapsed time to zero at the budget,
+so such an algorithm winds down inside the budget instead of being cut off by exit 87. With no
+budget, in calibration, it stays at the job's fuel. Fuel and time are not the same thing, so
+how far a run gets before the algorithm's own fuel check stops it can differ between native and
+metered; calibration only counts nonces where both runs reach the same quality.
+
 **Calibration.** A native run has no fuel limit, so a per-track time budget stands in for it.
 `talos/loop.py::Loop.calibrate` finds one after the baseline, on every start and resume. The
 record is keyed by challenge, hardware class, both pins, the baseline's code, the native

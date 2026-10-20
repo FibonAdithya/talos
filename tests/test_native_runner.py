@@ -1,4 +1,7 @@
 import ast
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -56,6 +59,127 @@ def test_both_variants_exit_87_at_the_budget_and_84_on_error(is_gpu):
     # mutation: writing the file in place lets the watchdog's exit leave half a JSON document
     assert "std::fs::rename(&tmp, path)" in main
     assert '"solve_us"' in main and "catch_unwind" in main
+
+
+@pytest.mark.parametrize("is_gpu", [False, True])
+def test_both_variants_take_the_fuel_cap_and_start_the_fuel_clock_with_it(is_gpu):
+    main = native_runner.render("knapsack", "talos_cand", is_gpu)["talos-native/src/main.rs"]
+    # talos/inside.py::run_nonce_native passes `--fuel F`; an unknown flag fails every nonce
+    assert '"--fuel" => fuel = Some(value.parse()?)' in main
+    # mutation: the watchdog started without the cap leaves __fuel_remaining at 0, and an
+    # algorithm that budgets by it degrades to its fallback on every nonce
+    assert main.count("watchdog(args.fuel, args.budget_us);") == 1
+    assert native_runner._FUEL in main
+
+
+# An algorithm crate reading the fuel counter exactly as mainnet's energy_arbitrage gridflow
+# (track_t3.rs) and job_scheduling ember_stromboli do at MONOREPO_REF.
+_ALGO = """
+extern "C" {
+    #[allow(non_upper_case_globals)]
+    static __fuel_remaining: u64;
+}
+
+pub fn fuel_remaining() -> u64 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(__fuel_remaining)) }
+}
+"""
+
+_HARNESS = """
+use std::time::{Duration, Instant};
+const OUT_OF_FUEL: i32 = 87;
+
+fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    let n = |i: usize| a[i].parse::<u64>().unwrap();
+    match a[1].as_str() {
+        "left" => println!("{}", fuel_left(n(2), n(3), n(4))),
+        "unbudgeted" => {
+            watchdog(5_000_000_000_000, None);
+            std::thread::sleep(Duration::from_millis(50));
+            println!("{}", algo::fuel_remaining());
+        }
+        "budgeted" => {
+            let start = Instant::now();
+            watchdog(1_000_000, Some(2_000_000));
+            std::thread::sleep(Duration::from_millis(100));
+            println!("{} {}", algo::fuel_remaining(), start.elapsed().as_micros());
+            std::thread::sleep(Duration::from_secs(10));
+            println!("survived");
+        }
+        _ => unreachable!(),
+    }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def fuel_bin(tmp_path_factory):
+    """The runner's fuel stand-in linked against an algorithm that declares the counter
+    extern, built with debug overflow checks on. Without a definition in the runner this link
+    fails with `undefined reference to __fuel_remaining`, as the native build of gridflow did
+    on 2026-10-20."""
+    if shutil.which("rustc") is None:
+        pytest.skip("rustc not on PATH")
+    d = tmp_path_factory.mktemp("fuel")
+    (d / "algo.rs").write_text(_ALGO, encoding="utf-8")
+    (d / "main.rs").write_text(native_runner._FUEL + _HARNESS, encoding="utf-8")
+    common = ["rustc", "--edition", "2021", "-C", "overflow-checks=on"]
+    subprocess.run(common + ["--crate-type", "rlib", "--crate-name", "algo", "algo.rs"],
+                   cwd=d, check=True, capture_output=True)
+    exe = d / ("fuel.exe" if os.name == "nt" else "fuel")
+    r = subprocess.run(common + ["--crate-name", "fuel", "--extern", "algo=libalgo.rlib",
+                                 "-L", ".", "-o", str(exe), "main.rs"],
+                       cwd=d, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return exe
+
+
+def _fuel(exe, *args, timeout=30):
+    return subprocess.run([str(exe), *map(str, args)], capture_output=True, text=True,
+                          timeout=timeout)
+
+
+@pytest.mark.parametrize("spent, expected", [
+    (0, 5_000_000_000_000),
+    (3_000_000_000, 2_500_000_000_000),
+    # mutation: dropping the `spent >= budget` guard underflows (budget - spent)
+    (6_000_000_000, 0),
+    (9_000_000_000, 0),
+])
+def test_fuel_left_falls_linearly_to_zero_at_the_budget(fuel_bin, spent, expected):
+    # 5e12 is energy_arbitrage's fuel at MONOREPO_REF; 6e9 us is a 100-minute budget.
+    # mutation: u64 arithmetic overflows 5e12 x 3e9 and panics under overflow checks
+    r = _fuel(fuel_bin, "left", 5_000_000_000_000, spent, 6_000_000_000)
+    assert r.returncode == 0, r.stderr
+    assert int(r.stdout) == expected
+
+
+def test_fuel_left_with_a_zero_budget_is_zero(fuel_bin):
+    # mutation: dividing by the budget before checking it panics on a zero budget
+    r = _fuel(fuel_bin, "left", 1000, 0, 0)
+    assert r.returncode == 0, r.stderr
+    assert int(r.stdout) == 0
+
+
+def test_without_a_budget_the_algorithm_reads_the_full_cap(fuel_bin):
+    # calibration runs the baseline with no budget: the algorithm must see all of its fuel,
+    # not 0 (its degrade-to-zeros fallback) and not a value that falls (nothing to fall to)
+    r = _fuel(fuel_bin, "unbudgeted")
+    assert r.returncode == 0, r.stderr
+    assert int(r.stdout) == 5_000_000_000_000
+
+
+def test_with_a_budget_the_algorithm_reads_falling_fuel_then_the_watchdog_exits_87(fuel_bin):
+    r = _fuel(fuel_bin, "budgeted")
+    assert r.returncode == 87, (r.returncode, r.stdout, r.stderr)
+    assert "survived" not in r.stdout
+    left, at_us = map(int, r.stdout.split())
+    # mutation: no clock thread leaves the cap in place for the whole budget
+    assert 0 < left < 1_000_000
+    # linear in elapsed time: 1 ms ticks, with 50 ms of slack for a loaded CI runner
+    expected = 1_000_000 * (2_000_000 - at_us) // 2_000_000
+    assert abs(left - expected) <= 1_000_000 * 50_000 // 2_000_000
 
 
 def test_add_workspace_member_inserts_once_inside_the_members_list():

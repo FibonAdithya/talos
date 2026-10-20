@@ -466,15 +466,17 @@ def test_run_nonce_native_builds_the_runner_and_verifier_commands(tmp_path):
     seen = []
     row = inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"),
                                   1_500_000, 600, None, _native_run(seen), tmp_path,
-                                  hyperparameters={"a": 1})
+                                  hyperparameters={"a": 1}, fuel=5_000_000_000_000)
     nat, ver = seen
     settings = json.loads(nat[1])
     assert settings["challenge_id"] == "c003" and settings["track_id"] == "n=1"
     assert nat[0] == str(Path("/b/talos-native")) and nat[2:4] == ["ab" * 32, "7"]
     # the runner takes an output FILE (not tig-runtime's folder) and the verifier reads it
     assert Path(nat[4]).name == "7.json" and ver[4] == nat[4]
-    # mutation: the fuel limit passed to the runner instead of the time budget
-    assert nat[nat.index("--budget-us") + 1] == "1500000" and "--fuel" not in nat
+    # mutation: the fuel limit passed as the time budget, or the budget as the fuel
+    assert nat[nat.index("--budget-us") + 1] == "1500000"
+    # the cap the runner's __fuel_remaining starts from, for algorithms that read it
+    assert nat[nat.index("--fuel") + 1] == "5000000000000"
     assert nat[nat.index("--hyperparameters") + 1] == '{"a":1}'
     assert ver[:4] == ["tig-verifier", nat[1], "ab" * 32, "7"] and len(ver) == 5
     assert row["ok"] and row["quality"] == 4242 and row["solve_us"] == 31000
@@ -484,15 +486,17 @@ def test_run_nonce_native_builds_the_runner_and_verifier_commands(tmp_path):
 def test_run_nonce_native_without_a_budget_passes_no_flag(tmp_path):
     seen = []
     inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"), None, 600,
-                            None, _native_run(seen), tmp_path)
+                            None, _native_run(seen), tmp_path, fuel=1000)
     # mutation: `--budget-us None` makes the runner's parse fail every calibration nonce
     assert "--budget-us" not in seen[0] and "--hyperparameters" not in seen[0]
+    # mutation: the cap tied to the budget leaves calibration's algorithm reading 0 fuel
+    assert seen[0][seen[0].index("--fuel") + 1] == "1000"
 
 
 def test_run_nonce_native_gpu_passes_the_ptx_to_both_and_the_gpu_to_the_verifier(tmp_path):
     seen = []
     inside.run_nonce_native("c005", "k=1", "ab" * 32, 3, Path("/b/talos-native"), None, 600,
-                            Path("/a.native.ptx"), _native_run(seen), tmp_path)
+                            Path("/a.native.ptx"), _native_run(seen), tmp_path, fuel=1000)
     nat, ver = seen
     assert nat[nat.index("--ptx") + 1] == str(Path("/a.native.ptx")) and "--gpu" not in nat
     assert ver[ver.index("--ptx") + 1] == str(Path("/a.native.ptx"))
@@ -501,7 +505,8 @@ def test_run_nonce_native_gpu_passes_the_ptx_to_both_and_the_gpu_to_the_verifier
 
 def test_a_budget_exit_with_a_saved_solution_counts_like_metered_out_of_fuel(tmp_path):
     row = inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"),
-                                  1000, 600, None, _native_run([], rc=87), tmp_path)
+                                  1000, 600, None, _native_run([], rc=87), tmp_path,
+                                  fuel=10)
     # mutation: reporting every budget exit as an error is stricter than tig-runtime
     assert row["ok"] and row["error"] is None
     # mutation: limit_hit dropped makes validation compare this truncated quality with the
@@ -512,7 +517,7 @@ def test_a_budget_exit_with_a_saved_solution_counts_like_metered_out_of_fuel(tmp
 def test_a_budget_exit_with_nothing_saved_is_out_of_fuel(tmp_path):
     row = inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"),
                                   1000, 600, None, _native_run([], rc=87, write=False),
-                                  tmp_path)
+                                  tmp_path, fuel=10)
     # mutation: a budget exit classified as panic or success
     assert not row["ok"] and row["error"] == "out_of_fuel"
 
@@ -521,7 +526,7 @@ def test_the_outer_timeout_on_a_native_nonce_is_timeout(tmp_path):
     def run(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, kw["timeout"])
     row = inside.run_nonce_native("c003", "n=1", "ab" * 32, 7, Path("/b/talos-native"),
-                                  1000, 5, None, run, tmp_path)
+                                  1000, 5, None, run, tmp_path, fuel=10)
     assert not row["ok"] and row["error"] == "timeout"
 
 
@@ -529,7 +534,7 @@ def test_run_task_dispatches_on_the_mode(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(inside, "run_nonce", lambda *a, **k: calls.append(("metered", a)) or {})
     monkeypatch.setattr(inside, "run_nonce_native",
-                        lambda *a, **k: calls.append(("native", a)) or {})
+                        lambda *a, **k: calls.append(("native", a, k)) or {})
     base = ("c003", "t", "ab" * 32, 1, "/x", 10, 60, None, str(tmp_path), None)
     inside.run_task(base + ("metered", None))
     inside.run_task(base + ("native", 777))
@@ -537,6 +542,8 @@ def test_run_task_dispatches_on_the_mode(monkeypatch, tmp_path):
     assert [c[0] for c in calls] == ["metered", "native"]
     assert calls[0][1][5] == 10          # metered gets the fuel
     assert calls[1][1][5] == 777         # native gets the budget in the same slot
+    # mutation: native dropping the task's fuel starts __fuel_remaining at no cap
+    assert calls[1][2]["fuel"] == 10
 
 
 GPU_WORKSPACE = "[workspace]\nmembers = [\n    \"tig-algorithms\",\n]\n"

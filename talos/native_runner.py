@@ -6,8 +6,9 @@ tig-binary/scripts/build_so fills in entry_point_template.rs, then built with pl
 Everything here follows tig-runtime/src/main.rs and tig-binary/src/entry_point_template.rs at
 MONOREPO_REF: the seed, the track parse, the hyperparameter map, the exit codes, and the empty
 solution written when the algorithm saved none. Two deliberate differences: no fuel counter
-(a watchdog thread exits 87 at the per-track budget instead), and on GPU the default stream
-rather than tig-runtime's fuel-check stream, which synchronises after every kernel launch."""
+(a watchdog thread exits 87 at the per-track budget instead, and `__fuel_remaining` falls with
+elapsed time, see _FUEL), and on GPU the default stream rather than tig-runtime's fuel-check
+stream, which synchronises after every kernel launch."""
 from __future__ import annotations
 
 import hashlib
@@ -64,6 +65,7 @@ struct Args {
     rand_hash: String,
     nonce: u64,
     output: PathBuf,
+    fuel: u64,
     budget_us: Option<u64>,
     hyperparameters: Option<String>,
     ptx: Option<PathBuf>,
@@ -76,17 +78,19 @@ fn parse_args() -> Result<Args> {
     let rand_hash = next("RAND_HASH")?;
     let nonce = next("NONCE")?.parse()?;
     let output = PathBuf::from(next("OUTPUT")?);
-    let (mut budget_us, mut hyperparameters, mut ptx) = (None, None, None);
+    let (mut fuel, mut budget_us, mut hyperparameters, mut ptx) = (None, None, None, None);
     while let Ok(flag) = next("flag") {
         let value = next(flag.as_str())?;
         match flag.as_str() {
+            "--fuel" => fuel = Some(value.parse()?),
             "--budget-us" => budget_us = Some(value.parse()?),
             "--hyperparameters" => hyperparameters = Some(value),
             "--ptx" => ptx = Some(PathBuf::from(value)),
             _ => return Err(anyhow!("unknown flag {}", flag)),
         }
     }
-    Ok(Args { settings, rand_hash, nonce, output, budget_us, hyperparameters, ptx })
+    let fuel = fuel.ok_or_else(|| anyhow!("missing --fuel"))?;
+    Ok(Args { settings, rand_hash, nonce, output, fuel, budget_us, hyperparameters, ptx })
 }
 
 fn seed_and_track(args: &Args) -> Result<([u8; 32], Track)> {
@@ -123,22 +127,50 @@ fn write_output(path: &Path, nonce: u64, solution: &Solution, solve_us: u64) -> 
     Ok(())
 }
 
-// The fuel stand-in: exits 87 once the solve has run for the budget, leaving the last saved
-// solution for tig-verifier, as a metered run that runs out of fuel does.
-fn watchdog(budget_us: Option<u64>) {
-    if let Some(us) = budget_us {
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_micros(us));
-            std::process::exit(OUT_OF_FUEL);
-        });
-    }
-}
-
 fn main() {
     let result = parse_args().and_then(run);
     if let Err(e) = result {
         eprintln!("Runtime Error: {}", e);
         std::process::exit(RUNTIME_ERROR);
+    }
+}
+"""
+
+# The fuel stand-in. tig-runtime sets `__fuel_remaining` to the fuel cap and the instrumented
+# algorithm counts it down; an algorithm that budgets its own work reads it through
+# `extern "C" { static __fuel_remaining: u64; }` (gridflow and ember_stromboli at MONOREPO_REF),
+# and without a definition here the native build fails to link. It starts at the cap. With a
+# budget it falls linearly to zero at the budget, when the watchdog exits 87, so such an
+# algorithm winds down inside the budget rather than being cut off. Without one (calibration)
+# it stays at the cap. AtomicU64 has u64's size and alignment, so the algorithm's volatile u64
+# read sees the clock thread's stores. Standard library only: tests compile it with bare rustc.
+_FUEL = r"""
+#[no_mangle]
+pub static __fuel_remaining: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// u128: energy_arbitrage's 5e12 fuel times a budget of 3e9 us overflows u64.
+fn fuel_left(fuel: u64, spent_us: u64, budget_us: u64) -> u64 {
+    if spent_us >= budget_us {
+        return 0;
+    }
+    (fuel as u128 * (budget_us - spent_us) as u128 / budget_us as u128) as u64
+}
+
+// Exits 87 once the solve has run for the budget, leaving the last saved solution for
+// tig-verifier, as a metered run that runs out of fuel does. Ticks every millisecond.
+fn watchdog(fuel: u64, budget_us: Option<u64>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    __fuel_remaining.store(fuel, Relaxed);
+    if let Some(us) = budget_us {
+        let start = Instant::now();
+        std::thread::spawn(move || loop {
+            let spent = start.elapsed().as_micros() as u64;
+            if spent >= us {
+                std::process::exit(OUT_OF_FUEL);
+            }
+            __fuel_remaining.store(fuel_left(fuel, spent, us), Relaxed);
+            std::thread::sleep(Duration::from_micros((us - spent).min(1000)));
+        });
     }
 }
 """
@@ -153,7 +185,7 @@ fn run(args: Args) -> Result<()> {
     let save = |solution: &Solution| -> Result<()> {
         write_output(&output, nonce, solution, start.elapsed().as_micros() as u64)
     };
-    watchdog(args.budget_us);
+    watchdog(args.fuel, args.budget_us);
     let result = catch_unwind(AssertUnwindSafe(|| {
         algorithm::solve_challenge(&challenge, &save, &hyperparameters)
     }))
@@ -198,7 +230,7 @@ fn run(args: Args) -> Result<()> {
         stream.synchronize()?; // as tig-runtime's save: the time covers finished kernels
         write_output(&output, nonce, solution, start.elapsed().as_micros() as u64)
     };
-    watchdog(args.budget_us);
+    watchdog(args.fuel, args.budget_us);
     let result = catch_unwind(AssertUnwindSafe(|| {
         algorithm::solve_challenge(&challenge, &save, &hyperparameters,
                                    module.clone(), stream.clone(), &prop)
@@ -219,7 +251,7 @@ def runner_digest() -> str:
     otherwise keep serving one built from an older runner. Computed on each call, not once
     at import, so a test that patches a template sees the new digest."""
     h = hashlib.sha256()
-    for part in (CARGO_TOML, _COMMON, _CPU_RUN, _GPU_RUN, _CUDARC, TOOLCHAIN,
+    for part in (CARGO_TOML, _COMMON, _FUEL, _CPU_RUN, _GPU_RUN, _CUDARC, TOOLCHAIN,
                  *(f"{k}={v}" for k, v in sorted(NATIVE_ENV.items()))):
         h.update(part.encode())
         h.update(b"\0")
@@ -232,7 +264,7 @@ def _fill(text: str, challenge: str, algorithm: str) -> str:
 
 def render(challenge: str, algorithm: str, is_gpu: bool) -> dict[str, str]:
     """The runner's files, keyed by their path under the monorepo root."""
-    main = _fill(_COMMON + (_GPU_RUN if is_gpu else _CPU_RUN), challenge, algorithm)
+    main = _fill(_COMMON + _FUEL + (_GPU_RUN if is_gpu else _CPU_RUN), challenge, algorithm)
     cargo = _fill(CARGO_TOML, challenge, algorithm).replace("{CUDARC}",
                                                             _CUDARC if is_gpu else "")
     return {f"{PACKAGE}/Cargo.toml": cargo, f"{PACKAGE}/src/main.rs": main}
