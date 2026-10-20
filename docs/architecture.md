@@ -137,7 +137,7 @@ a winner is decided. With `--scoring metered` every nonce of every candidate run
 `tig-runtime` with TIG's fuel counter, as the baseline did. It is slow because the build
 instruments every dependency's IR and the runtime meters every instruction. In native mode a
 candidate is built into the `talos-native` runner (`talos/native_runner.py::render` writes it,
-`talos/inside.py::build_native` builds it), which has no fuel counter and stops when the
+`talos/inside.py::build_native` builds it), which meters no instructions and stops when the
 solve has run for a time budget (exit 87). The loop then scores research candidates natively
 and only an improving one is scored on the metered runtime.
 
