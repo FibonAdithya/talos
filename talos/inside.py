@@ -300,9 +300,11 @@ def run_nonce(challenge_id: str, track: str, rand_hash: str, nonce: int, so: Pat
 def run_nonce_native(challenge_id: str, track: str, rand_hash: str, nonce: int, binary: Path,
                      budget_us: int | None, timeout_s: int, ptx: Path | None,
                      run=subprocess.run, workdir: Path | None = None, clock=time.monotonic,
-                     hyperparameters: dict | None = None) -> dict:
-    """`talos-native SETTINGS RAND_HASH NONCE OUT_FILE [--budget-us B] [--hyperparameters JSON]
-    [--ptx P]`, then tig-verifier exactly as run_nonce calls it. The runner exits 87 when its
+                     hyperparameters: dict | None = None, *, fuel: int) -> dict:
+    """`talos-native SETTINGS RAND_HASH NONCE OUT_FILE --fuel F [--budget-us B]
+    [--hyperparameters JSON] [--ptx P]`, then tig-verifier exactly as run_nonce calls it. The
+    fuel is only the cap the runner's `__fuel_remaining` starts from, for algorithms that read
+    it; the budget is what stops the solve. The runner exits 87 when its
     solve has run for budget_us, so a budget exit is classified as a metered out-of-fuel exit
     is: a saved solution that verifies still counts. `timeout_s` is the outer cap and reports
     `timeout`, as on the metered path."""
@@ -310,7 +312,7 @@ def run_nonce_native(challenge_id: str, track: str, rand_hash: str, nonce: int, 
     gpu_args = ["--ptx", str(ptx), "--gpu", "0"] if ptx else []
     with tempfile.TemporaryDirectory(dir=workdir) as td:
         out_file = Path(td) / f"{nonce}.json"
-        cmd = [str(binary), settings, rand_hash, str(nonce), str(out_file)]
+        cmd = [str(binary), settings, rand_hash, str(nonce), str(out_file), "--fuel", str(fuel)]
         if budget_us is not None:
             cmd += ["--budget-us", str(budget_us)]
         cmd += _hp_args(hyperparameters) + (["--ptx", str(ptx)] if ptx else [])
@@ -328,7 +330,8 @@ NONCE_TIMEOUT_S = 600
 # One scoring task, as a positional tuple so it pickles into a worker process unchanged:
 # (challenge_id, track, rand_hash, nonce, so, fuel, timeout_s, ptx, workdir, hyperparameters,
 #  mode, budget_us), with `so`, `ptx` and `workdir` as strings. For mode "native", `so` is the
-# talos-native binary and `fuel` is unused; budget_us is the track's solve budget or None.
+# talos-native binary and `fuel` is the cap its __fuel_remaining starts from; budget_us is the
+# track's solve budget or None.
 NonceTask = tuple
 
 
@@ -338,7 +341,7 @@ def run_task(task: NonceTask, run=subprocess.run) -> dict:
     if mode == "native":
         return run_nonce_native(challenge_id, track, rand_hash, nonce, Path(so), budget_us,
                                 timeout_s, Path(ptx) if ptx else None, run=run,
-                                workdir=Path(workdir), hyperparameters=hp)
+                                workdir=Path(workdir), hyperparameters=hp, fuel=fuel)
     return run_nonce(challenge_id, track, rand_hash, nonce, Path(so), fuel, timeout_s,
                      Path(ptx) if ptx else None, run=run, workdir=Path(workdir),
                      hyperparameters=hp)
