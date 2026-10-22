@@ -249,8 +249,11 @@ hash of the rand hash, never the rand hash itself. Docker has no wall-clock limi
 so the transport stores the job's limit as a container label and kills the container when it
 is exceeded, reporting `TIMED_OUT` exactly as C3 would. A stopped container is kept until the
 next deploy of the same run, because its artifacts are read from it; exited containers of
-earlier iterations are removed then. The local build allowance in the time limit is one hour
-(`talos/c3_jobdir.py::LOCAL_BUILD_ALLOWANCE_S`), against 20 minutes on C3, because a
+earlier iterations are removed then. `talos compile` removes its own containers when it
+returns or is interrupted: the agentic sandbox runs it from a new temporary directory each
+iteration, so its run key never recurs and no later deploy would remove them. The local build
+allowance in the time limit is one hour (`talos/c3_jobdir.py::LOCAL_BUILD_ALLOWANCE_S`),
+against 20 minutes on C3, because a
 candidate build took about 15 minutes on 16 cores before the crate was pruned to the
 candidate (about 3 minutes since; see [Local timings](#local-timings)) and longer on fewer.
 The allowance is kept for the smaller machines.

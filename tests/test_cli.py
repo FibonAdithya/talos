@@ -2160,6 +2160,7 @@ def test_compile_local_prepares_then_evaluates(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "prepare", lambda ch, **k: order.append("prepare"))
     # no config here (the agentic sandbox): the limits come from the daemon, never the host
     monkeypatch.setattr(cli, "docker_info", lambda: DockerInfo(["runc"], 4, 8))
+    monkeypatch.setattr(cli, "remove_compile_containers", lambda run_dir: None)  # no real docker
     seen = {}
 
     class B(_RefusingBench):
@@ -2177,6 +2178,70 @@ def test_compile_local_prepares_then_evaluates(tmp_path, monkeypatch, capsys):
     rc = cli.main(["compile", "--challenge", "knapsack", "--backend", "local"])
     assert rc == 0 and order == ["prepare", "evaluate"]
     assert (seen["local"].cpus, seen["local"].memory_gib) == (4, 4)
+
+
+def _compile_local(tmp_path, monkeypatch, evaluate, remove_error=None):
+    """`talos compile --backend local` with Docker stubbed out. Returns (the return code or the
+    exception that escaped, the call order, the run dirs whose containers were removed)."""
+    from talos.local_transport import DockerInfo
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "algorithm").mkdir()
+    (tmp_path / "algorithm" / "mod.rs").write_text("fn x(){}")
+    order, removed = [], []
+    monkeypatch.setattr(cli, "prepare", lambda ch, **k: None)
+    monkeypatch.setattr(cli, "docker_info", lambda: DockerInfo(["runc"], 4, 8))
+
+    class T:
+        def remove_run(self, run_dir):
+            order.append("remove")
+            removed.append(Path(run_dir))
+            if remove_error is not None:
+                raise remove_error
+    monkeypatch.setattr(cli, "DockerTransport", T)
+
+    class B(_RefusingBench):
+        def evaluate(self, request):
+            order.append("evaluate")
+            return evaluate()
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: B("x"))
+    try:
+        out = cli.main(["compile", "--challenge", "knapsack", "--backend", "local",
+                        "--dir", "algorithm"])
+    except BaseException as e:  # noqa: BLE001 - the test inspects what escaped
+        out = e
+    return out, order, removed
+
+
+def test_compile_local_removes_its_containers_after_the_result(tmp_path, monkeypatch):
+    """The agentic sandbox runs `talos compile` from a new temp dir each iteration, so its run
+    key is new each time and no later deploy's prune ever matches its containers."""
+    out, order, removed = _compile_local(tmp_path, monkeypatch, lambda: EvalResult(
+        CompileResult(ok=True, artifact_id="a", output="ok"), [], None, "not_won"))
+    # mutation: no removal leaves one exited container per agentic compile, for ever
+    # mutation: removing before evaluate deletes the container before its results are copied
+    assert out == 0 and order == ["evaluate", "remove"]
+    # mutation: a run dir other than the one make_bench was given carries another key
+    assert removed == [tmp_path / ".talos" / "compile"]
+
+
+def test_compile_local_removes_its_containers_when_evaluate_raises(tmp_path, monkeypatch):
+    def interrupted():
+        raise KeyboardInterrupt  # Ctrl-C, or a parent tearing the compile down mid-wait
+    out, order, removed = _compile_local(tmp_path, monkeypatch, interrupted)
+    # mutation: removal after evaluate but outside a finally leaves a running container behind
+    assert isinstance(out, KeyboardInterrupt) and order == ["evaluate", "remove"]
+
+
+def test_compile_local_reports_a_failed_removal_without_changing_the_result(tmp_path, monkeypatch,
+                                                                           capsys):
+    out, order, _ = _compile_local(
+        tmp_path, monkeypatch,
+        lambda: EvalResult(CompileResult(ok=True, artifact_id="a", output="ok"), [], None,
+                           "not_won"),
+        remove_error=C3CommandError("docker ps failed (1): daemon gone"))
+    assert order == ["evaluate", "remove"]
+    # mutation: letting the command error escape turns a good build into a traceback
+    assert out == 0 and "daemon gone" in capsys.readouterr().err
 
 
 def test_deploy_bench_deploys_the_app_as_a_package_module():
