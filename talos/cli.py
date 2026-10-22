@@ -1043,9 +1043,10 @@ def compile_backend(args, root: Path) -> str:
 
 
 def cmd_compile(args, ask) -> int:
-    """Compile only: no nonce is scored. On C3 the job dir is the fixed `.talos/compile/c3/adhoc`,
-    which every run rewrites, so two `talos compile` runs at once in one directory are
-    unsupported."""
+    """Compile only: no nonce is scored. On C3 and local the job dir is the fixed
+    `.talos/compile/<c3|local>/adhoc`, which every run rewrites, and on local the run removes
+    every container of that run dir when it ends, so two `talos compile` runs at once in one
+    directory are unsupported."""
     if args.challenge not in CHALLENGES:
         print(f"unknown challenge {args.challenge!r}", file=sys.stderr)
         return 2

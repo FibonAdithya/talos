@@ -557,8 +557,9 @@ On Modal it is one function call. On C3 it is one batch job
 `.talos/compile/`. On `local` it is one Docker container on this machine, after the same
 prepare step as `talos run` (image pull, clone and warm-up build on the first run per
 challenge; [about 3 minutes for knapsack](docs/compute-backends.md#local-timings) per build after that),
-with its job directory under `.talos/compile/` too. Each run overwrites that directory, so do
-not run two `talos compile` commands at once from the same directory.
+with its job directory under `.talos/compile/` too; the container is removed when the command
+returns or is interrupted. Each run overwrites that directory, so do not run two
+`talos compile` commands at once from the same directory.
 
 ### `talos status`
 
