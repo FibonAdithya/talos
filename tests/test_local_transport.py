@@ -473,3 +473,24 @@ def test_warm_script_fetches_every_locked_crate_after_the_build():
     assert build < fetch < script.index(f"touch /app/{WARM_MARKER}")
     # mutation: keeping the old marker never re-warms a volume made before this change
     assert WARM_MARKER == ".talos-warm-2"
+
+
+def test_remove_run_force_removes_every_container_of_that_run_only(tmp_path):
+    fake = FakeDocker(inspect=state("running"), ps_ids="aaa\nbbb\n")
+    run_dir = tmp_path / "wt" / ".talos" / "compile"
+    transport(fake).remove_run(run_dir)
+    ps, = [c for c in fake.calls if c[1] == "ps"]
+    # mutation: pruning every container on the machine instead of this run's
+    assert f"label=talos.run={run_key(run_dir)}" in ps
+    # mutation: keeping the exited-only filter of _prune leaves a container that an interrupted
+    # compile was still waiting on
+    assert not any(a.startswith("status=") for a in ps)
+    # mutation: plain `rm` refuses a running container
+    assert ["rm", "-f", "aaa", "bbb"] in [c[1:] for c in fake.calls]
+
+
+def test_remove_run_with_no_containers_runs_no_rm(tmp_path):
+    fake = FakeDocker(ps_ids="")
+    transport(fake).remove_run(tmp_path)
+    # mutation: `docker rm -f` with no ids exits 1, which docker() raises as a command error
+    assert not any(c[1] == "rm" for c in fake.calls)

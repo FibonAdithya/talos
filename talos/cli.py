@@ -1043,9 +1043,10 @@ def compile_backend(args, root: Path) -> str:
 
 
 def cmd_compile(args, ask) -> int:
-    """Compile only: no nonce is scored. On C3 the job dir is the fixed `.talos/compile/c3/adhoc`,
-    which every run rewrites, so two `talos compile` runs at once in one directory are
-    unsupported."""
+    """Compile only: no nonce is scored. On C3 and local the job dir is the fixed
+    `.talos/compile/<c3|local>/adhoc`, which every run rewrites, and on local the run removes
+    every container of that run dir when it ends, so two `talos compile` runs at once in one
+    directory are unsupported."""
     if args.challenge not in CHALLENGES:
         print(f"unknown challenge {args.challenge!r}", file=sys.stderr)
         return 2
@@ -1075,7 +1076,8 @@ def cmd_compile(args, ask) -> int:
         except C3CommandError as e:
             print(f"Docker failed while preparing {args.challenge}: {e}", file=sys.stderr)
             return 1
-    bench = make_bench(backend, Path.cwd() / ".talos" / "compile", PendingJobStore.memory(),
+    run_dir = Path.cwd() / ".talos" / "compile"
+    bench = make_bench(backend, run_dir, PendingJobStore.memory(),
                        c3_api_key=resolve_c3_api_key(cfg) if backend == "c3" else None,
                        local=local)
     from talos.bench import BenchUnavailable
@@ -1086,11 +1088,24 @@ def cmd_compile(args, ask) -> int:
     except BenchUnavailable as e:
         print(str(e), file=sys.stderr)
         return 1
-    r = bench.evaluate(EvalRequest(args.challenge, files, [], [], 0, None,
-                                   CHALLENGES[args.challenge].beat,
-                                   mode="native" if args.native else "metered")).compile
+    try:
+        r = bench.evaluate(EvalRequest(args.challenge, files, [], [], 0, None,
+                                       CHALLENGES[args.challenge].beat,
+                                       mode="native" if args.native else "metered")).compile
+    finally:
+        if backend == "local":
+            remove_compile_containers(run_dir)
     print(r.output[-4000:])
     return 0 if r.ok else 1
+
+
+def remove_compile_containers(run_dir: Path) -> None:
+    """The local containers of one `talos compile`, once its result is in or it was cut short.
+    The agentic sandbox's run key is new every iteration, so nothing else would remove them."""
+    try:
+        DockerTransport().remove_run(run_dir)
+    except C3CommandError as e:
+        print(f"could not remove the compile containers: {e}", file=sys.stderr)
 
 
 def cmd_status(args, ask) -> int:

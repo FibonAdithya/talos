@@ -143,6 +143,14 @@ class DockerTransport:
         if ids:
             self.docker("rm", *ids, ok=(0, 1))
 
+    def remove_run(self, run_dir: Path) -> None:
+        """Every container of the run in `run_dir`, running or not. For `talos compile`, which
+        nothing reattaches to: the agentic sandbox runs it from a new temp dir each iteration,
+        so its run key never recurs and no later `_prune` would match its containers."""
+        ids = self.docker("ps", "-aq", "--filter", f"label={LABEL_RUN}={run_key(run_dir)}").split()
+        if ids:
+            self.docker("rm", "-f", *ids, ok=(0, 1))
+
     def _inspect(self, job_id: str) -> dict:
         try:
             return json.loads(self.docker("inspect", job_id))[0]
