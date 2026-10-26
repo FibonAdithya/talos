@@ -25,7 +25,7 @@ capabilities dropped, and CPU and memory limits; the one opt-in exception is
 - [Agentic mode](#agentic-mode)
 - [Where results land](#where-results-land)
 - [Budget](#budget)
-- [Live smoke test](#live-smoke-test)
+- [Live smoke tests (maintainers)](#live-smoke-tests-maintainers)
 - [Development](#development)
 - [Licence](#licence)
 
@@ -59,30 +59,37 @@ are used, C3 and local timings, and the dev images.
 
 ## Try it with no accounts
 
-You can run the whole loop end to end before creating any account. The hidden `--fake` flag
-replaces the LLM, mainnet and the compute backend with in-process stand-ins: no config file,
-no network, no credentials.
+`talos demo` runs a scripted job end to end before you create any account: no config file,
+no network, no credentials and no spend. It uses the real research loop with a scripted LLM
+and an in-process stand-in for the compute backend.
 
 ```bash
 git clone https://github.com/FibonAdithya/talos.git
 cd talos
 python3 -m venv .venv
 .venv/bin/pip install -e .
-.venv/bin/talos run --challenge knapsack --direction "demo" --budget-iterations 3 --yes --fake
+.venv/bin/talos demo
 ```
 
-It finishes in under a second and prints the same event stream a real run does, ending with:
+It takes a few seconds (it pauses 0.4 s after each event line; `--delay 0` removes the
+pause) and prints the same event stream a real run does. The script shows, in order, a
+compile failure and its fix, two iterations with no gain, a false positive (a candidate that
+wins on training and loses on the held-out nonces) and a win. It ends with:
 
 ```
 Status: won (beat baseline on training and held-out nonces)
-Best delta vs baseline: +1.000%
-LLM spend: $0.02   Compute spend (estimated): $0.48
-Package: .../runs/<job_id>/package
-You can find the code to submit at .../runs/<job_id>/package/submission, fill out the template README.md to make it ready to submit to The Innovation Game!
+Best delta vs baseline: +4.000%
+LLM spend: $0.00   Compute spend (estimated): $0.00
+Package: .../runs/demo-<timestamp>-knapsack/package
+You can find the code to submit at .../runs/demo-<timestamp>-knapsack/package/submission, fill out the template README.md to make it ready to submit to The Innovation Game!
 ```
 
-The spend figures in a fake run are made up by the stand-ins. Delete `runs/` afterwards if
-you do not want the demo job listed by `talos status`.
+It then lists every file in the package with one line on what it holds, prints
+`talos report <job_id>` for the one-page view, and ends with
+`Next: talos setup, then talos doctor`. All figures are scripted, so spend is $0.00. The
+demo job is written to `runs/demo-<timestamp>-<challenge>/` and `talos status` lists it;
+delete that folder if you do not want it listed. The hidden `--fake` flag of `talos run`
+is for the tests and is not part of this path.
 
 ## Setup
 
@@ -185,8 +192,14 @@ each job, so it needs no redeploy.
 
 ### 5. Before your first real run
 
-Run the [live smoke test](#live-smoke-test) for your backend once. It spends a small amount
-of real compute and confirms the backend can compile and score the real mainnet algorithm.
+Run `talos doctor`. It is free: it checks the config, the LLM credential, the backend,
+mainnet and the GHCR dev images, and names a fix command for each failure. Then run
+`talos doctor --full` once. It compiles and scores one real mainnet algorithm on your backend
+to confirm that the whole path works, and it shows the cost and asks `Spend this?` (default
+no) before it spends anything. The one measured figure is for knapsack on C3: MEASURED
+2026-09-15: £0.02 and 12 min 20 s. Every other challenge and backend gets a figure labelled
+`ESTIMATE (unverified)`, and the local backend has no compute charge. See
+[`talos doctor`](#talos-doctor).
 
 ## Running on Windows
 
@@ -227,7 +240,7 @@ Run every later block from this `talos` folder.
 ### 3. Try it with no accounts
 
 ```powershell
-.venv\Scripts\talos.exe run --challenge knapsack --direction "demo" --budget-iterations 3 --yes --fake
+.venv\Scripts\talos.exe demo
 ```
 
 See [Try it with no accounts](#try-it-with-no-accounts) for what it prints.
@@ -245,25 +258,16 @@ It asks the same questions on every OS; they are listed under
 [Run `talos setup`](#4-run-talos-setup). On the C3 backend, give it a C3 API key (see
 [What differs on Windows](#what-differs-on-windows)).
 
-### 5. Run the live smoke test once
-
-For the Modal backend:
+### 5. Check the setup, then run the smoke check once
 
 ```powershell
-.venv\Scripts\python.exe -m pip install pytest
-$env:TALOS_LIVE_CHALLENGE = "knapsack"
-.venv\Scripts\python.exe -m pytest -m live tests/test_live.py -s
+.venv\Scripts\talos.exe doctor
+.venv\Scripts\talos.exe doctor --full
 ```
 
-For the C3 backend:
-
-```powershell
-.venv\Scripts\python.exe -m pip install pytest
-$env:TALOS_LIVE_BACKEND = "c3"
-.venv\Scripts\python.exe -m pytest -m live tests/test_live.py -k c3 -s
-```
-
-Both spend a small amount of real compute; see [Live smoke test](#live-smoke-test).
+`doctor` is free. `doctor --full` compiles and scores one real baseline on your backend; it
+shows the cost and asks `Spend this?` (default no) first. The measured figure is for knapsack
+on C3 only (MEASURED 2026-09-15: £0.02 and 12 min 20 s); see [`talos doctor`](#talos-doctor).
 
 ### 6. Run a job
 
@@ -446,7 +450,7 @@ Talos now pins TIG dev image `0.0.8` and source with the upstream seed-obfuscati
 After upgrading from `0.0.7`, start a new job: saved runs from the old build cannot resume
 against the new runtime. Baselines are measured again automatically. Modal users must
 rerun `talos setup` to redeploy before starting; C3 and local Docker use the new image on
-the next job. Run your backend's [live smoke test](#live-smoke-test) after upgrading.
+the next job. Run `talos doctor --full` after upgrading.
 
 ### Submit
 
@@ -471,6 +475,8 @@ same instead of telling you to submit it.
 | `talos compile` | Compiles a directory of algorithm files on the configured backend and prints the compiler output. Scores nothing. |
 | `talos status` | Lists every job under `runs/` with its status, iteration and spend. |
 | `talos report JOB_ID` | Writes `runs/<job_id>/package/report.html`, a one-page view of the job's search, from the files already in the run directory. |
+| `talos demo` | Runs a scripted job with no account, network or spend, and prints its package guide. |
+| `talos doctor` | Runs free health checks on the config, credential, backend, mainnet and dev images; `--full` also scores one real baseline after asking. |
 | `talos check-updates` | Checks GHCR for newer published TIG dev image versions and prints upgrade guidance. |
 
 ### `talos setup`
@@ -478,6 +484,63 @@ same instead of telling you to submit it.
 No flags. See [Setup, step 4](#4-run-talos-setup) for every prompt and what is written.
 Exit code 0 on success, 1 when a credential or backend check fails, 2 for an unknown
 backend or provider.
+
+### `talos demo`
+
+```bash
+talos demo                         # a knapsack-labelled demo
+talos demo --challenge hypergraph  # the same script, labelled with another challenge
+talos demo --delay 0               # no pause between event lines
+```
+
+| Flag | Meaning |
+|---|---|
+| `--challenge NAME` | The challenge to label the demo with (default `knapsack`). The script and scores do not change. |
+| `--delay SECONDS` | Pause after each event line (default 0.4; 0 disables). |
+
+Needs no config, account, network or compute backend, and spends nothing: every figure is
+scripted and priced at $0.00. It writes a job to `runs/demo-<timestamp>-<challenge>/`, runs
+the real research loop on it, and prints the event stream, the final status (`won`), the
+package path, a one-line description of each package file, `talos report <job_id>` and
+`Next: talos setup, then talos doctor`. Exit code 0 on success.
+
+### `talos doctor`
+
+```bash
+talos doctor                                    # free checks only
+talos doctor --full --challenge knapsack        # also score one baseline, after asking
+talos doctor --json                             # one JSON document instead of text lines
+```
+
+| Flag | Meaning |
+|---|---|
+| `--full` | After the free checks, compile and score mainnet's top algorithm for the challenge on 2 training nonces of its first track on your backend. It prints the cost, then asks `Spend this?` (default no; a closed stdin counts as no). |
+| `--challenge NAME` | Challenge for `--full` (default `knapsack`). |
+| `--yes` | Run `--full` without asking. Required with `--json`. |
+| `--json` | Print `{"checks": [{"name", "status", "detail"}, ...], "ok": true or false}` and nothing else on stdout. With `--full` and no `--yes` the `full` check is `skip` with detail `needs --yes`. |
+
+The free checks run in this order and print one line each, `name: ok (detail)` or
+`name: STATUS: detail`, where STATUS is `warn`, `FAIL` or `skip`:
+
+- `config`: `talos.config.json` loads. With none in the directory, `credential`, `provider`
+  and `backend` print `skip` and the other checks still run.
+- `credential`: the provider's API key, or its CLI (`claude`, `codex`) on `PATH`.
+- `provider`: one test call to the LLM.
+- `backend`: Modal has every function of the `talos-bench` app deployed; C3 is logged in and
+  has credit (`warn` under £1); Docker answers on a local backend.
+- `mainnet`: mainnet is reachable and its challenge ids and hardware classes match
+  `talos/challenges.py`.
+- `images`: the pinned dev image is on GHCR for every challenge.
+
+Every `FAIL` line names the command that fixes it. With `--full` a last line, `full`, reports
+the compile and the nonces scored. If a free check failed, `full` is `skip` and does not run.
+The cost it prints is MEASURED 2026-09-15: £0.02 and 12 min 20 s for knapsack on C3;
+for every other challenge and backend it is labelled `ESTIMATE (unverified)` and says
+how many minutes it assumes. The local backend has no compute charge but pulls a 13 GB image
+the first time.
+
+Exit code 0 when no check is `FAIL`. Exit code 1 when any check is `FAIL`, and also when
+`--full` was requested and did not run and pass (declined, skipped, or failed).
 
 ### `talos check-updates`
 
@@ -503,14 +566,16 @@ To apply an upgrade:
    image tag exists for all eight challenges and the architectures you use.
 2. Update `DEV_IMAGE_TAG` and, when needed, `MONOREPO_REF` in `talos/challenges.py` together.
 3. Run `make check`. For Modal, redeploy with `talos setup` before running the backend's
-   [live smoke test](#live-smoke-test). C3 and local Docker use the new pin on their next job;
-   run their smoke test too when that is your backend.
+   `talos doctor --full`. C3 and local Docker use the new pin on their next job; run
+   `talos doctor --full` for them too when that is your backend.
 4. Start new jobs. Existing measurements are tied to the old pins; the upgrade automatically
    gets fresh cache keys and local build volumes.
 
 ### `talos run`
 
-Prompts for anything not given as a flag, unless `--yes` is passed.
+Prompts for anything not given as a flag, unless `--yes` is passed. Before it writes anything
+or spends anything, it prints a job summary and asks `Start this job?`; `--yes` skips that
+question. Answering no, or a closed stdin, ends the command with nothing under `runs/`.
 
 Challenge status, which `talos run` repeats as a warning before it starts a job on a challenge
 that is not tested. "Tested" means at least one Talos job got past its baseline on some backend.
@@ -548,7 +613,7 @@ that is not tested. "Tested" means at least one Talos job got past its baseline 
 | `--add-hours N` | Adds N to the job's wall-clock cap. Only with `--resume`; refused for a cap the job was started without. |
 | `--add-usd N` | Adds N to the job's LLM spend cap. Only with `--resume`; refused for a cap the job was started without. |
 | `--add-compute-usd N` | Adds N to the job's compute spend cap. Only with `--resume`; refused for a cap the job was started without. |
-| `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20 (not asked and not set on the `local` backend, where it is always zero). |
+| `--yes` | Accept defaults instead of prompting, and skip the `Start this job?` confirmation. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20 (not asked and not set on the `local` backend, where it is always zero). |
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
 providers, default 20; iterations for CLI providers, default 50), a wall-clock budget
@@ -726,7 +791,7 @@ under [C3 timings](docs/compute-backends.md#c3-timings), billed at the profile's
 focused job's confirmation scores the other tracks' training nonces too, about a minute more
 per winning iteration on C3 (ESTIMATE, unverified).
 
-## Live smoke test
+## Live smoke tests (maintainers)
 
 `tests/test_live.py` (marker `live`, excluded from `make check`) compiles and scores the
 real mainnet top algorithm for one challenge on your deployed Modal app:
@@ -765,7 +830,7 @@ TALOS_LIVE_AGENT=claude-cli .venv/bin/pytest -m live tests/test_live.py -k claud
 All of them need `pytest`: install it with `.venv/bin/pip install pytest`, or use
 the development install below.
 
-Run the one for your backend once after `talos setup`, before trusting a real run. The
+Users run `talos doctor --full` instead (see [`talos doctor`](#talos-doctor)). The
 maintainers ran the C3 test on 2026-09-15 and the Modal test on 2026-10-26 (MEASURED: knapsack,
 mainnet algorithm `satchel`, both nonces `ok`, `1 passed` in 260.71 s, at commit `76e3ccd`).
 

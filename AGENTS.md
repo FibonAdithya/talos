@@ -191,7 +191,7 @@ executable definition of a valid change.
 
 `make check` is ruff lint, pytest with the `live` marker excluded, and the
 agentify contract self-check. `tests/test_live.py` spends real Modal budget, real
-C3 credit or LLM tokens and is run by hand (see `README.md#live-smoke-test`).
+C3 credit or LLM tokens and is run by hand (see `README.md#live-smoke-tests-maintainers`).
 
 ## What requires a human
 

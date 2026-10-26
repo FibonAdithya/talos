@@ -159,8 +159,8 @@ sources would still expose its hidden seed through serialization and debug forma
 Keep both pins fixed for a run; a moving `latest` tag would let image contents change
 without invalidating cached artifacts or measurements. An upgrade gets new baseline
 cache keys and local volumes; existing runs with different or unrecorded pins must be
-restarted as new jobs. Redeploy Modal with `talos setup` and run the backend's live smoke
-test after upgrading.
+restarted as new jobs. Redeploy Modal with `talos setup` and run `talos doctor --full`
+after upgrading.
 
 `talos check-updates` compares the configured tag with the newest published stable numeric
 tag for each challenge, using GHCR metadata without pulling image layers. New real jobs

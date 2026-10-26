@@ -1393,7 +1393,7 @@ def cmd_check_updates(args, ask) -> int:
         print("To upgrade, review the TIG release and its matching source revision, then update "
               "DEV_IMAGE_TAG and MONOREPO_REF in talos/challenges.py. The image tag must be "
               "available for all challenges and required architectures. Run `make check`, "
-              "redeploy Modal with `talos setup` if used, then run your backend's live smoke test. "
+              "redeploy Modal with `talos setup` if used, then run `talos doctor --full`. "
               "Start new jobs after upgrading. "
               "A newer published tag does not establish source compatibility.")
     return 1 if any(update is None for update in updates) else 0
