@@ -28,6 +28,10 @@ currently misleads or stalls them:
   backend.
 - The pre-run summary shows the budget caps and one line on how the backend bills. It shows
   **no per-iteration dollar figure**, because none has been measured for Modal.
+- `talos doctor --full` (a capacity probe and one compile-and-score) runs outside any job
+  budget, with no compute cap. Its guard is the `Spend this?` confirmation (default no), which
+  `--yes` skips. Asked during review of PR #81 and confirmed again before merge; recorded in
+  AGENTS.md invariant 5. Job budgets themselves do not change (see Non-goals).
 
 ## Goals
 
