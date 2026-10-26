@@ -29,9 +29,11 @@ from talos.extend import ADD_FLAGS, BUDGET_FLAGS, ExtensionRefused, extend
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
-from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, TEMPLATE_START_FILES,
+from talos.challenges import (CHALLENGES, DEFAULT_CHALLENGE, DEV_IMAGE_TAG, MONOREPO_REF,
+                              TEMPLATE_START_FILES,
                               c3_hardware_options, c3_hardware_class,
-                              c3_image, hardware_options, hardware_class, local_hardware_class)
+                              c3_image, hardware_options, hardware_class, local_hardware_class,
+                              status_warning)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.diagnostics import first_error
@@ -906,10 +908,14 @@ def cmd_run(args, ask) -> int:
         return 2
     if _codex_refused(cfg, start):
         return 2
-    challenge = args.challenge or ask(_challenge_prompt(), "vehicle_routing")
+    challenge = (args.challenge
+                 or ask(_challenge_prompt(), DEFAULT_CHALLENGE).strip() or DEFAULT_CHALLENGE)
     if challenge not in CHALLENGES:
         print(f"unknown challenge {challenge!r}", file=sys.stderr)
         return 2
+    warning = status_warning(CHALLENGES[challenge])
+    if warning:
+        print(warning, file=sys.stderr)
     if start == "template" and challenge not in TEMPLATE_START_FILES:
         print(f"--start template supports {', '.join(TEMPLATE_START_FILES)} only, not "
               f"{challenge}", file=sys.stderr)

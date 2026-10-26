@@ -512,6 +512,20 @@ To apply an upgrade:
 
 Prompts for anything not given as a flag, unless `--yes` is passed.
 
+Challenge status, which `talos run` repeats as a warning before it starts a job on a challenge
+that is not tested. "Tested" means at least one Talos job got past its baseline on some backend.
+
+| Challenge | Hardware | Status |
+|---|---|---|
+| `knapsack` | CPU | tested |
+| `energy_arbitrage` | CPU | tested |
+| `hypergraph` | GPU | tested |
+| `satisfiability` | CPU | untested |
+| `vehicle_routing` | CPU | untested |
+| `vector_search` | GPU | untested |
+| `neuralnet_optimizer` | GPU | untested |
+| `job_scheduling` | CPU | known broken ([#36](https://github.com/FibonAdithya/talos/issues/36)) |
+
 | Flag | Meaning |
 |---|---|
 | `--challenge NAME` | `satisfiability`, `vehicle_routing`, `knapsack`, `job_scheduling`, `energy_arbitrage` (CPU), or `vector_search`, `hypergraph`, `neuralnet_optimizer` (GPU: an L40S, or when none is free the next of A100-80GB and H100). On C3 a CPU challenge likewise runs on `cpu-d3-4vcpu-16gb`, or `cpu-e2-4vcpu-16gb` when that is out of stock; see [docs/compute-backends.md](docs/compute-backends.md#hardware-fallback). |

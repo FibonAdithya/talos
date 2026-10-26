@@ -3119,3 +3119,36 @@ def test_talos_report_job_without_state(tmp_path, monkeypatch, capsys):
     assert cli.main(["report", "K"]) == 1
     assert "has no state.json" in capsys.readouterr().err
     assert list((tmp_path / "runs" / "K").iterdir()) == []
+
+
+def test_wizard_defaults_to_knapsack(tmp_path, monkeypatch):
+    # mutation: the default reverted to vehicle_routing
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    monkeypatch.setattr(cli, "execute_job", lambda spec, store, cfg, resume: 0)  # no bench, no LLM
+    seen = []
+
+    def ask(prompt, default=None, secret=False):
+        seen.append(prompt)
+        if prompt.startswith("Challenge"):
+            return ""
+        if prompt.startswith("Direction"):
+            return "go"
+        return default or "1"
+    rc = cli.main(["run", "--budget-iterations", "1", "--budget-usd", "1"], ask=ask)
+    assert rc == 0
+    assert any(p.startswith("Challenge") for p in seen)
+    job = json.loads(next((tmp_path / "runs").glob("*/job.json")).read_text())
+    assert job["challenge"] == "knapsack"
+
+
+def test_run_warns_before_an_untested_challenge(tmp_path, monkeypatch, capsys):
+    # mutation: the warning removed, or printed for tested challenges
+    monkeypatch.chdir(tmp_path)
+    base = ["run", "--direction", "go", "--budget-iterations", "1", "--yes", "--fake"]
+    assert cli.main([*base, "--challenge", "vehicle_routing"]) == 0
+    err = capsys.readouterr().err
+    assert "warning: vehicle_routing has never been run end to end with Talos" in err
+    assert cli.main([*base, "--challenge", "knapsack"]) == 0
+    assert "warning: knapsack" not in capsys.readouterr().err
