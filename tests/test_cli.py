@@ -659,8 +659,50 @@ def test_status_line_says_unpriced_instead_of_zero_dollars(tmp_path):
 
     assert line("openai", "gpt-5") == "best n/a | llm unpriced | compute ≈$0.00 | ∞ left"
     assert line("anthropic", "claude-opus-5") == "best n/a | llm $0.00 | compute ≈$0.00 | ∞ left"
-    # a CLI provider bills no tokens
+    # claude-cli reports each call's cost (total_cost_usd), so $0.00 there is a measurement
     assert "llm $0.00" in line("claude-cli", "claude-opus-5")
+    # issue 34: codex reports no cost at all. mutation: listing codex as metered prints $0.00
+    assert line("codex-cli", "gpt-5.5") == "best n/a | llm not tracked | compute ≈$0.00 | ∞ left"
+
+
+def test_codex_refuses_a_dollar_only_budget(tmp_path, monkeypatch, capsys):
+    # issue 34: codex exec reports no cost in either mode, so llm_usd never rises and a
+    # --budget-usd-only job would run uncapped. mutation: treating codex as metered at $0
+    monkeypatch.chdir(tmp_path)
+    save(tmp_path, Config(provider="codex-cli", model="gpt-5.5", mode="single-shot",
+                          api_base=None), None)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    seen = []
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume: seen.append(spec) or 0)
+    base = ["run", "--challenge", "knapsack", "--direction", "go", "--yes"]
+    assert cli.main(base + ["--budget-usd", "5"]) == 2
+    err = capsys.readouterr().err
+    assert "codex-cli does not report what its calls cost" in err
+    assert "--budget-hours or --budget-iterations" in err
+    assert not seen and not (tmp_path / "runs").exists()
+    assert cli.main(base + ["--budget-usd", "5", "--budget-iterations", "3"]) == 0
+    assert seen and "warning: codex-cli does not report" in capsys.readouterr().err
+    # mutation: claude-cli is metered through total_cost_usd and must not be refused
+    save(tmp_path, Config(provider="claude-cli", model="claude-opus-5", mode="single-shot",
+                          api_base=None), None)
+    assert cli.main(base + ["--budget-usd", "5"]) == 0
+    assert "does not report" not in capsys.readouterr().err
+
+
+def test_unpriced_reason_names_the_cause():
+    # the summary line prints the reason; a codex run must not blame the price table
+    assert cli.unpriced_reason("codex-cli", "gpt-5.5") == \
+        "codex-cli does not report what its calls cost"
+    assert cli.unpriced_reason("openai", "gpt-5") == "model gpt-5 has no price-table entry"
+    assert cli.unpriced_reason("claude-cli", "anything") is None
+    assert cli.unpriced_reason("fake", "fake") is None
+    assert cli.unpriced_reason("anthropic", "claude-opus-5") is None
+
+
+def test_event_line_for_an_uncounted_session():
+    assert cli._event_line("llm_cost_unknown", {"reason": "claude timed out after 1800s"}) == \
+        "LLM cost of this agent session not counted: claude timed out after 1800s"
 
 
 def test_status_line_reports_hours_left(tmp_path):

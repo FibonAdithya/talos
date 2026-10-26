@@ -1957,3 +1957,50 @@ def test_an_extended_exhausted_loop_runs_the_added_iterations(tmp_path):
     final = again.run()
     assert final.status == "exhausted" and final.stop_reason == "iterations"
     assert final.spend.iterations == 4
+
+
+def test_budget_usd_stops_an_agentic_run_after_the_session_that_crossed_it(tmp_path):
+    # issue 34: agentic sessions were never charged, so --budget-usd could not stop the run.
+    # Each fake session costs $0.60 against a $1.00 cap: two run (0.60 < 1.00 before the
+    # second), the third is refused before it starts.
+    # mutation: not charging the session runs all 5 iterations; checking the budget only
+    # after the session lets a third one start
+    import subprocess
+    from talos.agentic import attach_agentic
+    sessions = []
+
+    def run(cmd, **kw):
+        sessions.append(cmd)
+        wt = kw["cwd"]
+        (wt / ".talos" / "hypothesis.json").write_text(json.dumps(
+            {"title": f"t{len(sessions)}", "description": "d", "strategy_tag": "local_search"}))
+        mod = wt / "algorithm" / "mod.rs"
+        mod.write_text(mod.read_text() + f"// session {len(sessions)}\n")
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(
+            {"type": "result", "result": "done", "total_cost_usd": 0.6}), stderr="")
+
+    b = Budget(usd=1.0, hours=None, iterations=5, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, ["lesson"], budget=b)
+    attach_agentic(loop, "claude-cli", "m", timeout_s=1, run=run)
+    try:
+        st = loop.run()
+    finally:
+        if getattr(loop, "_agentic_wt", None) is not None:
+            import shutil
+            shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert len(sessions) == 2
+    assert st.status == "exhausted" and st.stop_reason == "usd"
+    assert st.spend.llm_usd >= 1.2
+    # persisted, not only in memory: a resume reads spend back from state.json
+    assert json.loads((tmp_path / "state.json").read_text())["spend"]["llm_usd"] >= 1.2
+
+
+def test_charge_llm_persists_before_the_iteration_ends(tmp_path):
+    # an agentic session can run 30 minutes and the process can be killed right after it; a
+    # charge held only in memory is lost and a resume under-reports llm spend.
+    # mutation: dropping the save in _charge_llm (the iteration-end save hides it elsewhere)
+    loop, fp, fb, store = make(tmp_path, ["unused"])
+    loop._charge_llm(0.5)
+    loop._charge_llm(0.0)
+    loop._charge_llm(None)
+    assert json.loads((tmp_path / "state.json").read_text())["spend"]["llm_usd"] == 0.5

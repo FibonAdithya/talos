@@ -166,9 +166,14 @@ progress.
    `talos/bench.py::_seconds_cost`; C3 spend is measured running seconds times
    `talos/c3_bench.py::GBP_PER_HOUR` converted at
    `talos/c3_bench.py::USD_PER_GBP`; LLM spend is measured tokens times
-   `talos/providers/pricing.py::PRICES`. An unknown model is "unpriced"
-   (`None`), never zero, and a dollar-only budget with an unpriced model is
-   refused rather than allowed to run uncapped. The one fixed price is the
+   `talos/providers/pricing.py::PRICES`, except that claude-cli charges the
+   `total_cost_usd` the CLI reports, for single-shot calls and agentic sessions
+   alike (`talos/agentic.py::session_cost`). An unknown model is "unpriced"
+   (`None`), never zero, and so is codex-cli, which reports no cost
+   (`talos/cli.py::unpriced_reason`); a dollar-only budget with either is
+   refused rather than allowed to run uncapped. An agentic session killed at its
+   timeout has no reported cost and is recorded as `llm_cost_unknown`, not
+   charged. The one fixed price is the
    local backend's compute, which is zero by design rather than estimated:
    `talos/cli.py::make_bench` passes `usd_per_hour=0.0`, the machine is the
    user's own, and `talos run` neither asks for nor defaults a compute cap

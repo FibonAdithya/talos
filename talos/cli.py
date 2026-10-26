@@ -465,11 +465,21 @@ FAKE_MAINNET = types.SimpleNamespace(
     fetch_challenge_docs=lambda ch: {"README.md": "Fake challenge: maximise k.\n"})
 
 
+def unpriced_reason(provider: str, model: str) -> str | None:
+    """Why Talos cannot measure this job's LLM spend, or None when it can. Then llm_usd stays
+    0.00: it must be reported as unpriced, never as a measured $0.00, and --budget-usd cannot
+    be enforced against it. A provider that bills for tokens is unpriced when Talos has no
+    price for the model (every Completion carries cost_usd=None). codex-cli reports no cost in
+    either mode, so it is never measured. claude-cli is: `claude -p` reports total_cost_usd."""
+    if provider == "codex-cli":
+        return "codex-cli does not report what its calls cost"
+    if provider not in UNMETERED and estimate_cost(model, Usage(1, 1)) is None:
+        return f"model {model} has no price-table entry"
+    return None
+
+
 def unpriced(provider: str, model: str) -> bool:
-    """True when the provider bills for tokens but Talos has no price for this model. Every
-    Completion then carries cost_usd=None, so llm_usd stays 0.00: it must be reported as
-    "unpriced", never as a measured $0.00, and --budget-usd cannot be enforced against it."""
-    return provider not in UNMETERED and estimate_cost(model, Usage(1, 1)) is None
+    return unpriced_reason(provider, model) is not None
 
 
 def _status_line(spec: JobSpec, state: JobState, now: float) -> str:
@@ -479,7 +489,12 @@ def _status_line(spec: JobSpec, state: JobState, now: float) -> str:
         left = "∞"
     else:
         left = f"{max(0.0, hours - (now - state.spend.started_at) / 3600):.1f}h"
-    llm = "unpriced" if unpriced(spec.provider, spec.model) else f"${state.spend.llm_usd:.2f}"
+    if spec.provider == "codex-cli":
+        llm = "not tracked"
+    elif unpriced(spec.provider, spec.model):
+        llm = "unpriced"
+    else:
+        llm = f"${state.spend.llm_usd:.2f}"
     return f"best {best} | llm {llm} | compute ≈${state.spend.compute_usd:.2f} | {left} left"
 
 
@@ -573,6 +588,8 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
         text = f"won: {_holdout_text(data)}"
     elif kind == "false_positive":
         text = f"not confirmed: {_holdout_text(data)}"
+    elif kind == "llm_cost_unknown":
+        text = f"LLM cost of this agent session not counted: {data['reason']}"
     elif kind == "rate_limited":
         text = f"rate limited, waiting {data['wait_s']}s"
     elif kind == "resumed_pending":
@@ -781,8 +798,8 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
         print(f"Best delta vs baseline: {final.best.delta['mean_rel_delta']:+.3%}")
     else:
         print("Best delta vs baseline: n/a (no candidate)")
-    llm = (f"unpriced (no price-table entry for {spec.model})"
-           if unpriced(spec.provider, spec.model) else f"${final.spend.llm_usd:.2f}")
+    reason = unpriced_reason(spec.provider, spec.model)
+    llm = f"unpriced ({reason})" if reason else f"${final.spend.llm_usd:.2f}"
     print(f"LLM spend: {llm}   Compute spend (estimated): ${final.spend.compute_usd:.2f}")
     print(f"Package: {pkg}")
     _print_submission_hint(final, pkg)
@@ -946,13 +963,14 @@ def cmd_run(args, ask) -> int:
             return 2
     # A dollar cap on an unpriced model is a cap that can never fire: the provider reports no
     # cost, so llm_usd never rises. Refuse rather than run a job with no effective cap at all.
-    if unpriced(cfg.provider, cfg.model):
+    reason = unpriced_reason(cfg.provider, cfg.model)
+    if reason:
         if budget.hours is None and budget.iterations is None:
-            print(f"model {cfg.model} has no price-table entry, so --budget-usd cannot be "
-                  f"enforced; add --budget-hours or --budget-iterations", file=sys.stderr)
+            print(f"{reason}, so --budget-usd cannot be enforced; add --budget-hours or "
+                  f"--budget-iterations", file=sys.stderr)
             return 2
-        print(f"warning: model {cfg.model} has no price-table entry; LLM spend is not measured "
-              f"and --budget-usd is not enforced for this run", file=sys.stderr)
+        print(f"warning: {reason}; LLM spend is not measured and --budget-usd is not enforced "
+              f"for this run", file=sys.stderr)
     cs = CHALLENGES[challenge]
     if args.fake:
         info = ChallengeInfo(id=cs.id, name=challenge, is_gpu=cs.is_gpu, tracks=["n=1"], max_fuel=1)

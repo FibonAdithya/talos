@@ -541,9 +541,10 @@ providers, default 20; iterations for CLI providers, default 50), a wall-clock b
 track, the hyperparameters (`mainnet` or `none`), and the nonces per track (default 8).
 
 Talos refuses to start, before spending anything, when: there is no API key for the
-provider; the model has no entry in the price table and the only budget is `--budget-usd`
-(a dollar cap it could not enforce); the mainnet challenge id no longer matches
-`talos/challenges.py`; or, on C3, the challenge's dev image tag is not on GHCR.
+provider; the model has no entry in the price table, or the provider is `codex-cli` (which
+reports no cost), and the only budget is `--budget-usd` (a dollar cap it could not enforce);
+the mainnet challenge id no longer matches `talos/challenges.py`; or, on C3, the challenge's
+dev image tag is not on GHCR.
 
 Exit code 0 when the job ends `won`; 1 when it ends any other way, or when the mainnet or
 dev image check stops it; 2 for invalid arguments, a missing config, or a missing API key.
@@ -675,9 +676,17 @@ is cached outside the run directory, in `~/.talos/baselines/`; see
 
 Every spend figure in the status lines and the final report is an **estimate**, not a billed
 amount. Compute spend is measured running seconds times list prices in a table shipped with
-Talos. LLM spend is measured tokens times a price table. A model with no entry in that table
-is shown as `unpriced`, and `--budget-usd` cannot be enforced for it: add `--budget-hours`
-or `--budget-iterations`.
+Talos. LLM spend is measured tokens times a price table. With `claude-cli`, in both modes, it
+is the `total_cost_usd` the CLI reports for each call or agentic session, the CLI's own estimate
+at API prices, whatever your subscription actually charges. A model with no entry in that
+table is shown as `unpriced`, and `--budget-usd` cannot be enforced for it: add
+`--budget-hours` or `--budget-iterations`. The same applies to `codex-cli`, which reports no
+cost at all and is shown as `not tracked`.
+
+`--budget-usd` is checked before each LLM call or agentic session, so the call that crosses
+the cap still finishes; the run stops before the next one. An agentic `claude` session killed
+at its 30-minute timeout prints no cost, so it is not counted; the timeline records it as an
+`llm_cost_unknown` event.
 
 Compute spent by `talos compile` from the agentic sandbox is not counted against
 `--budget-compute-usd`. On C3 each of those is one job with the fixed overhead described

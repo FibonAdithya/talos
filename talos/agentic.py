@@ -4,6 +4,7 @@ The loop reads the files back and owns compile, score and publish as in single-s
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -19,6 +20,10 @@ from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, challenge_
 
 class AgenticError(ValueError):
     """A ValueError so Loop.iterate records it as a failed iteration instead of crashing the run."""
+
+
+class AgentTimeout(AgenticError):
+    """The CLI was killed at its timeout. It ran, so it spent tokens, but it printed no result."""
 
 
 # codex ignores claude-cli's settings file, and its own `--sandbox workspace-write` restricts writes
@@ -220,35 +225,67 @@ def _agent_env() -> dict[str, str]:
     return env
 
 
-def _run_agent(cmd: list[str], wt: Path, prompt: str, timeout_s: int, run) -> None:
+def _run_agent(cmd: list[str], wt: Path, prompt: str, timeout_s: int,
+               run) -> subprocess.CompletedProcess:
     """The prompt goes on stdin, not argv: on Windows an npm-installed CLI is a `.cmd` wrapper
-    that cmd.exe runs, and cmd.exe cuts an argument at its first newline."""
+    that cmd.exe runs, and cmd.exe cuts an argument at its first newline. The exit code is the
+    caller's to check, after it has read the session's cost: a failed session spent tokens too."""
     try:
         r = run(cmd, cwd=wt, input=prompt, capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=timeout_s, env=_agent_env())
     except FileNotFoundError:
         raise AgenticError(f"{cmd[0]} CLI not found on PATH") from None
     except subprocess.TimeoutExpired:
-        raise AgenticError(f"{cmd[0]} timed out after {timeout_s}s") from None
+        raise AgentTimeout(f"{cmd[0]} timed out after {timeout_s}s") from None
     (wt / ".talos" / "agent_stdout.txt").write_text((r.stdout or "")[-_TRANSCRIPT_CAP:],
                                                     encoding="utf-8", newline="\n")
     (wt / ".talos" / "agent_stderr.txt").write_text((r.stderr or "")[-_TRANSCRIPT_CAP:],
                                                     encoding="utf-8", newline="\n")
-    if r.returncode != 0:
-        raise AgenticError(f"{cmd[0]} exited {r.returncode}: {(r.stderr or '')[-500:]}")
+    return r
 
 
-def _run_claude(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
-    # the JSON result lists the tool calls the CLI refused; the text format does not mention them
-    _run_agent([argv0("claude"), "-p", "--model", model, "--output-format", "json",
-                "--settings", str(wt / SETTINGS_REL),
-                "--permission-mode", "dontAsk"], wt, prompt, timeout_s, run)
+def _run_claude(wt: Path, model: str, prompt: str, timeout_s: int,
+                run) -> subprocess.CompletedProcess:
+    # the JSON result carries the session's cost and lists the tool calls the CLI refused; the
+    # text format has neither
+    return _run_agent([argv0("claude"), "-p", "--model", model, "--output-format", "json",
+                       "--settings", str(wt / SETTINGS_REL),
+                       "--permission-mode", "dontAsk"], wt, prompt, timeout_s, run)
 
 
-def _run_codex(wt: Path, model: str, prompt: str, timeout_s: int, run) -> None:
+def _run_codex(wt: Path, model: str, prompt: str, timeout_s: int,
+               run) -> subprocess.CompletedProcess:
     # "-" makes codex read the prompt from stdin
-    _run_agent([argv0("codex"), "exec", "-m", model, "--sandbox", "workspace-write",
-                "--skip-git-repo-check", "-"], wt, prompt, timeout_s, run)
+    return _run_agent([argv0("codex"), "exec", "-m", model, "--sandbox", "workspace-write",
+                       "--skip-git-repo-check", "-"], wt, prompt, timeout_s, run)
+
+
+def session_cost(stdout: str) -> float | None:
+    """total_cost_usd from `claude -p --output-format json`: the CLI's own estimate of the
+    session at API list prices, the same figure single-shot claude-cli charges
+    (talos/providers/claude_cli.py). None when stdout is not that result or the figure is not a
+    finite, non-negative number. Read from the CLI's full stdout, never the transcript file,
+    which _TRANSCRIPT_CAP may have cut."""
+    try:
+        cost = json.loads(stdout)["total_cost_usd"]
+    except (ValueError, KeyError, TypeError, IndexError):
+        return None
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    if not math.isfinite(cost) or cost < 0:
+        return None
+    return float(cost)
+
+
+def _charge_session(loop, r: subprocess.CompletedProcess) -> None:
+    """Charge one claude session to the job's LLM spend, or record that its cost is unknown so
+    an uncounted session never reads as a free one. codex reports no cost and is not charged:
+    the CLI reports such a run as "not tracked" (talos/cli.py::unpriced_reason)."""
+    cost = session_cost(r.stdout or "")
+    if cost is None:
+        loop._event("llm_cost_unknown", reason="claude printed no total_cost_usd")
+    else:
+        loop._charge_llm(cost)
 
 
 def _copy_transcript(wt: Path, loop) -> None:
@@ -306,9 +343,19 @@ def attach_agentic(loop, provider_kind: str, model: str, timeout_s: int = 1800,
             prompt += f"\nYou have stagnated: use strategy_tag \"{ctx.forced_tag}\"."
         loop._check_budget()
         try:
-            runner(wt, model, prompt, timeout_s, run)
+            r = runner(wt, model, prompt, timeout_s, run)
+        except AgentTimeout as e:
+            # The json format prints its result only at the end, so a killed session's cost
+            # is lost; say so rather than count it as $0.
+            if provider_kind == "claude-cli":
+                loop._event("llm_cost_unknown", reason=str(e))
+            raise
         finally:
             _copy_transcript(wt, loop)
+        if provider_kind == "claude-cli":
+            _charge_session(loop, r)
+        if r.returncode != 0:
+            raise AgenticError(f"{r.args[0]} exited {r.returncode}: {(r.stderr or '')[-500:]}")
         try:
             hypothesis, files = read_back(wt, ctx)
         except AgenticError as e:

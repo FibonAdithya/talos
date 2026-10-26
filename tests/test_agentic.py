@@ -159,8 +159,12 @@ def test_claude_is_pointed_at_the_worktree_settings_file(tmp_path):
     shutil.rmtree(seen["cwd"], ignore_errors=True)
 
 
-def _denied_run(denials, edit=False):
-    """A fake claude: the JSON result only when asked for it, as the real CLI behaves."""
+_NO_COST = object()
+
+
+def _denied_run(denials, edit=False, cost=_NO_COST, returncode=0):
+    """A fake claude: the JSON result only when asked for it, as the real CLI behaves. `cost`
+    becomes the result's total_cost_usd; by default the result has none."""
     def run(cmd, **kw):
         wt = kw["cwd"]
         if edit:
@@ -168,17 +172,133 @@ def _denied_run(denials, edit=False):
                 {"title": "T", "description": "D", "strategy_tag": "local_search"}))
             (wt / "algorithm" / "mod.rs").write_text("fn a(){ 1 }")
         as_json = "json" in cmd and cmd[cmd.index("json") - 1] == "--output-format"
-        out = json.dumps({"type": "result", "subtype": "success", "is_error": False,
-                          "result": "done", "permission_denials": denials}) if as_json else "done"
-        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+        result = {"type": "result", "subtype": "success", "is_error": False, "result": "done",
+                  "permission_denials": denials}
+        if cost is not _NO_COST:
+            result["total_cost_usd"] = cost
+        out = json.dumps(result) if as_json else "done"
+        return subprocess.CompletedProcess(cmd, returncode, stdout=out, stderr="boom")
     return run
 
 
 def _agentic_loop(tmp_path, run, kind="claude-cli"):
+    """A loop stub that records what the agentic call charged and which events it raised."""
+    charges, events = [], []
     loop = types.SimpleNamespace(store=JobStore(tmp_path), propose_and_edit=None,
-                                 _check_budget=lambda: None, _event=lambda *a, **k: None)
+                                 _check_budget=lambda: None,
+                                 _event=lambda kind, **data: events.append((kind, data)),
+                                 _charge_llm=charges.append, charges=charges, events=events)
     attach_agentic(loop, kind, "m", timeout_s=1, run=run)
     return loop
+
+
+def test_a_claude_session_is_charged_its_cost_once(tmp_path):
+    # issue 34: the session's total_cost_usd was never read, so --budget-usd could not cap
+    # agentic mode. mutation: not charging leaves []; charging per retry or twice gives two
+    loop = _agentic_loop(tmp_path, _denied_run([], edit=True, cost=1.25))
+    loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert loop.charges == [1.25]
+    assert not [k for k, _ in loop.events if k == "llm_cost_unknown"]
+
+
+def test_a_free_claude_session_is_charged_zero_not_recorded_as_unknown(tmp_path):
+    # mutation: `if cost:` treats a measured 0.0 as missing
+    loop = _agentic_loop(tmp_path, _denied_run([], edit=True, cost=0))
+    loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert loop.charges == [0.0]
+    assert not [k for k, _ in loop.events if k == "llm_cost_unknown"]
+
+
+def test_a_failed_claude_session_is_still_charged(tmp_path):
+    # the tokens were spent whatever the exit code. mutation: checking the exit code before
+    # reading the cost drops every failed session's spend
+    loop = _agentic_loop(tmp_path, _denied_run([], cost=0.5, returncode=1))
+    with pytest.raises(AgenticError) as ei:
+        loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert loop.charges == [0.5]
+    assert str(ei.value).startswith("claude exited 1: boom")
+
+
+@pytest.mark.parametrize("cost", [_NO_COST, None, "1.0", True, -1.0, float("nan"),
+                                  float("inf")])
+def test_a_claude_session_without_a_usable_cost_is_recorded_as_unknown(tmp_path, cost):
+    # mutation: charging a bool, a string, a negative or a non-finite number corrupts llm_usd;
+    # skipping the event makes an uncounted session look like a free one
+    loop = _agentic_loop(tmp_path, _denied_run([], edit=True, cost=cost))
+    loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert loop.charges == []
+    assert [k for k, _ in loop.events].count("llm_cost_unknown") == 1
+
+
+def test_a_claude_transcript_that_is_not_json_is_recorded_as_unknown(tmp_path):
+    loop = _agentic_loop(tmp_path, lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 0, stdout="plain prose", stderr=""))
+    with pytest.raises(AgenticError):
+        loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert loop.charges == [] and [k for k, _ in loop.events] == ["llm_cost_unknown"]
+
+
+def test_the_cost_is_read_before_the_transcript_cap(tmp_path, monkeypatch):
+    # a long session's JSON result outgrows the saved transcript. mutation: parsing the capped
+    # agent_stdout.txt instead of the CLI's stdout loses the cost of exactly the costly sessions
+    import talos.agentic as agentic
+    monkeypatch.setattr(agentic, "_TRANSCRIPT_CAP", 10)
+    loop = _agentic_loop(tmp_path, _denied_run([], edit=True, cost=2.0))
+    loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert loop.charges == [2.0]
+
+
+def test_a_timed_out_claude_session_is_recorded_as_unknown(tmp_path):
+    # the json format prints its result only at the end, so a killed session's cost is lost.
+    # mutation: dropping the event hides that the run's llm spend is short by a whole session
+    def run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    loop = _agentic_loop(tmp_path, run)
+    with pytest.raises(AgenticError):
+        loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert loop.charges == []
+    [(kind, data)] = loop.events
+    assert kind == "llm_cost_unknown" and "timed out after 1s" in data["reason"]
+
+
+def test_a_missing_claude_binary_records_no_cost_event(tmp_path):
+    # nothing ran, so nothing was spent. mutation: treating every AgenticError as a lost
+    # session adds a spurious event
+    def run(cmd, **kw):
+        raise FileNotFoundError(cmd[0])
+
+    loop = _agentic_loop(tmp_path, run)
+    with pytest.raises(AgenticError):
+        loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert loop.charges == [] and loop.events == []
+
+
+def test_a_codex_session_charges_nothing_and_raises_no_event(tmp_path, monkeypatch):
+    # codex reports no cost; the CLI marks the whole run "not tracked" instead
+    # (cli.unpriced_reason). mutation: parsing codex's prose as claude JSON adds one
+    # llm_cost_unknown event per iteration
+    monkeypatch.setenv(CODEX_AGENTIC_ENV, "1")
+
+    def run(cmd, **kw):
+        wt = kw["cwd"]
+        (wt / ".talos" / "hypothesis.json").write_text(json.dumps(
+            {"title": "T", "description": "D", "strategy_tag": "local_search"}))
+        (wt / "algorithm" / "mod.rs").write_text("fn a(){ 1 }")
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"total_cost_usd": 3.0}', stderr="")
+
+    loop = _agentic_loop(tmp_path, run, kind="codex-cli")
+    loop.propose_and_edit(ctx())
+    shutil.rmtree(loop._agentic_wt, ignore_errors=True)
+    assert loop.charges == [] and [k for k, _ in loop.events] == ["hypothesis"]
 
 
 def test_failed_read_back_reports_the_tool_calls_the_cli_refused(tmp_path):
