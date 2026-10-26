@@ -214,3 +214,16 @@ def test_job_from_before_lineage_loads_with_defaults():
     assert (loaded_spec.start, loaded_spec.search, loaded_spec.chains,
             loaded_spec.anneal) == ("mainnet", "greedy", 1, None)
     assert loaded_state.nodes == [] and loaded_state.chains == []
+
+
+def test_budget_extensions_default_and_round_trip():
+    # mutation: from_dict reading d["budget_extensions"] fails on every state.json written
+    # before this field; to_dict omitting it loses the extension on the next save
+    d = JobState.fresh(Spend(started_at=0.0)).to_dict()
+    d.pop("budget_extensions", None)
+    assert JobState.from_dict(d).budget_extensions == []
+    entry = {"at": 1.0, "iteration": 2, "previous_status": "exhausted",
+             "add": {"iterations": 3, "hours": None, "usd": None, "compute_usd": None}}
+    st = JobState.fresh(Spend(started_at=0.0))
+    st.budget_extensions = [entry]
+    assert JobState.from_dict(st.to_dict()).budget_extensions == [entry]
