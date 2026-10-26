@@ -286,9 +286,18 @@ def test_an_extended_exhausted_loop_runs_the_added_iterations(tmp_path):
 `tests/test_cli.py`:
 
 ```python
+def _budget_spec(challenge, budget):
+    return cli.JobSpec(job_id="j", challenge=challenge, direction="d", provider="claude-cli",
+                       model="m", mode="single-shot", budget=budget, rand_hash="ab" * 32,
+                       tracks=["t"], training=[], holdout=[], fuel=1, created_at=0.0,
+                       monorepo_ref="r", challenge_id="c003")
+
 def test_status_line_counts_added_hours(tmp_path):
     # mutation: _status_line reading spec.budget.hours prints "0.0h left" (1h cap, 1.5h used)
-    # (spec built as in test_status_line_reports_hours_left, with hours=1.0)
+    from talos.budget import Budget, Spend
+    from talos.state import JobState
+    spec = _budget_spec("knapsack", Budget(usd=None, hours=1.0, iterations=None,
+                                           compute_usd=1.0))
     state = JobState.fresh(Spend(started_at=0.0))
     state.budget_extensions = [{"add": {"iterations": None, "hours": 2.0, "usd": None,
                                         "compute_usd": None}}]
@@ -299,8 +308,20 @@ def test_freeze_hardware_checks_the_extended_budget(tmp_path, monkeypatch):
     # extension gave it room
     # spec: challenge "hypergraph" (a GPU challenge, so Modal has options to probe), budget
     # iterations=1; state: fresh, spend.iterations=1, baseline None, hardware None, one
-    # extension adding 1 iteration
-    monkeypatch.delenv("TALOS_HARDWARE", raising=False)  # freeze_hardware sets it; restore
+    # extension adding 1 iteration. hypergraph on modal has options ('L40S', 'A100-80GB',
+    # 'H100'), so the pre-probe check runs; with no options the check is skipped and this test
+    # would pass under the mutation.
+    from talos.budget import Budget, Spend
+    from talos.state import JobState, JobStore
+    # setenv, not delenv(raising=False): delenv on an unset name records nothing, so the L40
+    # that freeze_hardware exports would leak into every later test (MEASURED 2026-10-26).
+    monkeypatch.setenv("TALOS_HARDWARE", "")
+    spec = _budget_spec("hypergraph", Budget(usd=None, hours=None, iterations=1,
+                                             compute_usd=None))
+    state = JobState.fresh(Spend(started_at=0.0))
+    state.spend.iterations = 1
+    state.budget_extensions = [{"add": {"iterations": 1, "hours": None, "usd": None,
+                                        "compute_usd": None}}]
     bench = types.SimpleNamespace(select_hardware=lambda ch, chosen=None: "L40",
                                   cost_mark=lambda: 0.0, cost_usd_since=lambda m: 0.0)
     cli.freeze_hardware(bench, spec, state, JobStore(tmp_path), "modal", log=lambda s: None,
@@ -487,23 +508,29 @@ def test_job_exhausted_before_its_baseline_measures_it_once(tmp_path, monkeypatc
     assert new.count("baseline_ready") == 1
 
 def test_add_flags_on_a_won_job_record_nothing(tmp_path, monkeypatch, capsys):
-    # Review Focus 2. mutation: extending before the won refusal records an entry on a job
-    # that never runs again
+    # Review Focus 2. mutation: extending (and saving) before the won refusal records an entry
+    # on a job that never runs again
+    # mutation: extending before the won refusal without saving still prints "Budget extended"
     monkeypatch.chdir(tmp_path)
     fake_config(tmp_path)
     assert fake_run(monkeypatch) == 0
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    capsys.readouterr()
     assert cli.main(["run", "--resume", run_dir.name, "--add-iterations", "1"]) == 1
-    assert "already won" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "already won" in out and "Budget extended" not in out
     assert json.loads((run_dir / "state.json").read_text()).get("budget_extensions", []) == []
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `.venv/bin/python -m pytest -q -m "not live" tests/test_cli.py -k "added or extension or add_flag or exhausted_resume or hard_killed or before_its_baseline or need_resume"`
-Expected: every test fails or errors. Until the flags exist, argparse raises `SystemExit: 2`
-on `--add-*` (`cli.main` does not catch it), and the plain-resume tests fail on the missing
-hint.
+Expected: 10 of the 11 new tests fail or error. Until the flags exist, argparse raises
+`SystemExit: 2` on `--add-*` (`cli.main` does not catch it), and
+`test_exhausted_resume_without_added_budget_names_the_flag` fails on the missing hint. Two
+selected tests pass, and that is expected: `test_exhausted_resume_with_an_unknown_reason_does_not_crash`
+(today's code already prints the message and exits 1; it guards the new hint lookup) and
+Task 2's `test_status_line_counts_added_hours` (the `added` keyword selects it).
 
 - [ ] **Step 3: Add the four argparse flags, the `cmd_run` guard, the `add` argument to
   `execute_job`, and the resume flow above.** Add `add=None` to every resume-reachable
