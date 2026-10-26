@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- The report contains no `http://`, `https://`, `@import`, or `src=`/`href=` to anything off-page. No CDN, no fonts.
+- The report loads nothing from off the page: no `<script src>`, `<link href>`, `@import`, CDN or font. Text copied from the run (a diff of a README, say) may contain a URL as plain text; that is fine. The test fixture has no URLs, so the test can grep for any `http`.
 - The report never contains `spec.rand_hash`. Shown settings come from `spec.redacted()` only.
 - Every piece of LLM-written text (title, description, error, family, tag, diff) is `html.escape`d in HTML. In the JSON block, every `<` is replaced with the six-character JSON escape `\u003c` (backslash, u, 0, 0, 3, c): `json.dumps(data).replace("<", "\\u003c")`.
 - Under 2,000,000 bytes for a 200-node run. Node diffs share a 1,000,000-character budget, each capped at 64,000 characters. The best diff is capped at 400,000 characters.
@@ -20,11 +20,14 @@
 - Files are written with `encoding="utf-8", newline="\n"` (Windows CI; see `talos/package.py`).
 - The inline `<svg>` has no `xmlns` attribute (HTML5 does not need it, and its `http://www.w3.org/...` value would fail the no-URL test).
 - A report failure never fails `build_package`. The zip is still written.
+- Import direction: `talos/report.py` may import `talos.package` at module level. `talos/package.py` must import `talos.report` only inside `_write_report_safely`; a module-level import in both directions is a circular import that fails at load.
+- Diffs are written as plain text with no per-line markup: node diffs as strings in the JSON block, the best diff as escaped text in a `<pre>`. The inline JS colours lines in the DOM (one span per line, set with `textContent`). Per-line spans in the file would add ~25 bytes a line and can push a 200-node report past 2 MB.
+- Nothing reads iteration directories through `JobStore.iteration_dir`: it creates the directory. Use `run_dir / "iterations" / f"{id:04d}"`.
 - Verify with `make check PYTHON=.venv/bin/python` (ruff, pytest `-m "not live"`, agentify).
 
 ## Review Focus
 
-1. **In-progress run:** the last hypothesis has `outcome: "started"` and `state.pending_job` is set. The node is drawn as a failure (no score) and nothing crashes. Test in Task 1.
+1. **In-progress run:** the loop appends a record only in `Loop._finish_iteration`, so the saved shape of a run in flight is `state.pending_job` set and an `iterations/NNNN/` directory (possibly empty, like `runs/20260923-092930-knapsack/iterations/0008`) with no record. That iteration has no node and nothing crashes. A record with `outcome: "started"` (defensive; older code) is drawn as a failure. Both are tested in Task 1.
 2. **Very old hypothesis records with no `against` key:** the parent defaults to 0 (the root). Test in Task 1.
 3. **One diff line longer than the cap** (minified or generated source): truncation must also cut inside a line, so the cap holds. Test in Task 1.
 4. **A node whose parent id has no node** (a record lost, or a parent outside the recorded list): the edge is not drawn, and the panel says `parent #N not recorded`. Test in Task 2.
@@ -47,7 +50,7 @@
   - `run_sources(run_dir: Path, spec: JobSpec, state: JobState) -> Callable[[int], dict[str, str] | None]`
   - `root_location(spec: JobSpec) -> str`. Returns `"challenge/template.rs"` for a template start and `"baseline"` otherwise. It is used in truncation notes.
   - `node_diffs(nodes: list[ReportNode], sources: Callable[[int], dict[str, str] | None], spec: JobSpec, total: int = 1_000_000, per_node: int = 64_000) -> dict[int, str]`. The value is the diff text or a message: `"no files saved"`, `"parent's files not saved"`, `"no change"`.
-  - `truncate(text: str, cap: int, note: str) -> str`
+  - `truncate(text: str, cap: int, note: str) -> str`. If `len(text) <= cap`, return `text` unchanged. Otherwise `kept = text[:cap]`, `n = len(text[cap:].splitlines())` (the lines, or the rest of a line, not kept), and return `kept + ("" if kept.endswith("\n") else "\n") + note.replace("{n}", str(n))`. Callers pass the note with a literal `{n}`.
   - `@dataclass(frozen=True) class Axis` with fields `lo: float, hi: float, cut_lo: float | None, cut_hi: float | None`, plus `axis_for(scores: list[float]) -> Axis`.
   - `read_timeline(path: Path) -> list[dict]` and `holdout_points(timeline: list[dict]) -> dict[int, float]`.
 - Produces in `talos/package.py`: `score_pairs(spec, state) -> list[tuple[str, list[NonceResult], list[NonceResult]]]` (heading, baseline rows, candidate rows). `scores_sections` becomes `[(h, scores_markdown(b, c)) for h, b, c in score_pairs(...)]` and its output is unchanged.
@@ -58,17 +61,18 @@ Rules the code must follow (from the spec, sections "Nodes" and "Node sources an
 - `former_best = stored node.best and kind != "best"`. `confirmed = id in state.confirmed`. `false_positive = id in state.false_positives`. This flag is separate from `kind`, because the current best is often also a false positive (an "improved but not won" run keeps it as best), and `kind == "best"` would hide that.
 - The sources lookup: id 0 gives `state.baseline.files`, or for a template start `{"mod.rs": <run_dir>/challenge/template.rs text}` (None if that file is absent). The current best gives `state.best.files`. Any other id gives the files present in `iterations/NNNN/` among the root's file names, decoded with `errors="replace"`, and None if none are present. With no baseline and no template, the root is None.
 - The diff text is `talos.package._diff(parent_files, node_files, label)` with `label = "template"` if the parent is the template root, `"baseline"` if it is the baseline root, else `f"#{parent}"`.
-- The per-node cap is `min(per_node, total // max(1, count of nodes whose diff is a real diff))`. The truncation note is `f"… truncated ({n} more lines); full diff: diff -u {parent_loc} {node_loc}"`. Here a location is `root_location(spec)` for id 0 and `f"iterations/{id:04d}"` otherwise.
+- The per-node cap is `min(per_node, total // max(1, count of nodes whose diff is a real diff))`. The truncation note is `f"… truncated ({{n}} more lines); full diff: diff -u {parent_loc} {node_loc}"` (the `{n}` is filled by `truncate`). Here a location is `root_location(spec)` for id 0 and `f"iterations/{id:04d}"` otherwise; when the parent is the template root, the node's location is `f"iterations/{id:04d}/mod.rs"`, because `diff -u file dir` looks for `dir/<file's basename>`. (`runs/<job>/baseline/` holds the baseline's source files, so `diff -u baseline iterations/0001` works.)
+- The best-vs-root diff in Task 2 uses `truncate` with cap 400,000 and the note `f"… truncated ({{n}} more lines); full diff: diff -u baseline best"`, or `diff -u challenge/template.rs best/mod.rs` for a template start (`Loop` writes the best's files to `runs/<job>/best/`).
 - `axis_for`: with fewer than 8 scores there is no cut. Otherwise, with `q1, _, q3 = statistics.quantiles(scores, n=4, method="inclusive")`, `w = max(q3 - q1, 0.01)`, `cut_lo = q1 - 3 * w`, `cut_hi = q3 + 3 * w`. Each cut is kept only if some score lies beyond it, else it is None. `lo = min(0, min of scores within cuts)` and `hi = max(0, max of scores within cuts)`. If `lo == hi`, then `hi = lo + 0.01`.
 - `read_timeline` skips lines that fail `json.loads` and returns `[]` for a missing file. `holdout_points` takes rows with `kind in ("won", "false_positive")` and a dict `holdout` carrying `mean_rel_delta`, keyed by `row["iteration"]`.
 
 - [ ] **Step 0: Record the starting test count**
 
-  Run: `.venv/bin/python -m pytest -q -m "not live" > /tmp/claude-1000/-home-fibonadithya-TIG-Talos/2a5dd1b3-6d32-4d01-9a6b-64a5dc5d0075/scratchpad/pytest-before.log 2>&1; tail -3 /tmp/claude-1000/-home-fibonadithya-TIG-Talos/2a5dd1b3-6d32-4d01-9a6b-64a5dc5d0075/scratchpad/pytest-before.log`. Run it in the background with a generous timeout, and note `N passed`.
+  Run: `.venv/bin/python -m pytest -q -m "not live" > <scratchpad>/pytest-before.log 2>&1; tail -3 <scratchpad>/pytest-before.log`. Run it in the background with a generous timeout, and note `N passed`.
 
 - [ ] **Step 1: Write the fixture helper and failing tests**
 
-  In a new `tests/run_fixture.py` (a helper module, not a test module), write `make_run(run_dir, hyps, nodes=(), best=None, start="mainnet", false_positives=(), validations=(), confirmed=(), timeline=(), iteration_files=None)`. It writes `job.json` via `JobStore.write_spec` (copy the `make()` pattern in `tests/test_package.py`, with `HASH = "ab" * 32`), then `state.json`, `timeline.jsonl` and `iterations/NNNN/<name>`. It returns `(spec, state, store)`. The baseline files are `{"mod.rs": "line a\nline b\nline c\n"}`. Every timeline `ts` in the fixture is around `1_000_000_000` (September 2001), so a date stamped with today's date is detectable. `tests/test_report.py` and `tests/test_cli.py` import it with `from tests.run_fixture import make_run, HASH`.
+  In a new `tests/run_fixture.py` (a helper module, not a test module), write `make_run(run_dir, hyps, nodes=(), best=None, start="mainnet", false_positives=(), validations=(), confirmed=(), timeline=(), iteration_files=None)`. It writes `job.json` via `JobStore.write_spec` (copy the `make()` pattern in `tests/test_package.py`, with `HASH = "ab" * 32`), then `state.json`, `timeline.jsonl` and `iterations/NNNN/<name>`. `best=<id>` builds a `Candidate` for that iteration whose files are `iteration_files[id]` (also written to `iterations/NNNN/`), with training and held-out `NonceResult`s shaped like `make()`'s so `bundle_delta` works; `best=None` leaves `state.best` unset. It returns `(spec, state, store)`. The baseline files are `{"mod.rs": "line a\nline b\nline c\n"}`. Every timeline `ts` in the fixture is around `1_000_000_000` (September 2001), so a date stamped with today's date is detectable. `tests/test_report.py` and `tests/test_cli.py` import it with `from tests.run_fixture import make_run, HASH`.
 
   Tests, each with the mutation it catches:
 
@@ -146,8 +150,38 @@ Rules the code must follow (from the spec, sections "Nodes" and "Node sources an
   def test_axis_few_points_never_cut():
       assert axis_for([0.01, -5.0]).cut_lo is None
 
+  def test_axis_cut_needs_eight_scores():
+      # mutation: `< 8` changed to `<= 8` or `< 7`
+      assert axis_for([0.02 + i * 0.001 for i in range(6)] + [-1.0]).cut_lo is None   # 7 scores
+      assert axis_for([0.02 + i * 0.001 for i in range(7)] + [-1.0]).cut_lo is not None  # 8 scores
+
+  def test_truncate_counts_lines_left_out():
+      # mutation: counting the kept lines, or the whole text
+      assert truncate("a\nb\nc\nd\n", 4, "({n})") == "a\nb\n(2)"
+
+  def test_parent_files_not_saved(tmp_path):
+      # node 2 (parent 0) has hypothesis.json only; node 3 (parent 2) has mod.rs
+      # mutation: treating a missing parent as empty files, which gives a whole-file diff
+      assert node_diffs(...)[3] == "parent's files not saved"
+
+  def test_template_root_is_template_not_baseline(tmp_path):
+      # start="template", challenge/template.rs = "fn solve() {}\n", baseline mod.rs as usual;
+      # iterations/0001/mod.rs = "fn solve() { 1 }\n", parent 0
+      # mutation: using state.baseline.files as the root of a template job
+      d = node_diffs(...)
+      assert "-fn solve() {}" in d[1] and "template/mod.rs" in d[1] and "line a" not in d[1]
+      # with challenge/template.rs absent, the root has no files
+      assert node_diffs(...)[1] == "parent's files not saved"
+
+  def test_in_flight_iteration_has_no_node(tmp_path):              # Review Focus 1
+      # records 1-2, pending_job {"purpose": 3, ...}, iterations/0003/ exists and is empty
+      # mutation: building nodes from iteration directories instead of records
+      assert [n.id for n in report_nodes(spec, st)] == [1, 2]
+
   def test_holdout_points_from_timeline():
-      rows = [{"kind": "false_positive", "iteration": 4, "holdout": {"mean_rel_delta": -0.01}},
+      # mutation: not filtering on kind (the "scored" row below)
+      rows = [{"kind": "scored", "iteration": 2, "holdout": {"mean_rel_delta": 0.5}},
+              {"kind": "false_positive", "iteration": 4, "holdout": {"mean_rel_delta": -0.01}},
               {"kind": "false_positive", "iteration": 5, "error": "held-out not scored (x)"},
               {"kind": "won", "iteration": 7, "holdout": {"mean_rel_delta": 0.02}}]
       assert holdout_points(rows) == {4: -0.01, 7: 0.02}
@@ -246,6 +280,12 @@ Decisions the tests depend on:
       assert "cut" in cls["11"].split() and "cut" not in cls["5"].split()
       assert {"k-failed", "strip"} <= set(cls["12"].split()) and "strip" not in cls["5"].split()
 
+  def test_one_star_rendered(tmp_path):
+      # stored nodes 2 and 5 both best=True, state.best.iteration == 5
+      # mutation: rendering the star from node.best / former_best
+      cls = dict(re.findall(r'<g data-node="(\d+)" class="([^"]*)"', rendered(...)))
+      assert [i for i, c in cls.items() if "k-best" in c.split()] == ["5"]
+
   def test_unrecorded_parent_has_no_edge(tmp_path):               # Review Focus 4
       # nodes 1 (against 0), 2 (against 1), 3 (against 99, no node 99)
       # mutation: drawing edges to unrecorded parents, or drawing none at all
@@ -268,7 +308,7 @@ Decisions the tests depend on:
 
   def test_200_node_report_under_2mb(tmp_path):
       # 200 hypotheses, iterations/NNNN/mod.rs with ~50 KB of changes vs parent each,
-      # best = 200 with 300 KB of changes vs baseline
+      # best = 200 with 300 KB of changes vs baseline; lines ~40 characters, like Rust source
       # mutation: removing either cap
       html = rendered(...)
       assert len(html.encode("utf-8")) < 2_000_000
@@ -280,12 +320,12 @@ Decisions the tests depend on:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-  Run: `.venv/bin/python -m pytest tests/test_report.py -q -k "drawn or urls or hash or escaped or diamond or strip or unrecorded or deterministic or branches or 2mb"`
+  Run: `.venv/bin/python -m pytest tests/test_report.py -q -k "drawn or urls or hash or escaped or diamond or strip or star or unrecorded or deterministic or branches or 2mb"`
   Expected: `ImportError: cannot import name 'render_report'`.
 
 - [ ] **Step 3: Implement `render_report` in `talos/report.py`**
 
-  Build the SVG as strings from `axis_for` over the plotted scores. Map x from iteration `0..max id` and y from `[axis.lo, axis.hi]` into a `viewBox` with the failure strip below the x-axis. Draw the best-so-far step line from the first scored node: the running max of `score` in id order, over nodes whose kind is not `demoted` or `false_positive`. Colours come from CSS custom properties per `k-<kind>`, with a `prefers-color-scheme: dark` block.
+  Build the SVG as strings from `axis_for` over the plotted scores. Map x from iteration `0..max id` and y from `[axis.lo, axis.hi]` into a `viewBox` with the failure strip below the x-axis. Draw the best-so-far step line from the first node that became the job's best: the running max of `score` in id order over nodes with `outcome in ("improved", "won")` (demoted nodes have outcome `failed:validation`, so they drop out). Do not take the max over every scored node: in a native job a rejected node's native score can exceed the best's metered score, and the line would rise above the star. Colours come from CSS custom properties per `k-<kind>`, with a `prefers-color-scheme: dark` block.
 
 - [ ] **Step 4: Run all report tests to verify they pass**
 
@@ -346,6 +386,12 @@ Rules:
       build_package(spec, st, store)
       assert "report.html" in zipfile.ZipFile(tmp_path / "package.zip").namelist()
 
+  def test_package_zip_holds_report_with_best_but_no_baseline(tmp_path):
+      # build_package's second branch; mutation: no writer call before its make_archive
+      spec, st, store = make(tmp_path); st.baseline = None
+      build_package(spec, st, store)
+      assert "report.html" in zipfile.ZipFile(tmp_path / "package.zip").namelist()
+
   def test_report_failure_does_not_stop_package(tmp_path, monkeypatch, capsys):
       spec, st, store = make(tmp_path)
       monkeypatch.setattr("talos.report.render_report", lambda *a: 1 / 0)
@@ -384,7 +430,7 @@ Rules:
 
 - [ ] **Step 4: Run the full check**
 
-  Run: `make check PYTHON=.venv/bin/python > /tmp/claude-1000/-home-fibonadithya-TIG-Talos/2a5dd1b3-6d32-4d01-9a6b-64a5dc5d0075/scratchpad/check.log 2>&1; tail -20 /tmp/claude-1000/-home-fibonadithya-TIG-Talos/2a5dd1b3-6d32-4d01-9a6b-64a5dc5d0075/scratchpad/check.log`. This is a full suite, so run it in the background with a generous timeout.
+  Run: `make check PYTHON=.venv/bin/python > <scratchpad>/check.log 2>&1; tail -20 <scratchpad>/check.log`. This is a full suite, so run it in the background with a generous timeout.
   Expected: ruff clean, pytest `N passed` with no failures, agentify check clean. Report the change in test count from Task 1 Step 0.
 
 - [ ] **Step 5: Mutation-check**
@@ -409,11 +455,11 @@ This task is for the orchestrator, not a subagent. Nothing is committed unless a
 
 - [ ] **Step 1: Generate a report for each local run**
 
-  Run `for j in $(ls runs); do .venv/bin/python -m talos.cli report "$j"; done`. All 7 should print `Report:`. Note that `20260925-103339-hypergraph` has no `package/` until now.
+  Run `.venv/bin/python -m talos.cli report "$j"` for each job in `runs/` except one that is still running (check `ps`; on 2026-10-26 `20261026-120733-job_scheduling` was). There were 8 runs on 2026-10-26; each one run should print `Report:`. Note that `20260925-103339-hypergraph` has no `package/` until now.
 
 - [ ] **Step 2: Render screenshots**
 
-  Run `firefox --headless --no-remote --profile "$(mktemp -d)" --screenshot <scratchpad>/<job>.png --window-size=1400,2400 file://$PWD/runs/<job>/package/report.html` for the 8-iteration knapsack run (20260923-092930) and one hypergraph run (no baseline). Then do the same for a synthetic 200-node anneal fixture with two chains, a template start and outliers, written to the scratchpad by the Task 2 test helper.
+  Run `firefox --headless --no-remote --profile "$(mktemp -d)" --screenshot <scratchpad>/<job>.png --window-size=1400,2400 file://$PWD/runs/<job>/package/report.html` for the 7-iteration knapsack run (20260923-092930) and one hypergraph run (no baseline). Then do the same for a synthetic 200-node anneal fixture with two chains, a template start and outliers, written to the scratchpad by the Task 2 test helper.
 
 - [ ] **Step 3: Look at each screenshot**
 
@@ -422,3 +468,13 @@ This task is for the orchestrator, not a subagent. Nothing is committed unless a
 - [ ] **Step 4: Check interactivity**
 
   Open the knapsack report in a real browser and click a node to see its panel and diff. Report the results to the user with the screenshots.
+
+## Audit (2026-10-26)
+
+Audited with the audit-plan checklist before implementation. Blocking fixes applied above: the
+`package` ↔ `report` circular import, `truncate`'s `{n}` interface, the untested template-start
+root (and its truncation-note path), diff colouring moved to the DOM to keep the 2 MB bound, and a
+rendered one-star test. Minor fixes: the 7/8 axis boundary test, the kind filter in
+`holdout_points`, the "parent's files not saved" test, the third `build_package` branch, the
+best-diff note, the step-line rule, the in-flight run shape, and the Task 4 run counts.
+Left as is: no former-best ring for runs without stored nodes (the spec makes the ring optional).
