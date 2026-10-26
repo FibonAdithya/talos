@@ -33,7 +33,7 @@ from talos.challenges import (CHALLENGES, DEFAULT_CHALLENGE, DEV_IMAGE_TAG, MONO
                               TEMPLATE_START_FILES,
                               c3_hardware_options, c3_hardware_class,
                               c3_image, hardware_options, hardware_class, local_hardware_class,
-                              status_warning)
+                              status_text, status_warning)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.diagnostics import first_error
@@ -47,6 +47,7 @@ from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provi
 from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
 from talos.prompts import WHOLE_FILE_FORMAT
+from talos.wizard import ask_choice
 from talos.state import JobSpec, JobState, JobStore, user_tacit
 from talos.types import Usage
 
@@ -287,6 +288,30 @@ def _model_prompt(kind: str) -> tuple[str, str | None]:
     return "Model", default
 
 
+BACKEND_OPTIONS = (
+    ("modal", "your Modal account; billed per container second"),
+    ("c3", "your C3 account; about 12 min fixed overhead per iteration"),
+    ("local", "Docker on this machine; no compute charge, slow builds"),
+)
+PROVIDER_EXPLANATIONS = {
+    "anthropic": "Anthropic API; needs an API key",
+    "openai": "OpenAI API; needs an API key",
+    "google": "Google Gemini API; needs an API key",
+    "openrouter": "OpenRouter API; needs an API key",
+    "custom": "any OpenAI-compatible endpoint; needs a base URL and an API key",
+    "claude-cli": "your local `claude` CLI login; no API key",
+    "codex-cli": "your local `codex` CLI login; no API key",
+}
+MODE_OPTIONS = (
+    ("single-shot", "one LLM call per edit"),
+    ("agentic", "the CLI agent edits and compiles in a sandbox; roughly 5-20x the tokens"),
+)
+HYPERPARAMETER_OPTIONS = (
+    ("mainnet", "per-track values from the baseline's best mainnet benchmark"),
+    ("none", "run without hyperparameters"),
+)
+
+
 def _track_arg(answer: str | None) -> str | None:
     """The focus track a flag or wizard answer names; None (every track) for no answer or
     "all", which is how the wizard prompt and the README spell the default."""
@@ -315,16 +340,15 @@ def _mainnet_hyperparameters(api, challenge: str, info) -> tuple[dict | None, di
 
 def cmd_setup(args, ask) -> int:
     root = Path.cwd()
-    backend = ask(f"Compute backend ({' or '.join(BACKENDS)})", "modal")
-    if backend not in BACKENDS:
-        print(f"unknown backend {backend!r}", file=sys.stderr)
-        return 2
-    kinds = ", ".join(k for k in KINDS if k != "fake")
-    kind = ask(f"Provider ({kinds})", "anthropic")
-    # "fake" is the in-process test double: it is in KINDS, but setting it up would write a
-    # config whose runs never touch an LLM at all.
-    if kind not in KINDS or kind == "fake":
-        print(f"unknown provider {kind!r}", file=sys.stderr)
+    try:
+        backend = ask_choice(ask, "Compute backend", BACKEND_OPTIONS, "modal")
+        # "fake" is the in-process test double: it is in KINDS, but setting it up would write a
+        # config whose runs never touch an LLM at all.
+        kind = ask_choice(ask, "Provider",
+                          [(k, PROVIDER_EXPLANATIONS.get(k, "")) for k in KINDS if k != "fake"],
+                          "anthropic")
+    except ConfigError as e:
+        print(str(e), file=sys.stderr)
         return 2
     model = ask(*_model_prompt(kind))
     api_base = ask("API base URL") if kind == "custom" else None
@@ -333,7 +357,11 @@ def cmd_setup(args, ask) -> int:
         api_key = ask("API key", secret=True)
     mode = "single-shot"
     if kind in CLI_PROVIDERS:
-        mode = ask("Mode (single-shot or agentic)", "single-shot")
+        try:
+            mode = ask_choice(ask, "Mode", MODE_OPTIONS, "single-shot")
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 2
     token_id = token_secret = c3_api_key = None
     if backend == "c3":
         c3_api_key = ask("C3 API key (blank to use your `c3 login` session)", secret=True) or None
@@ -415,11 +443,11 @@ def _ask_number(ask, prompt: str, default: str, cast=float, tries: int = 3):
     raise ConfigError(f"{prompt}: no number given after {tries} tries")
 
 
-def _challenge_prompt() -> str:
-    """spec §5.2: GPU challenges are marked, so the expensive choices are visible before one
-    is picked."""
-    names = [f"{name} (GPU)" if cs.is_gpu else name for name, cs in CHALLENGES.items()]
-    return f"Challenge ({', '.join(names)})"
+def _challenge_options() -> list[tuple[str, str]]:
+    """spec §5.2: GPU challenges are marked, and each shows its status, so the expensive and
+    the untested choices are visible before one is picked."""
+    return [(name, f"{'GPU' if cs.is_gpu else 'CPU'}, {status_text(cs)}")
+            for name, cs in CHALLENGES.items()]
 
 
 def _codex_refused(cfg: Config, start: str = "mainnet") -> bool:
@@ -908,8 +936,13 @@ def cmd_run(args, ask) -> int:
         return 2
     if _codex_refused(cfg, start):
         return 2
-    challenge = (args.challenge
-                 or ask(_challenge_prompt(), DEFAULT_CHALLENGE).strip() or DEFAULT_CHALLENGE)
+    challenge = args.challenge
+    if not challenge:
+        try:
+            challenge = ask_choice(ask, "Challenge", _challenge_options(), DEFAULT_CHALLENGE)
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 2
     if challenge not in CHALLENGES:
         print(f"unknown challenge {challenge!r}", file=sys.stderr)
         return 2
@@ -962,10 +995,10 @@ def cmd_run(args, ask) -> int:
         return 2
     # spec §5.2 step 4: mode for CLI providers, with the cost warning before the prompt.
     if not args.yes and args.mode is None and cfg.provider in CLI_PROVIDERS:
-        print("agentic mode uses roughly 5-20x the tokens of single-shot")
-        mode = ask("Mode (single-shot or agentic)", cfg.mode)
-        if mode not in ("single-shot", "agentic"):
-            print(f"unknown mode {mode!r}", file=sys.stderr)
+        try:
+            mode = ask_choice(ask, "Mode", MODE_OPTIONS, cfg.mode)
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
             return 2
         cfg = replace(cfg, mode=mode)
         if _codex_refused(cfg, start):
@@ -998,21 +1031,27 @@ def cmd_run(args, ask) -> int:
             return 1
     track = _track_arg(args.track)
     if args.track is None and not args.yes:
-        track = _track_arg(ask(f"Track to optimise (all, or one of: {', '.join(info.tracks)})",
-                               "all"))
+        try:
+            track = _track_arg(ask_choice(
+                ask, "Track to optimise",
+                [("all", "every active track")] + [(t, "") for t in info.tracks], "all"))
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 2
     if track is not None and track not in info.tracks:
         print(f"unknown track {track!r} for {challenge}; active tracks: "
               f"{', '.join(info.tracks)}", file=sys.stderr)
         return 2
     choice = args.hyperparameters
     if choice is None:
-        # A blank answer is the default, as `_track_arg` treats a blank track answer: the wizard
-        # test's raw `ask` returns "" rather than the default.
-        choice = ("mainnet" if args.yes
-                  else ask("Hyperparameters (mainnet or none)", "mainnet").strip() or "mainnet")
-    if choice not in ("mainnet", "none"):
-        print(f"unknown hyperparameters choice {choice!r}; use mainnet or none", file=sys.stderr)
-        return 2
+        if args.yes:
+            choice = "mainnet"
+        else:
+            try:
+                choice = ask_choice(ask, "Hyperparameters", HYPERPARAMETER_OPTIONS, "mainnet")
+            except ConfigError as e:
+                print(str(e), file=sys.stderr)
+                return 2
     algorithm = hyperparameters = hp_source = None
     if choice == "mainnet":
         api = FAKE_MAINNET if cfg.provider == "fake" else mainnet_api

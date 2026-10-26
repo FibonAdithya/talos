@@ -113,8 +113,8 @@ def test_setup_rejects_the_fake_provider(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "validate_provider", lambda p: None)
     monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
-    assert cli.main(["setup"], ask=scripted(["", "fake"])) == 2
-    assert "unknown provider 'fake'" in capsys.readouterr().err
+    assert cli.main(["setup"], ask=scripted(["", "fake", "fake", "fake"])) == 2
+    assert "not one of the choices: 'fake'" in capsys.readouterr().err
     assert not (tmp_path / "talos.config.json").exists()
 
 
@@ -142,16 +142,17 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     assert cli.main(["run"], ask=ask) == 0
     captured = capsys.readouterr()
     assert "not a number: 'abc'" in captured.err
-    assert "hypergraph (GPU)" in prompts[0] and "L40S" not in prompts[0]
+    assert "hypergraph" in prompts[0] and "GPU, tested" in prompts[0]
+    assert "job_scheduling" in prompts[0] and "known broken (#36)" in prompts[0]
+    assert "L40S" not in prompts[0]
     assert "$" not in prompts[0] and "estimated" not in prompts[0]
-    assert "knapsack" in prompts[0] and "knapsack (GPU" not in prompts[0]
+    assert "CPU, tested" in prompts[0]
     assert prompts.count("Iteration budget") == 2  # the typo was re-asked, not fatal
-    assert prompts[-4] == "Mode (single-shot or agentic)"
-    assert prompts[-3] == "Track to optimise (all, or one of: n=1)"
-    assert prompts[-2] == "Hyperparameters (mainnet or none)"
+    assert prompts[-4].startswith("Mode:\n") and "roughly 5-20x the tokens" in prompts[-4]
+    assert prompts[-3].startswith("Track to optimise:\n") and "n=1" in prompts[-3]
+    assert prompts[-2].startswith("Hyperparameters:\n")
     assert prompts[-1] == "Nonces per track"
     assert seen["spec"].track is None
-    assert "agentic mode uses roughly 5-20x the tokens of single-shot" in captured.out
     assert seen["spec"].budget.iterations == 3 and seen["spec"].budget.hours == 4.0
     assert seen["spec"].budget.compute_usd == 5.0
     assert seen["cfg"].mode == "agentic" and seen["spec"].mode == "agentic"
@@ -1240,8 +1241,8 @@ def test_setup_rejects_an_unknown_backend(tmp_path, monkeypatch, capsys):
     # mutation: accepting any answer writes a config whose first run cannot pick a bench at all
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: None)
-    assert cli.main(["setup"], ask=scripted(["aws"])) == 2
-    assert "unknown backend 'aws'" in capsys.readouterr().err
+    assert cli.main(["setup"], ask=scripted(["aws", "aws", "aws"])) == 2
+    assert "not one of the choices: 'aws'" in capsys.readouterr().err
     assert not (tmp_path / "talos.config.json").exists()
 
 
@@ -1619,8 +1620,8 @@ def test_wizard_hyperparameters_answer_none_and_a_bad_answer(tmp_path, monkeypat
     # mutation: ignoring the wizard answer applies mainnet values the user declined
     assert seen["spec"].hyperparameters is None and seen["spec"].baseline_algorithm is None
     # mutation: accepting any answer starts a job whose choice nobody made
-    assert cli.main(["run"], ask=scripted(wizard + ["maybe"])) == 2
-    assert "unknown hyperparameters choice 'maybe'" in capsys.readouterr().err
+    assert cli.main(["run"], ask=scripted(wizard + ["maybe", "maybe", "maybe"])) == 2
+    assert "not one of the choices: 'maybe'" in capsys.readouterr().err
 
 
 def test_resume_refuses_a_hyperparameters_flag(tmp_path, monkeypatch, capsys):
@@ -1748,7 +1749,7 @@ def test_setup_modal_does_not_ask_for_a_c3_key(tmp_path, monkeypatch):
     ask, prompts = _recording(["", "anthropic", "", "sk-test", "ak-1", "as-1"])
     assert cli.main(["setup"], ask=ask) == 0
     # mutation: asking on every backend puts a C3 prompt in a Modal user's wizard
-    assert not any("C3" in p for p, _ in prompts)
+    assert not any("C3 API key" in p for p, _ in prompts)
 
 
 def test_execute_job_gives_the_c3_key_to_the_bench_and_the_sandbox(tmp_path, monkeypatch):
