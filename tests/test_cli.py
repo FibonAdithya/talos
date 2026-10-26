@@ -700,6 +700,17 @@ def test_unpriced_reason_names_the_cause():
     assert cli.unpriced_reason("anthropic", "claude-opus-5") is None
 
 
+def test_run_summary_labels_codex_spend_not_tracked():
+    # README says codex spend "is shown as `not tracked`"; the end-of-run summary must agree
+    # with the status line. mutation: labelling every unmeasured run "unpriced" in the summary
+    assert cli._llm_spend_text("codex-cli", "gpt-5.5", 0.0, why=True) == \
+        "not tracked (codex-cli does not report what its calls cost)"
+    assert cli._llm_spend_text("openai", "gpt-5", 0.0, why=True) == \
+        "unpriced (model gpt-5 has no price-table entry)"
+    assert cli._llm_spend_text("claude-cli", "claude-opus-5", 1.234, why=True) == "$1.23"
+    assert cli._llm_spend_text("codex-cli", "gpt-5.5", 0.0) == "not tracked"
+
+
 def test_event_line_for_an_uncounted_session():
     assert cli._event_line("llm_cost_unknown", {"reason": "claude timed out after 1800s"}) == \
         "LLM cost of this agent session not counted: claude timed out after 1800s"

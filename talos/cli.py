@@ -482,6 +482,15 @@ def unpriced(provider: str, model: str) -> bool:
     return unpriced_reason(provider, model) is not None
 
 
+def _llm_spend_text(provider: str, model: str, llm_usd: float, why: bool = False) -> str:
+    """The LLM spend as the status line (short) and the run summary (`why=True`) show it."""
+    reason = unpriced_reason(provider, model)
+    if reason is None:
+        return f"${llm_usd:.2f}"
+    label = "not tracked" if provider == "codex-cli" else "unpriced"
+    return f"{label} ({reason})" if why else label
+
+
 def _status_line(spec: JobSpec, state: JobState, now: float) -> str:
     best = f"{state.best.delta['mean_rel_delta']:+.3%}" if state.best else "n/a"
     hours = effective_budget(spec.budget, state.budget_extensions).hours
@@ -489,12 +498,7 @@ def _status_line(spec: JobSpec, state: JobState, now: float) -> str:
         left = "∞"
     else:
         left = f"{max(0.0, hours - (now - state.spend.started_at) / 3600):.1f}h"
-    if spec.provider == "codex-cli":
-        llm = "not tracked"
-    elif unpriced(spec.provider, spec.model):
-        llm = "unpriced"
-    else:
-        llm = f"${state.spend.llm_usd:.2f}"
+    llm = _llm_spend_text(spec.provider, spec.model, state.spend.llm_usd)
     return f"best {best} | llm {llm} | compute ≈${state.spend.compute_usd:.2f} | {left} left"
 
 
@@ -798,8 +802,7 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
         print(f"Best delta vs baseline: {final.best.delta['mean_rel_delta']:+.3%}")
     else:
         print("Best delta vs baseline: n/a (no candidate)")
-    reason = unpriced_reason(spec.provider, spec.model)
-    llm = f"unpriced ({reason})" if reason else f"${final.spend.llm_usd:.2f}"
+    llm = _llm_spend_text(spec.provider, spec.model, final.spend.llm_usd, why=True)
     print(f"LLM spend: {llm}   Compute spend (estimated): ${final.spend.compute_usd:.2f}")
     print(f"Package: {pkg}")
     _print_submission_hint(final, pkg)
