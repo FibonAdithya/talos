@@ -665,7 +665,7 @@ The package directory holds:
 | lineage.json, lineage.md | The search tree: every iteration's node and each chain's state (lineage.json), and the path from the root to the best node with a per-design-family table (lineage.md). Written when the job recorded any node. |
 | `scores.md` | Per-nonce tables for baseline and candidate on training and held-out nonces. A focused job (`--track`) adds a regression-guard table for the other tracks. |
 | `hypotheses.md` | The full hypothesis log with outcomes. |
-| `report.html` | The search on one page: a plot of every iteration with its lineage, each node's diff against its parent, per-track tables and the hypothesis log. Open it in a browser; it loads nothing from the network. Written on every package, including one with no candidate; `talos report` rewrites it. |
+| `report.html` | The search on one page: a plot of every iteration with its lineage, each node's diff against its parent, per-track tables and the hypothesis log. Open it in a browser; it loads nothing from the network. Written on every package, including one with no candidate. If the page fails to render, the package prints `report.html not written: …` and is written without it; `talos report` rewrites it. |
 | `evidence_draft.md` | A partly filled-in TIG advance-evidence template. |
 | `hyperparameters.json` | The per-track hyperparameters, when the job used them. Not written for a `--start template` job, whose candidate ran without them. |
 | `README.md` | The submission steps, with a Hyperparameters section when the job used them. |
