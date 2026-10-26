@@ -1265,8 +1265,10 @@ def test_compile_rejects_an_unknown_challenge(tmp_path, monkeypatch, capsys):
     (tmp_path / "algorithm" / "mod.rs").write_text("fn solve() {}\n")
     monkeypatch.setattr(cli, "make_bench",
                         lambda *a, **k: _refuse_bench("bench built for an unknown challenge"))
-    assert cli.main(["compile", "--challenge", "knapsak"]) == 2
-    assert "unknown challenge 'knapsak'" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        cli.main(["compile", "--challenge", "knapsak"])
+    assert e.value.code == 2
+    assert "invalid choice: 'knapsak'" in capsys.readouterr().err
 
 
 def test_compile_refuses_an_unknown_backend(tmp_path, monkeypatch, capsys):
@@ -3152,3 +3154,39 @@ def test_run_warns_before_an_untested_challenge(tmp_path, monkeypatch, capsys):
     assert "warning: vehicle_routing has never been run end to end with Talos" in err
     assert cli.main([*base, "--challenge", "knapsack"]) == 0
     assert "warning: knapsack" not in capsys.readouterr().err
+
+
+def _walk(parser):
+    import argparse
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            helped = {a.dest for a in action._choices_actions if a.help}
+            for name, sub in action.choices.items():
+                yield f"subcommand {name}", name in helped
+                yield from _walk(sub)
+        elif action.help is not argparse.SUPPRESS:
+            yield f"{parser.prog} {'/'.join(action.option_strings) or action.dest}", bool(action.help)
+
+
+def test_every_subcommand_and_flag_has_help():
+    # mutation: deleting the help= of any one flag or subcommand fails this
+    missing = [where for where, ok in _walk(cli.build_parser()) if not ok]
+    assert missing == []
+
+
+def test_run_help_groups_flags_and_shows_examples(capsys):
+    # mutation: dropping the argument groups or the epilog fails this
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+    out = capsys.readouterr().out
+    for title in ("what to research", "budget", "search", "resume"):
+        assert title + ":" in out
+    assert "Examples:" in out
+    assert "--add-iterations" in out.split("Examples:")[1]
+
+
+def test_challenge_flag_lists_its_choices(capsys):
+    # mutation: dropping choices= hides the valid values
+    with pytest.raises(SystemExit):
+        cli.main(["compile", "--help"])
+    assert "{satisfiability,vehicle_routing,knapsack," in capsys.readouterr().out

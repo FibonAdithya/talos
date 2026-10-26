@@ -1241,60 +1241,107 @@ def cmd_check_updates(args, ask) -> int:
     return 1 if any(update is None for update in updates) else 0
 
 
-def main(argv=None, ask=default_ask) -> int:
-    p = argparse.ArgumentParser(prog="talos")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("setup")
-    r = sub.add_parser("run")
-    r.add_argument("--challenge")
-    r.add_argument("--direction")
-    r.add_argument("--direction-file")
-    r.add_argument("--track", help="one active track to optimise, or all (the default)")
-    r.add_argument("--nonces", type=int,
-                   help=f"nonces per track in each of the training and held-out sets "
-                        f"(default {NONCES_PER_TRACK})")
-    r.add_argument("--hyperparameters", choices=["mainnet", "none"],
-                   help="per-track hyperparameters from the baseline algorithm's best mainnet "
-                        "benchmark (mainnet, the default) or none")
-    r.add_argument("--mode", choices=["single-shot", "agentic"])
-    r.add_argument("--scoring", choices=["metered", "native"],
-                   help="research scoring: native (fast, validated on metered; the default) or "
-                        "metered (TIG's runtime for every candidate)")
-    r.add_argument("--start", choices=["mainnet", "template"],
-                   help="start from mainnet's top algorithm (the default) or from the empty "
-                        "template")
-    r.add_argument("--search", choices=["greedy", "anneal"],
-                   help="keep only improvements (greedy, the default) or anneal")
-    r.add_argument("--chains", type=int, help="independent search chains (default 1)")
-    r.add_argument("--budget-usd", type=float)
-    r.add_argument("--budget-hours", type=float)
-    r.add_argument("--budget-iterations", type=int)
-    r.add_argument("--budget-compute-usd", type=float)
-    r.add_argument("--resume")
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="talos",
+        description="Talos researches better algorithms for a TIG challenge: it asks an LLM for "
+                    "edits, scores each candidate on TIG's benchmark and keeps the "
+                    "improvements.")
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
+    sub.add_parser("setup", help="choose a backend and LLM provider and save the settings",
+                   description="Interactive setup: pick a compute backend (modal, c3 or local) "
+                               "and an LLM provider, then save them to the Talos config.")
+    r = sub.add_parser(
+        "run", help="research a challenge, or resume a job",
+        description="Start a research job on one challenge, or resume an earlier job with "
+                    "--resume. Options left out are asked for interactively.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+               "  talos run --challenge knapsack --direction \"...\" --budget-usd 20 "
+               "--budget-hours 4\n"
+               "  talos run --resume <job_id> --add-iterations 10\n"
+               "  talos run --challenge knapsack --direction-file notes.md "
+               "--budget-iterations 30 --yes\n")
+    what = r.add_argument_group("what to research")
+    what.add_argument("--challenge", choices=list(CHALLENGES), help="challenge to research")
+    what.add_argument("--direction", help="what to try, in your own words")
+    what.add_argument("--direction-file", help="read the direction from this file")
+    what.add_argument("--track", help="one active track to optimise, or all (the default)")
+    what.add_argument("--start", choices=["mainnet", "template"],
+                      help="start from mainnet's top algorithm (the default) or from the empty "
+                           "template")
+    what.add_argument("--hyperparameters", choices=["mainnet", "none"],
+                      help="per-track hyperparameters from the baseline algorithm's best "
+                           "mainnet benchmark (mainnet, the default) or none")
+    budget = r.add_argument_group("budget")
+    budget.add_argument("--budget-usd", type=float, help="cap on total spend in USD")
+    budget.add_argument("--budget-hours", type=float, help="cap on wall-clock hours")
+    budget.add_argument("--budget-iterations", type=int, help="cap on research iterations")
+    budget.add_argument("--budget-compute-usd", type=float,
+                        help="cap on backend compute spend in USD")
+    search = r.add_argument_group("search")
+    search.add_argument("--mode", choices=["single-shot", "agentic"],
+                        help="how the LLM edits: one reply per iteration (single-shot) or an "
+                             "agent loop (agentic)")
+    search.add_argument("--scoring", choices=["metered", "native"],
+                        help="research scoring: native (fast, validated on metered; the "
+                             "default) or metered (TIG's runtime for every candidate)")
+    search.add_argument("--search", choices=["greedy", "anneal"],
+                        help="keep only improvements (greedy, the default) or anneal")
+    search.add_argument("--chains", type=int, help="independent search chains (default 1)")
+    search.add_argument("--nonces", type=int,
+                        help=f"nonces per track in each of the training and held-out sets "
+                             f"(default {NONCES_PER_TRACK})")
+    resume = r.add_argument_group("resume")
+    resume.add_argument("--resume", metavar="JOB_ID", help="resume this job from runs/")
     # Each adds to one cap of a resumed job's budget (talos/extend.py); refused without --resume.
-    r.add_argument("--add-iterations", type=int)
-    r.add_argument("--add-hours", type=float)
-    r.add_argument("--add-usd", type=float)
-    r.add_argument("--add-compute-usd", type=float)
-    r.add_argument("--yes", action="store_true")
+    resume.add_argument("--add-iterations", type=int,
+                        help="add this many iterations to the resumed job's cap")
+    resume.add_argument("--add-hours", type=float,
+                        help="add this many hours to the resumed job's cap")
+    resume.add_argument("--add-usd", type=float,
+                        help="add this many USD to the resumed job's spend cap")
+    resume.add_argument("--add-compute-usd", type=float,
+                        help="add this many USD to the resumed job's compute cap")
+    r.add_argument("--yes", action="store_true",
+                   help="skip every question and the confirmation; take defaults (compute cap "
+                        f"${DEFAULT_COMPUTE_USD:.0f} on hosted backends)")
     r.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)
-    c = sub.add_parser("compile")
-    c.add_argument("--challenge", required=True)
-    c.add_argument("--dir", default="algorithm")
-    c.add_argument("--backend", choices=list(BACKENDS))
+    c = sub.add_parser("compile", help="compile an algorithm directory on the backend",
+                       description="Compile a challenge algorithm and print the result. "
+                                   "Agents call this from inside a run.")
+    c.add_argument("--challenge", required=True, choices=list(CHALLENGES),
+                   help="challenge the algorithm belongs to")
+    c.add_argument("--dir", default="algorithm",
+                   help="directory holding mod.rs (default: algorithm)")
+    c.add_argument("--backend", choices=list(BACKENDS),
+                   help="compute backend (default: from the Talos config)")
     c.add_argument("--native", action="store_true",
                    help="build the unmetered talos-native runner, as a --scoring native job "
                         "scores it")
-    sub.add_parser("status")
+    sub.add_parser("status", help="list jobs under runs/ and their state",
+                   description="List the jobs under runs/ with their state, iteration count "
+                               "and spend.")
     rep = sub.add_parser("report", help="write runs/<job_id>/package/report.html from the run's "
-                                        "files")
-    rep.add_argument("job_id")
-    updates = sub.add_parser("check-updates", help="check GHCR for newer TIG dev images")
+                                        "files",
+                         description="Write runs/<job_id>/package/report.html from the files "
+                                     "of a finished or interrupted run.")
+    rep.add_argument("job_id", help="job id, the directory name under runs/")
+    updates = sub.add_parser("check-updates", help="check GHCR for newer TIG dev images",
+                             description="Compare the configured TIG dev image tag with the "
+                                         "newest one published on GHCR.")
     updates.add_argument("--challenge", choices=list(CHALLENGES),
                          help="check one challenge (default: all)")
-    args = p.parse_args(argv)
-    return {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
-            "report": cmd_report, "check-updates": cmd_check_updates}[args.cmd](args, ask)
+    return p
+
+
+COMMANDS = {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
+            "report": cmd_report, "check-updates": cmd_check_updates}
+
+
+def main(argv=None, ask=default_ask) -> int:
+    args = build_parser().parse_args(argv)
+    return COMMANDS[args.cmd](args, ask)
 
 
 if __name__ == "__main__":
