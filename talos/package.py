@@ -4,6 +4,7 @@ from __future__ import annotations
 import difflib
 import json
 import shutil
+import sys
 from importlib import resources
 from pathlib import Path
 
@@ -49,31 +50,35 @@ def _diff(base: dict[str, str], cand: dict[str, str], label: str = "baseline") -
     return "".join(out)
 
 
-def scores_sections(spec: JobSpec, state: JobState) -> list[tuple[str, str]]:
-    """(heading, table) pairs for scores.md and the evidence appendix. Focused jobs get the
-    track's training and held-out tables plus a guard table for the other tracks; unfocused
-    jobs keep the two plain headings."""
+def score_pairs(spec: JobSpec, state: JobState
+                ) -> list[tuple[str, list[NonceResult], list[NonceResult]]]:
+    """(heading, baseline rows, candidate rows) per scores table. Focused jobs get the track's
+    training and held-out rows plus a guard pair for the other tracks; unfocused jobs keep the
+    two plain headings."""
     base, best = state.baseline, state.best
     training_sets, holdout_sets = focus_sets(spec.track, spec.training, spec.holdout)
     if spec.track is None:
-        out = [("Training nonces", scores_markdown(base.training, best.training))]
+        out = [("Training nonces", base.training, best.training)]
         if best.holdout:
-            out.append(("Held-out nonces", scores_markdown(base.holdout, best.holdout)))
+            out.append(("Held-out nonces", base.holdout, best.holdout))
         return out
     t = spec.track
-    out = [(f"Training nonces (track {t})",
-            scores_markdown(select(base.training, training_sets), best.training))]
+    out = [(f"Training nonces (track {t})", select(base.training, training_sets),
+            best.training)]
     if best.holdout:
         focus_ho = [s for s in holdout_sets if s.track == t]
         guards = [s for s in holdout_sets if s.track != t]
-        out.append((f"Held-out nonces (track {t})",
-                    scores_markdown(select(base.holdout, focus_ho),
-                                    select(best.holdout, focus_ho))))
+        out.append((f"Held-out nonces (track {t})", select(base.holdout, focus_ho),
+                    select(best.holdout, focus_ho)))
         if guards:
             out.append(("Regression guard (other tracks, training nonces)",
-                        scores_markdown(select(base.training, guards),
-                                        select(best.holdout, guards))))
+                        select(base.training, guards), select(best.holdout, guards)))
     return out
+
+
+def scores_sections(spec: JobSpec, state: JobState) -> list[tuple[str, str]]:
+    """(heading, table) pairs for scores.md and the evidence appendix."""
+    return [(h, scores_markdown(b, c)) for h, b, c in score_pairs(spec, state)]
 
 
 def evidence_draft(spec: JobSpec, state: JobState) -> str:
@@ -280,6 +285,18 @@ def write_submission(spec: JobSpec, files: dict[str, str], dest: Path) -> None:
                                     encoding="utf-8", newline="\n")
 
 
+def _write_report_safely(spec: JobSpec, state: JobState, store: JobStore) -> None:
+    """report.html is a view of the run; failing to write it must not cost the user the
+    package, so the error is reported and the zip is still written."""
+    try:
+        # Imported here, not at the top: talos.report imports this module.
+        from talos.report import write_report
+
+        write_report(store, spec, state)
+    except Exception as e:
+        print(f"report.html not written: {e}", file=sys.stderr)
+
+
 def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     pkg = store.run_dir / "package"
     if pkg.exists():
@@ -295,11 +312,13 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     if state.best is None:
         (pkg / "README.md").write_text(_readme_no_candidate(spec, state),
                                        encoding="utf-8", newline="\n")
+        _write_report_safely(spec, state, store)
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
     if state.baseline is None:
         (pkg / "README.md").write_text("# Talos hand-back\n\nNo candidate was produced.\n",
                                        encoding="utf-8", newline="\n")
+        _write_report_safely(spec, state, store)
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
     write_submission(spec, state.best.files, pkg / SUBMISSION_DIR)
@@ -326,5 +345,6 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     if spec.hyperparameters is not None and spec.start != "template":
         (pkg / "hyperparameters.json").write_text(json.dumps(spec.hyperparameters, indent=1),
                                                   encoding="utf-8", newline="\n")
+    _write_report_safely(spec, state, store)
     shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
     return pkg

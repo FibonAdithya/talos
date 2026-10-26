@@ -110,7 +110,8 @@ progress.
    (`talos/bench.py::_redact`), and the agentic worktree is deliberately
    placed outside `runs/` (`talos/agentic.py::prepare_worktree`). Tests grep
    the prompts and timeline (`tests/test_loop.py`), the hand-back package and
-   zip (`tests/test_package.py`) and the redacted bench output
+   zip (`tests/test_package.py`), the package's report.html
+   (`tests/test_report.py`) and the redacted bench output
    (`tests/test_bench.py`) for the hash. Nothing greps the agentic mode's
    copied transcript (`talos/agentic.py::_copy_transcript`) for it.
    With `--start template` the baseline's source never reaches the LLM either: the

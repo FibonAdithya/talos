@@ -3095,3 +3095,27 @@ def test_hard_killed_job_saves_its_extension_before_the_run_starts(tmp_path, mon
         cli.main(["run", "--resume", run_dir.name, "--add-iterations", "1"])
     st = json.loads((run_dir / "state.json").read_text())
     assert [e["add"]["iterations"] for e in st["budget_extensions"]] == [1]
+
+
+def test_talos_report_writes_and_prints_path(tmp_path, monkeypatch, capsys):
+    from tests.run_fixture import make_run
+    monkeypatch.chdir(tmp_path)
+    make_run(tmp_path / "runs" / "J", [{"iteration": 1, "against": 0, "mean_rel_delta": 0.01}])
+    assert cli.main(["report", "J"]) == 0
+    assert (tmp_path / "runs" / "J" / "package" / "report.html").is_file()
+    assert "report.html" in capsys.readouterr().out
+
+
+def test_talos_report_unknown_job_leaves_no_dir(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["report", "NOPE"]) == 1
+    assert not (tmp_path / "runs" / "NOPE").exists()
+    assert "no job NOPE" in capsys.readouterr().err
+
+
+def test_talos_report_job_without_state(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs" / "K").mkdir(parents=True)
+    assert cli.main(["report", "K"]) == 1
+    assert "has no state.json" in capsys.readouterr().err
+    assert list((tmp_path / "runs" / "K").iterdir()) == []
