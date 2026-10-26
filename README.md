@@ -590,9 +590,9 @@ One line per job under `runs/`:
 ```
 
 Status is one of `queued`, `measuring_baseline`, `researching`, `confirming`, `won`,
-`exhausted` (a budget ran out; resumable with `--add-*`), `cancelled` (Ctrl-C), `paused` (the compute backend was
-unreachable) or `failed` (the reason is in `state.json` and the last lines of
-`timeline.jsonl`).
+`exhausted` (a budget ran out; resumable with `--add-*`), `cancelled` (Ctrl-C), `paused`
+(the compute backend was unreachable) or `failed` (the reason is in `state.json` and the last
+lines of `timeline.jsonl`).
 
 ## Agentic mode
 
