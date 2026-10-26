@@ -131,7 +131,8 @@ Each iteration adds a node with its parent, chain, design family, title, outcome
 scores, metered score, whether it was accepted, and for an anneal decision the
 probability (empty when acceptance was automatic), draw and temperature. A reheat is a `reheat`
 timeline event and an anneal decision an `accept` event. The package writes the tree as
-lineage.json and lineage.md; a template job
+lineage.json and lineage.md, and draws it in report.html
+(`talos/report.py::render_report`); a template job
 writes `diff_vs_template.patch` and no `hyperparameters.json`
 (`talos/package.py::build_package`).
 

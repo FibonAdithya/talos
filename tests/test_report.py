@@ -354,3 +354,24 @@ def test_200_node_report_under_2mb(tmp_path):
     html = rendered(tmp_path, hyps, best=200, iteration_files=files)
     assert len(html.encode("utf-8")) < 2_000_000
     assert html.count("truncated (") == 201
+
+
+# ── write_report ─────────────────────────────────────────────────────
+
+
+def test_write_report_with_no_timeline(tmp_path):
+    from talos.report import write_report
+    _, _, store = make_run(tmp_path, _scored(3), best=2, timeline=None)
+    path = write_report(store)
+    assert path == tmp_path / "package" / "report.html"
+    text = path.read_text(encoding="utf-8")
+    assert "<th>Started</th><td>n/a</td>" in text and "<th>Elapsed</th><td>n/a</td>" in text
+    assert "data-holdout" not in text and 'data-node="3"' in text
+
+
+def test_write_report_reads_the_timeline(tmp_path):
+    from talos.report import write_report
+    _, _, store = make_run(tmp_path, _scored(3), best=2,
+                           timeline=[{"kind": "started"}, {"kind": "x"}, {"kind": "y"}])
+    text = write_report(store).read_text(encoding="utf-8")
+    assert "<th>Elapsed</th><td>0h 02m</td>" in text

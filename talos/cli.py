@@ -1174,6 +1174,23 @@ def cmd_status(args, ask) -> int:
     return 0
 
 
+def cmd_report(args, ask) -> int:
+    """Writes runs/<job_id>/package/report.html. Needs no credentials or config."""
+    run_dir = Path.cwd() / "runs" / args.job_id
+    # Checked before JobStore, whose constructor creates the directory.
+    if not run_dir.is_dir():
+        print(f"no job {args.job_id} under runs/", file=sys.stderr)
+        return 1
+    if not (run_dir / "state.json").is_file():
+        print(f"job {args.job_id} has no state.json", file=sys.stderr)
+        return 1
+    from talos.report import write_report
+
+    path = write_report(JobStore(run_dir))
+    print(f"Report: {path}")
+    return 0
+
+
 def recommend_image_update(challenge: str) -> None:
     """New-job advisory only. A registry outage must not prevent an otherwise valid run."""
     try:
@@ -1263,12 +1280,15 @@ def main(argv=None, ask=default_ask) -> int:
                    help="build the unmetered talos-native runner, as a --scoring native job "
                         "scores it")
     sub.add_parser("status")
+    rep = sub.add_parser("report", help="write runs/<job_id>/package/report.html from the run's "
+                                        "files")
+    rep.add_argument("job_id")
     updates = sub.add_parser("check-updates", help="check GHCR for newer TIG dev images")
     updates.add_argument("--challenge", choices=list(CHALLENGES),
                          help="check one challenge (default: all)")
     args = p.parse_args(argv)
     return {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
-            "check-updates": cmd_check_updates}[args.cmd](args, ask)
+            "report": cmd_report, "check-updates": cmd_check_updates}[args.cmd](args, ask)
 
 
 if __name__ == "__main__":

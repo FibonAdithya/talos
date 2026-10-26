@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from talos.package import _diff
-from talos.state import JobSpec, JobState
+from talos.state import JobSpec, JobState, JobStore
 
 KINDS = ("best", "false_positive", "demoted", "improved", "accepted", "rejected", "failed")
 
@@ -808,3 +808,18 @@ _JS = r"""
   }
 })();
 """
+
+
+def write_report(store: JobStore, spec: JobSpec | None = None,
+                 state: JobState | None = None) -> Path:
+    """Writes run_dir/package/report.html from the run's files and returns its path. Reads
+    job.json and state.json only when spec and state are not given."""
+    spec = spec if spec is not None else store.read_spec()
+    state = state if state is not None else store.load()
+    text = render_report(spec, state, read_timeline(store.run_dir / "timeline.jsonl"),
+                         run_sources(store.run_dir, spec, state))
+    pkg = store.run_dir / "package"
+    pkg.mkdir(exist_ok=True)
+    path = pkg / "report.html"
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return path

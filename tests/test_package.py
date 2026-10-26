@@ -93,7 +93,7 @@ def test_package_without_candidate_says_so(tmp_path):
     st.best = None
     pkg = build_package(spec, st, store)
     names = {p.name for p in pkg.iterdir()}
-    assert names == {"README.md"}
+    assert names == {"README.md", "report.html"}  # no submission, scores or patch
     text = (pkg / "README.md").read_text(encoding="utf-8")
     assert "No candidate" in text
     assert "scores.md" not in text
@@ -384,3 +384,33 @@ def test_score_pairs_match_scores_sections(tmp_path):
     spec, st, _ = make(tmp_path)
     assert [h for h, _, _ in score_pairs(spec, st)] == [h for h, _ in scores_sections(spec, st)]
     assert len(score_pairs(spec, st)) == 2  # training and held-out
+
+
+def test_package_zip_holds_report_with_best(tmp_path):
+    spec, st, store = make(tmp_path)
+    build_package(spec, st, store)
+    assert (tmp_path / "package" / "report.html").is_file()
+    assert "report.html" in zipfile.ZipFile(tmp_path / "package.zip").namelist()
+
+
+def test_package_zip_holds_report_with_no_candidate(tmp_path):
+    spec, st, store = make(tmp_path)
+    st.best = None
+    build_package(spec, st, store)
+    assert "report.html" in zipfile.ZipFile(tmp_path / "package.zip").namelist()
+
+
+def test_package_zip_holds_report_with_best_but_no_baseline(tmp_path):
+    spec, st, store = make(tmp_path)
+    st.baseline = None
+    build_package(spec, st, store)
+    assert "report.html" in zipfile.ZipFile(tmp_path / "package.zip").namelist()
+
+
+def test_report_failure_does_not_stop_package(tmp_path, monkeypatch, capsys):
+    spec, st, store = make(tmp_path)
+    monkeypatch.setattr("talos.report.render_report", lambda *a, **k: 1 / 0)
+    build_package(spec, st, store)
+    assert (tmp_path / "package.zip").is_file()
+    assert "report.html not written" in capsys.readouterr().err
+    assert "report.html" not in zipfile.ZipFile(tmp_path / "package.zip").namelist()

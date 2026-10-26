@@ -470,6 +470,7 @@ same instead of telling you to submit it.
 | `talos run` | Starts or resumes a research job and writes its package when it stops. |
 | `talos compile` | Compiles a directory of algorithm files on the configured backend and prints the compiler output. Scores nothing. |
 | `talos status` | Lists every job under `runs/` with its status, iteration and spend. |
+| `talos report JOB_ID` | Writes `runs/<job_id>/package/report.html`, a one-page view of the job's search, from the files already in the run directory. |
 | `talos check-updates` | Checks GHCR for newer published TIG dev image versions and prints upgrade guidance. |
 
 ### `talos setup`
@@ -595,6 +596,22 @@ Status is one of `queued`, `measuring_baseline`, `researching`, `confirming`, `w
 (the compute backend was unreachable) or `failed` (the reason is in `state.json` and the last
 lines of `timeline.jsonl`).
 
+### `talos report`
+
+```bash
+talos report 20260917-101006-knapsack
+```
+
+Writes `runs/<job_id>/package/report.html` and prints its path. The page is one file with no
+network access: a header (status, best delta, held-out result, spend, times, settings), a plot of
+every iteration's training delta against the mainnet baseline with lines from each node to its
+parent, a panel with any node's details and its diff against its parent, per-track tables for
+the best candidate, the best diff, and the hypothesis list. It is built only from files already in
+the run directory, so it works on old runs and on a job that is still running; it needs no
+credentials and writes nothing else. The package written when a job stops includes it too.
+Diffs are shortened to keep the page under about 2 MB; a shortened diff ends with the `diff -u`
+command that prints it in full.
+
 ## Agentic mode
 
 `--mode agentic` (CLI providers only) hands each iteration to a headless `claude` or `codex`
@@ -648,6 +665,7 @@ The package directory holds:
 | lineage.json, lineage.md | The search tree: every iteration's node and each chain's state (lineage.json), and the path from the root to the best node with a per-design-family table (lineage.md). Written when the job recorded any node. |
 | `scores.md` | Per-nonce tables for baseline and candidate on training and held-out nonces. A focused job (`--track`) adds a regression-guard table for the other tracks. |
 | `hypotheses.md` | The full hypothesis log with outcomes. |
+| `report.html` | The search on one page: a plot of every iteration with its lineage, each node's diff against its parent, per-track tables and the hypothesis log. Open it in a browser; it loads nothing from the network. Written on every package, including one with no candidate; `talos report` rewrites it. |
 | `evidence_draft.md` | A partly filled-in TIG advance-evidence template. |
 | `hyperparameters.json` | The per-track hyperparameters, when the job used them. Not written for a `--start template` job, whose candidate ran without them. |
 | `README.md` | The submission steps, with a Hyperparameters section when the job used them. |

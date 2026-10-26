@@ -4,6 +4,7 @@ from __future__ import annotations
 import difflib
 import json
 import shutil
+import sys
 from importlib import resources
 from pathlib import Path
 
@@ -284,6 +285,18 @@ def write_submission(spec: JobSpec, files: dict[str, str], dest: Path) -> None:
                                     encoding="utf-8", newline="\n")
 
 
+def _write_report_safely(spec: JobSpec, state: JobState, store: JobStore) -> None:
+    """report.html is a view of the run; failing to write it must not cost the user the
+    package, so the error is reported and the zip is still written."""
+    try:
+        # Imported here, not at the top: talos.report imports this module.
+        from talos.report import write_report
+
+        write_report(store, spec, state)
+    except Exception as e:
+        print(f"report.html not written: {e}", file=sys.stderr)
+
+
 def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     pkg = store.run_dir / "package"
     if pkg.exists():
@@ -299,11 +312,13 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     if state.best is None:
         (pkg / "README.md").write_text(_readme_no_candidate(spec, state),
                                        encoding="utf-8", newline="\n")
+        _write_report_safely(spec, state, store)
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
     if state.baseline is None:
         (pkg / "README.md").write_text("# Talos hand-back\n\nNo candidate was produced.\n",
                                        encoding="utf-8", newline="\n")
+        _write_report_safely(spec, state, store)
         shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
         return pkg
     write_submission(spec, state.best.files, pkg / SUBMISSION_DIR)
@@ -330,5 +345,6 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     if spec.hyperparameters is not None and spec.start != "template":
         (pkg / "hyperparameters.json").write_text(json.dumps(spec.hyperparameters, indent=1),
                                                   encoding="utf-8", newline="\n")
+    _write_report_safely(spec, state, store)
     shutil.make_archive(str(store.run_dir / "package"), "zip", pkg)
     return pkg
