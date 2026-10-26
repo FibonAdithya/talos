@@ -12,7 +12,7 @@ from talos.report import (
     run_sources,
     truncate,
 )
-from tests.run_fixture import HASH, make_run
+from tests.run_fixture import BASELINE_FILES, HASH, make_run
 
 
 def _node(i, parent=0, **kw):
@@ -351,6 +351,15 @@ def test_per_track_tables(tmp_path):
     # make_run's best: baseline 100/100, candidate 110/111 on training -> +10.500%
     assert "Training nonces" in html and "Held-out nonces" in html
     assert "<td>t</td>" in html and "+10.500%" in html
+
+
+def test_best_diff_count_is_of_the_whole_diff(tmp_path):
+    # 5000 added lines of 100 characters: the diff is over BEST_DIFF_CAP, so it is cut
+    added = "".join(f"{k:06d}" + "x" * 93 + "\n" for k in range(5000))
+    html = rendered(tmp_path, _scored(1), best=1,
+                    iteration_files={1: {"mod.rs": BASELINE_FILES["mod.rs"] + added}})
+    assert "… truncated (" in html
+    assert "5000 lines added or removed" in html
 
 
 def test_200_node_report_under_2mb(tmp_path):

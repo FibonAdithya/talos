@@ -514,9 +514,10 @@ def _best_diff(spec: JobSpec, state: JobState, sources: Sources) -> str:
         return "<p>The root's files were not found, so there is no diff.</p>"
     text = _diff(root, state.best.files, "template" if template else "baseline")
     where = "diff -u challenge/template.rs best/mod.rs" if template else "diff -u baseline best"
-    text = truncate(text, BEST_DIFF_CAP, f"… truncated ({{n}} more lines); full diff: {where}")
+    # Counted before the cut, so a truncated diff still reports the whole change.
     changed = sum(1 for line in text.splitlines()
-                  if line[:1] in "+-" and not line.startswith(("+++", "---")))
+                  if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
+    text = truncate(text, BEST_DIFF_CAP, f"… truncated ({{n}} more lines); full diff: {where}")
     return (f'<details id="best-diff"><summary>#{state.best.iteration} vs '
             f'{"template" if template else "baseline"}: {changed} lines added or removed'
             f'</summary><pre class="diff">{html.escape(text, quote=False)}</pre></details>')
