@@ -3265,7 +3265,21 @@ def test_accepting_the_summary_starts_the_job(tmp_path, monkeypatch, capsys):
     assert (tmp_path / "runs" / job_id / "job.json").exists()
     out = capsys.readouterr().out
     assert f"runs/{job_id}/" in out
-    print(out)  # sample for the report (shown with -s)
+
+
+def test_summary_labels_codex_cli_spend_not_tracked(tmp_path, monkeypatch, capsys):
+    # mutation: the summary hard-codes "(LLM spend unpriced)" for every unpriced provider, so
+    # codex-cli reads "unpriced" here while its status line says "not tracked"
+    monkeypatch.chdir(tmp_path)
+    save(tmp_path, Config(provider="codex-cli", model="gpt-5.5", mode="single-shot",
+                          api_base=None), None)
+    calls = stub_run_effects(monkeypatch)
+    argv = DECLINE_ARGV + ["--yes"]
+    assert cli.main(argv, ask=scripted([])) == 0
+    out = capsys.readouterr().out
+    assert "(LLM spend not tracked)" in out
+    assert "(LLM spend unpriced)" not in out
+    assert len(calls["execute"]) == 1
 
 
 def test_yes_prints_the_summary_and_never_asks(tmp_path, monkeypatch, capsys):

@@ -192,8 +192,9 @@ each job, so it needs no redeploy.
 
 ### 5. Before your first real run
 
-Run `talos doctor`. It is free: it checks the config, the LLM credential, the backend,
-mainnet and the GHCR dev images, and names a fix command for each failure. Then run
+Run `talos doctor`. It spends no compute, but its provider check makes one small LLM test
+call. It checks the config, the LLM credential, the backend, mainnet and the GHCR dev images,
+and says what to fix for each failure. Then run
 `talos doctor --full` once. It compiles and scores one real mainnet algorithm on your backend
 to confirm that the whole path works, and it shows the cost and asks `Spend this?` (default
 no) before it spends anything. The one measured figure is for knapsack on C3: MEASURED
@@ -376,13 +377,24 @@ them to a file and pass `--direction-file notes.md` instead of `--direction`. Th
 is sent to the LLM as the direction on every iteration.
 
 Before the job starts, Talos fetches the challenge's active tracks and fuel from mainnet,
-draws the nonces, and prints a line such as:
+draws the nonces, and prints a job summary such as this one (from a `--fake` job; the figures
+differ per run):
 
 ```
-Job 20260917-101006-knapsack: 5 tracks, fuel ..., budget {...}, 8 nonces per track, scoring native, start mainnet, search greedy, 1 chain(s); hyperparameters: 5/5 tracks from mainnet
+Job summary
+  challenge: knapsack (CPU, tested)
+  scope:     1 tracks, 8 nonces per track, fuel 1
+  provider:  fake / fake, single-shot mode
+  search:    start mainnet, greedy, 1 chain(s), scoring native
+  hyperparameters: 1/1 tracks from mainnet
+  budget:    1 iterations, compute $20.00
+  backend:   fake (in-process, no charge)
+  results:   runs/20261026-142231-knapsack/
 ```
 
-The job id is the start time plus the challenge name.
+It then asks `Start this job?` (default yes). Answering no prints `Not started.`, exits 0 and
+leaves nothing under `runs/`. `--yes` skips the question but still prints the summary. The job
+id is the start time plus the challenge name.
 
 ### Watch
 
@@ -516,7 +528,7 @@ talos doctor --json                             # one JSON document instead of t
 |---|---|
 | `--full` | After the free checks, compile and score mainnet's top algorithm for the challenge on 2 training nonces of its first track on your backend. It prints the cost, then asks `Spend this?` (default no; a closed stdin counts as no). |
 | `--challenge NAME` | Challenge for `--full` (default `knapsack`). |
-| `--yes` | Run `--full` without asking. Required with `--json`. |
+| `--yes` | Run `--full` without asking. `--json` works without it, but `--full --json` needs it. |
 | `--json` | Print `{"checks": [{"name", "status", "detail"}, ...], "ok": true or false}` and nothing else on stdout. With `--full` and no `--yes` the `full` check is `skip` with detail `needs --yes`. |
 
 The free checks run in this order and print one line each, `name: ok (detail)` or
@@ -532,7 +544,7 @@ The free checks run in this order and print one line each, `name: ok (detail)` o
   `talos/challenges.py`.
 - `images`: the pinned dev image is on GHCR for every challenge.
 
-Every `FAIL` line names the command that fixes it. With `--full` a last line, `full`, reports
+Most `FAIL` lines name the command that fixes it (such as `talos setup`); the rest say what to check, such as your network, or pass on the backend's own error text. With `--full` a last line, `full`, reports
 the compile and the nonces scored. If a free check failed, `full` is `skip` and does not run.
 The cost it prints is MEASURED 2026-09-15: £0.02 and 12 min 20 s for knapsack on C3;
 for every other challenge and backend it is labelled `ESTIMATE (unverified)` and says
@@ -577,8 +589,8 @@ Prompts for anything not given as a flag, unless `--yes` is passed. Before it wr
 or spends anything, it prints a job summary and asks `Start this job?`; `--yes` skips that
 question. Answering no, or a closed stdin, ends the command with nothing under `runs/`.
 
-Challenge status, which `talos run` repeats as a warning before it starts a job on a challenge
-that is not tested. "Tested" means at least one Talos job got past its baseline on some backend.
+The table below gives each challenge's status. `talos run` repeats the status as a warning
+before it starts a job on a challenge that is not tested. "Tested" means at least one Talos job got past its baseline on some backend.
 
 | Challenge | Hardware | Status |
 |---|---|---|
@@ -593,7 +605,7 @@ that is not tested. "Tested" means at least one Talos job got past its baseline 
 
 | Flag | Meaning |
 |---|---|
-| `--challenge NAME` | `satisfiability`, `vehicle_routing`, `knapsack`, `job_scheduling`, `energy_arbitrage` (CPU), or `vector_search`, `hypergraph`, `neuralnet_optimizer` (GPU: an L40S, or when none is free the next of A100-80GB and H100). On C3 a CPU challenge likewise runs on `cpu-d3-4vcpu-16gb`, or `cpu-e2-4vcpu-16gb` when that is out of stock; see [docs/compute-backends.md](docs/compute-backends.md#hardware-fallback). |
+| `--challenge NAME` | Status of each challenge: see the table above. One of `satisfiability`, `vehicle_routing`, `knapsack`, `job_scheduling`, `energy_arbitrage` (CPU), or `vector_search`, `hypergraph`, `neuralnet_optimizer` (GPU: an L40S, or when none is free the next of A100-80GB and H100). On C3 a CPU challenge likewise runs on `cpu-d3-4vcpu-16gb`, or `cpu-e2-4vcpu-16gb` when that is out of stock; see [docs/compute-backends.md](docs/compute-backends.md#hardware-fallback). |
 | `--direction TEXT` | What to explore, in free text. It becomes the first entry in the job's `tacit.md`. |
 | `--direction-file PATH` | The same, read from a file. Pass one of `--direction` or `--direction-file`, not both. |
 | `--track NAME` | Optimise one active track of the challenge instead of all of them (`all` is the default; the prompt lists the tracks). Training scores that track only. When a candidate wins on training, the confirmation scores that track's held-out nonces plus every other track's training nonces, and no other track may get worse. The LLM still sees and may edit every file. |
@@ -626,7 +638,7 @@ reports no cost), and the only budget is `--budget-usd` (a dollar cap it could n
 the mainnet challenge id no longer matches `talos/challenges.py`; or, on C3, the challenge's
 dev image tag is not on GHCR.
 
-Exit code 0 when the job ends `won`; 1 when it ends any other way, or when the mainnet or
+Exit code 0 when the job ends `won`, or when you decline the confirmation; 1 when it ends any other way, or when the mainnet or
 dev image check stops it; 2 for invalid arguments, a missing config, or a missing API key.
 
 ### `talos compile`

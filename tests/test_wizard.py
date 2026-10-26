@@ -35,6 +35,16 @@ def test_number_name_and_blank_select():
     assert ask.prompts[0].startswith("Backend:\n")
 
 
+def test_empty_explanation_has_no_dangling_dash():
+    # mutation: the " - " always appended, leaving "  2) n=1  - " for an option with no text
+    options = [("n=1", ""), ("n=2", "")]
+    ask = scripted(["1"])
+    ask_choice(ask, "Nonces", options, "n=2")
+    lines = ask.prompts[0].split("\n")
+    assert lines[1] == "  1) n=1"
+    assert lines[2] == "  2) n=2 (default)"
+
+
 def test_typo_reprompts_then_accepts(capsys):
     # mutation: the first answer accepted unchecked
     ask = scripted(["agentc", "agentic"])

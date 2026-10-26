@@ -897,7 +897,8 @@ def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: 
         caps.append(f"compute ${budget.compute_usd:.2f}")
     budget_text = ", ".join(caps)
     if unpriced_reason(cfg.provider, cfg.model):
-        budget_text += " (LLM spend unpriced)"
+        label = "not tracked" if cfg.provider == "codex-cli" else "unpriced"
+        budget_text += f" (LLM spend {label})"
     billing = ("fake (in-process, no charge)" if cfg.provider == "fake"
                else BACKEND_BILLING[backend])
     lines = [
@@ -1219,7 +1220,8 @@ def cmd_demo(args, ask) -> int:
     spec = JobSpec(job_id=job_id, challenge=challenge, direction=direction, provider=cfg.provider,
                    model=cfg.model, mode=cfg.mode, budget=budget, rand_hash=rand_hash,
                    tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
-                   created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id, track=None, baseline_algorithm=algorithm,
+                   created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
+                   track=None, baseline_algorithm=algorithm,
                    hyperparameters=hyperparameters, hyperparameters_source=hp_source,
                    dev_image_tag=DEV_IMAGE_TAG, scoring="native", start="mainnet",
                    search="greedy", chains=1, anneal=None)
@@ -1432,7 +1434,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="per-track hyperparameters from the baseline algorithm's best "
                            "mainnet benchmark (mainnet, the default) or none")
     budget = r.add_argument_group("budget")
-    budget.add_argument("--budget-usd", type=float, help="cap on total spend in USD")
+    budget.add_argument("--budget-usd", type=float, help="cap on LLM spend in USD")
     budget.add_argument("--budget-hours", type=float, help="cap on wall-clock hours")
     budget.add_argument("--budget-iterations", type=int, help="cap on research iterations")
     budget.add_argument("--budget-compute-usd", type=float,
@@ -1458,7 +1460,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--add-hours", type=float,
                         help="add this many hours to the resumed job's cap")
     resume.add_argument("--add-usd", type=float,
-                        help="add this many USD to the resumed job's spend cap")
+                        help="add this many USD to the resumed job's LLM spend cap")
     resume.add_argument("--add-compute-usd", type=float,
                         help="add this many USD to the resumed job's compute cap")
     r.add_argument("--yes", action="store_true",
@@ -1516,7 +1518,7 @@ def build_parser() -> argparse.ArgumentParser:
     doc.add_argument("--challenge", choices=list(CHALLENGES), default=DEFAULT_CHALLENGE,
                      help=f"challenge for --full (default {DEFAULT_CHALLENGE})")
     doc.add_argument("--yes", action="store_true",
-                     help="run --full without asking (required with --json)")
+                     help="run --full without asking; with --json, --full needs it")
     doc.add_argument("--json", action="store_true",
                      help="print one JSON document instead of text lines")
     return p

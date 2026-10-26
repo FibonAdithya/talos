@@ -13,7 +13,7 @@ def menu_text(title: str, options: Sequence[tuple[str, str]], default: str) -> s
     width = max(len(value) for value, _ in options)
     lines = [f"{title}:"]
     for i, (value, explanation) in enumerate(options, 1):
-        line = f"  {i}) {value:<{width}}  - {explanation}"
+        line = f"  {i}) {value:<{width}}  - {explanation}" if explanation else f"  {i}) {value}"
         if value == default:
             line += " (default)"
         lines.append(line)
