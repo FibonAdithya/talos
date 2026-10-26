@@ -29,9 +29,11 @@ from talos.extend import ADD_FLAGS, BUDGET_FLAGS, ExtensionRefused, extend
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
-from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MONOREPO_REF, TEMPLATE_START_FILES,
+from talos.challenges import (CHALLENGES, DEFAULT_CHALLENGE, DEV_IMAGE_TAG, MONOREPO_REF,
+                              TEMPLATE_START_FILES,
                               c3_hardware_options, c3_hardware_class,
-                              c3_image, hardware_options, hardware_class, local_hardware_class)
+                              c3_image, hardware_options, hardware_class, local_hardware_class,
+                              status_text, status_warning)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
 from talos.diagnostics import first_error
@@ -45,6 +47,7 @@ from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provi
 from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
 from talos.prompts import WHOLE_FILE_FORMAT
+from talos.wizard import ask_choice, confirm
 from talos.state import JobSpec, JobState, JobStore, user_tacit
 from talos.types import Usage
 
@@ -285,6 +288,30 @@ def _model_prompt(kind: str) -> tuple[str, str | None]:
     return "Model", default
 
 
+BACKEND_OPTIONS = (
+    ("modal", "your Modal account; billed per container second"),
+    ("c3", "your C3 account; about 12 min fixed overhead per iteration"),
+    ("local", "Docker on this machine; no compute charge, slow builds"),
+)
+PROVIDER_EXPLANATIONS = {
+    "anthropic": "Anthropic API; needs an API key",
+    "openai": "OpenAI API; needs an API key",
+    "google": "Google Gemini API; needs an API key",
+    "openrouter": "OpenRouter API; needs an API key",
+    "custom": "any OpenAI-compatible endpoint; needs a base URL and an API key",
+    "claude-cli": "your local `claude` CLI login; no API key",
+    "codex-cli": "your local `codex` CLI login; no API key",
+}
+MODE_OPTIONS = (
+    ("single-shot", "one LLM call per edit"),
+    ("agentic", "the CLI agent edits and compiles in a sandbox; roughly 5-20x the tokens"),
+)
+HYPERPARAMETER_OPTIONS = (
+    ("mainnet", "per-track values from the baseline's best mainnet benchmark"),
+    ("none", "run without hyperparameters"),
+)
+
+
 def _track_arg(answer: str | None) -> str | None:
     """The focus track a flag or wizard answer names; None (every track) for no answer or
     "all", which is how the wizard prompt and the README spell the default."""
@@ -313,16 +340,15 @@ def _mainnet_hyperparameters(api, challenge: str, info) -> tuple[dict | None, di
 
 def cmd_setup(args, ask) -> int:
     root = Path.cwd()
-    backend = ask(f"Compute backend ({' or '.join(BACKENDS)})", "modal")
-    if backend not in BACKENDS:
-        print(f"unknown backend {backend!r}", file=sys.stderr)
-        return 2
-    kinds = ", ".join(k for k in KINDS if k != "fake")
-    kind = ask(f"Provider ({kinds})", "anthropic")
-    # "fake" is the in-process test double: it is in KINDS, but setting it up would write a
-    # config whose runs never touch an LLM at all.
-    if kind not in KINDS or kind == "fake":
-        print(f"unknown provider {kind!r}", file=sys.stderr)
+    try:
+        backend = ask_choice(ask, "Compute backend", BACKEND_OPTIONS, "modal")
+        # "fake" is the in-process test double: it is in KINDS, but setting it up would write a
+        # config whose runs never touch an LLM at all.
+        kind = ask_choice(ask, "Provider",
+                          [(k, PROVIDER_EXPLANATIONS.get(k, "")) for k in KINDS if k != "fake"],
+                          "anthropic")
+    except ConfigError as e:
+        print(str(e), file=sys.stderr)
         return 2
     model = ask(*_model_prompt(kind))
     api_base = ask("API base URL") if kind == "custom" else None
@@ -331,7 +357,11 @@ def cmd_setup(args, ask) -> int:
         api_key = ask("API key", secret=True)
     mode = "single-shot"
     if kind in CLI_PROVIDERS:
-        mode = ask("Mode (single-shot or agentic)", "single-shot")
+        try:
+            mode = ask_choice(ask, "Mode", MODE_OPTIONS, "single-shot")
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 2
     token_id = token_secret = c3_api_key = None
     if backend == "c3":
         c3_api_key = ask("C3 API key (blank to use your `c3 login` session)", secret=True) or None
@@ -413,11 +443,11 @@ def _ask_number(ask, prompt: str, default: str, cast=float, tries: int = 3):
     raise ConfigError(f"{prompt}: no number given after {tries} tries")
 
 
-def _challenge_prompt() -> str:
-    """spec §5.2: GPU challenges are marked, so the expensive choices are visible before one
-    is picked."""
-    names = [f"{name} (GPU)" if cs.is_gpu else name for name, cs in CHALLENGES.items()]
-    return f"Challenge ({', '.join(names)})"
+def _challenge_options() -> list[tuple[str, str]]:
+    """spec §5.2: GPU challenges are marked, and each shows its status, so the expensive and
+    the untested choices are visible before one is picked."""
+    return [(name, f"{'GPU' if cs.is_gpu else 'CPU'}, {status_text(cs)}")
+            for name, cs in CHALLENGES.items()]
 
 
 def _codex_refused(cfg: Config, start: str = "mainnet") -> bool:
@@ -606,10 +636,18 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
     return _one_line(text, width)
 
 
+_event_sleep = time.sleep  # the pause between event lines; tests patch this, not time.sleep
+
+
 def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
-                add: dict[str, float] | None = None) -> int:
+                add: dict[str, float] | None = None, *, fakes: tuple | None = None,
+                event_delay: float = 0.0) -> int:
     """Runs a new job, or resumes one. `add` holds the budget a resume adds, by dimension
-    (only the dimensions the user gave)."""
+    (only the dimensions the user gave). With provider "fake", `fakes` is the (provider, bench)
+    pair to run in place of the `--fake` one (`talos demo` passes its scripted pair).
+    `event_delay` pauses that many seconds after each printed event line."""
+    if fakes is not None and cfg.provider != "fake":
+        raise ValueError("fakes replace the fake provider's pair; the provider must be fake")
     # spec §7.1: refuse before anything is spent when the credential is missing.
     if cfg.provider not in UNMETERED and resolve_api_key(cfg) is None:
         env = ENV_KEYS.get(cfg.provider, "TALOS_CUSTOM_API_KEY")
@@ -681,7 +719,8 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
     if fake:
         from talos.bench import FakeBench
         from talos.providers.fake import FakeProvider
-        provider, bench = FakeProvider(_fake_script), FakeBench(_fake_scores)
+        provider, bench = (fakes if fakes is not None
+                           else (FakeProvider(_fake_script), FakeBench(_fake_scores)))
         cache_dir, mainnet = store.run_dir / "baseline_cache", FAKE_MAINNET
         calibration_dir = store.run_dir / "calibration_cache"
     else:
@@ -760,6 +799,8 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
         if kind == "hypothesis":
             print(flush=True)  # a blank line between iterations
         print(prefix + text, flush=True)
+        if event_delay > 0:
+            _event_sleep(event_delay)
 
     challenge_docs = None
     if spec.start == "template":
@@ -821,6 +862,59 @@ def _print_submission_hint(state: JobState, pkg: Path) -> None:
     # the best of a job that did not win is unconfirmed or a held-out false positive
     print(f"The best candidate is in {pkg / SUBMISSION_DIR}, but it has not beaten the baseline "
           f"on the held-out nonces. Read {pkg / 'README.md'} before submitting it.")
+
+
+BACKEND_BILLING = {
+    "modal": "billed per container second, no fixed per-job overhead",
+    "c3": "one batch job per iteration, about 12 minutes of fixed overhead each "
+          "(docs/compute-backends.md#c3-timings)",
+    "local": "Docker on this machine, no compute charge",
+}
+
+
+def _new_job_id(root: Path, challenge: str, prefix: str = "") -> str:
+    stamp = prefix + time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
+    job_id, n = stamp, 1
+    while (root / "runs" / job_id / "job.json").exists():  # two runs in the same second
+        n += 1
+        job_id = f"{stamp}-{n}"
+    return job_id
+
+
+def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: int,
+                 cfg: Config, budget: Budget, start: str, search: str, chains: int,
+                 scoring: str, hp_line: str, backend: str) -> str:
+    cs = CHALLENGES[challenge]
+    warning = status_warning(cs)
+    caps = []
+    if budget.usd is not None:
+        caps.append(f"LLM ${budget.usd:.2f}")
+    if budget.hours is not None:
+        caps.append(f"{budget.hours:g} h")
+    if budget.iterations is not None:
+        caps.append(f"{budget.iterations} iterations")
+    if budget.compute_usd is not None:
+        caps.append(f"compute ${budget.compute_usd:.2f}")
+    budget_text = ", ".join(caps)
+    if unpriced_reason(cfg.provider, cfg.model):
+        label = "not tracked" if cfg.provider == "codex-cli" else "unpriced"
+        budget_text += f" (LLM spend {label})"
+    billing = ("fake (in-process, no charge)" if cfg.provider == "fake"
+               else BACKEND_BILLING[backend])
+    lines = [
+        "Job summary",
+        f"  challenge: {challenge} ({'GPU' if cs.is_gpu else 'CPU'}, {status_text(cs)})"
+        + (f" - {warning}" if warning else ""),
+        f"  scope:     {scope}, {nonces} nonces per track, fuel {fuel}",
+        f"  provider:  {cfg.provider} / {cfg.model}, {cfg.mode} mode",
+        f"  search:    start {start}, {search}, {chains} chain(s), scoring {scoring}",
+        f"  {hp_line}",
+        f"  budget:    {budget_text}",
+        f"  backend:   {backend} - {billing}" if cfg.provider != "fake" else
+        f"  backend:   {billing}",
+        f"  results:   runs/{job_id}/",
+    ]
+    return "\n".join(lines)
 
 
 def cmd_run(args, ask) -> int:
@@ -906,10 +1000,19 @@ def cmd_run(args, ask) -> int:
         return 2
     if _codex_refused(cfg, start):
         return 2
-    challenge = args.challenge or ask(_challenge_prompt(), "vehicle_routing")
+    challenge = args.challenge
+    if not challenge:
+        try:
+            challenge = ask_choice(ask, "Challenge", _challenge_options(), DEFAULT_CHALLENGE)
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 2
     if challenge not in CHALLENGES:
         print(f"unknown challenge {challenge!r}", file=sys.stderr)
         return 2
+    warning = status_warning(CHALLENGES[challenge])
+    if warning:
+        print(warning, file=sys.stderr)
     if start == "template" and challenge not in TEMPLATE_START_FILES:
         print(f"--start template supports {', '.join(TEMPLATE_START_FILES)} only, not "
               f"{challenge}", file=sys.stderr)
@@ -956,10 +1059,10 @@ def cmd_run(args, ask) -> int:
         return 2
     # spec §5.2 step 4: mode for CLI providers, with the cost warning before the prompt.
     if not args.yes and args.mode is None and cfg.provider in CLI_PROVIDERS:
-        print("agentic mode uses roughly 5-20x the tokens of single-shot")
-        mode = ask("Mode (single-shot or agentic)", cfg.mode)
-        if mode not in ("single-shot", "agentic"):
-            print(f"unknown mode {mode!r}", file=sys.stderr)
+        try:
+            mode = ask_choice(ask, "Mode", MODE_OPTIONS, cfg.mode)
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
             return 2
         cfg = replace(cfg, mode=mode)
         if _codex_refused(cfg, start):
@@ -992,21 +1095,27 @@ def cmd_run(args, ask) -> int:
             return 1
     track = _track_arg(args.track)
     if args.track is None and not args.yes:
-        track = _track_arg(ask(f"Track to optimise (all, or one of: {', '.join(info.tracks)})",
-                               "all"))
+        try:
+            track = _track_arg(ask_choice(
+                ask, "Track to optimise",
+                [("all", "every active track")] + [(t, "") for t in info.tracks], "all"))
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 2
     if track is not None and track not in info.tracks:
         print(f"unknown track {track!r} for {challenge}; active tracks: "
               f"{', '.join(info.tracks)}", file=sys.stderr)
         return 2
     choice = args.hyperparameters
     if choice is None:
-        # A blank answer is the default, as `_track_arg` treats a blank track answer: the wizard
-        # test's raw `ask` returns "" rather than the default.
-        choice = ("mainnet" if args.yes
-                  else ask("Hyperparameters (mainnet or none)", "mainnet").strip() or "mainnet")
-    if choice not in ("mainnet", "none"):
-        print(f"unknown hyperparameters choice {choice!r}; use mainnet or none", file=sys.stderr)
-        return 2
+        if args.yes:
+            choice = "mainnet"
+        else:
+            try:
+                choice = ask_choice(ask, "Hyperparameters", HYPERPARAMETER_OPTIONS, "mainnet")
+            except ConfigError as e:
+                print(str(e), file=sys.stderr)
+                return 2
     algorithm = hyperparameters = hp_source = None
     if choice == "mainnet":
         api = FAKE_MAINNET if cfg.provider == "fake" else mainnet_api
@@ -1042,23 +1151,37 @@ def cmd_run(args, ask) -> int:
         except MainnetError as e:
             print(f"mainnet unreachable: {e}", file=sys.stderr)
             return 1
+    job_id = _new_job_id(root, challenge)
+    scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
+    if hyperparameters is None and algorithm is not None:
+        hp_line = (f"hyperparameters: none (no mainnet benchmark of {algorithm['name']} "
+                   f"at fuel {info.max_fuel})")
+    elif hyperparameters is None:
+        hp_line = "hyperparameters: none"
+    else:
+        used = sum(1 for v in hyperparameters.values() if v is not None)
+        hp_line = f"hyperparameters: {used}/{len(info.tracks)} tracks from mainnet"
+    scoring = args.scoring or "native"
+    print(_job_summary(job_id=job_id, challenge=challenge, scope=scope, nonces=nonces,
+                       fuel=info.max_fuel, cfg=cfg, budget=budget, start=start, search=search,
+                       chains=chains, scoring=scoring, hp_line=hp_line,
+                       backend=cfg.backend))
+    # Nothing below this point has run yet: no image recommendation, no run directory, no bench.
+    if not args.yes and not confirm(ask, "Start this job?", True):
+        print("Not started.")
+        return 0
     if cfg.provider != "fake":
         recommend_image_update(challenge)
     rand_hash = new_rand_hash()
     training, holdout = draw_nonce_sets(info.tracks, rand_hash, training_count=nonces,
                                         holdout_count=nonces)
-    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
-    job_id, n = stamp, 1
-    while (root / "runs" / job_id / "job.json").exists():  # two runs in the same second
-        n += 1
-        job_id = f"{stamp}-{n}"
     spec = JobSpec(job_id=job_id, challenge=challenge, direction=direction, provider=cfg.provider,
                    model=cfg.model, mode=cfg.mode, budget=budget, rand_hash=rand_hash,
                    tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
                    created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
                    track=track, baseline_algorithm=algorithm, hyperparameters=hyperparameters,
                    hyperparameters_source=hp_source, dev_image_tag=DEV_IMAGE_TAG,
-                   scoring=args.scoring or "native", start=start, search=search,
+                   scoring=scoring, start=start, search=search,
                    chains=chains,
                    anneal=AnnealSettings().to_dict() if search == "anneal" else None)
     store = JobStore(root / "runs" / job_id)
@@ -1070,19 +1193,56 @@ def cmd_run(args, ask) -> int:
             (docs_dir / name).write_text(text, encoding="utf-8", newline="\n")
     (store.run_dir / "tacit.md").write_text(user_tacit(direction),
                                             encoding="utf-8", newline="\n")
-    scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
-    if hyperparameters is None and algorithm is not None:
-        hp_line = (f"hyperparameters: none (no mainnet benchmark of {algorithm['name']} "
-                   f"at fuel {info.max_fuel})")
-    elif hyperparameters is None:
-        hp_line = "hyperparameters: none"
-    else:
-        used = sum(1 for v in hyperparameters.values() if v is not None)
-        hp_line = f"hyperparameters: {used}/{len(info.tracks)} tracks from mainnet"
-    print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}, "
-          f"{nonces} nonces per track, scoring {spec.scoring}, start {start}, search {search}, "
-          f"{chains} chain(s); {hp_line}")
     return execute_job(spec, store, cfg, resume=False)
+
+
+def cmd_demo(args, ask) -> int:
+    """A scripted job on the real loop, in-process: a compile failure and its fix, two
+    iterations with no gain, a false positive and a win (talos/demo.py)."""
+    from talos.bench import FakeBench
+    from talos.demo import DemoScript, demo_compile_ok, demo_scores, describe_package
+    from talos.providers.fake import FakeProvider
+
+    root = Path.cwd()
+    challenge = args.challenge
+    cfg = Config(provider="fake", model="fake", mode="single-shot", api_base=None,
+                 backend="modal")  # the fake bench is in-process: no backend to pick
+    cs = CHALLENGES[challenge]
+    info = ChallengeInfo(id=cs.id, name=challenge, is_gpu=cs.is_gpu, tracks=["n=1"], max_fuel=1)
+    algorithm, hyperparameters, hp_source = _mainnet_hyperparameters(FAKE_MAINNET, challenge,
+                                                                     info)
+    direction = "demo: raise k"
+    rand_hash = new_rand_hash()
+    training, holdout = draw_nonce_sets(info.tracks, rand_hash, training_count=NONCES_PER_TRACK,
+                                        holdout_count=NONCES_PER_TRACK)
+    job_id = _new_job_id(root, challenge, prefix="demo-")
+    budget = Budget(usd=None, hours=None, iterations=6, compute_usd=None)
+    spec = JobSpec(job_id=job_id, challenge=challenge, direction=direction, provider=cfg.provider,
+                   model=cfg.model, mode=cfg.mode, budget=budget, rand_hash=rand_hash,
+                   tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
+                   created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
+                   track=None, baseline_algorithm=algorithm,
+                   hyperparameters=hyperparameters, hyperparameters_source=hp_source,
+                   dev_image_tag=DEV_IMAGE_TAG, scoring="native", start="mainnet",
+                   search="greedy", chains=1, anneal=None)
+    store = JobStore(root / "runs" / job_id)
+    store.write_spec(spec)
+    (store.run_dir / "tacit.md").write_text(user_tacit(direction),
+                                            encoding="utf-8", newline="\n")
+    print(f"This is a scripted demo of a {challenge} job: no account, no network and no spend. "
+          f"Results go to runs/{job_id}/.")
+    # Zero prices: the status lines then show $0.00, as the line above promises.
+    rc = execute_job(spec, store, cfg, resume=False,
+                     fakes=(FakeProvider(DemoScript(), usd_per_call=0.0),
+                            FakeBench(demo_scores, compile_ok=demo_compile_ok,
+                                      usd_per_nonce=0.0)),
+                     event_delay=args.delay)
+    print("\nWhat is in the package:")
+    for line in describe_package(store.run_dir / "package"):
+        print(line)
+    print(f"See the run as a page: talos report {job_id}")
+    print("Next: talos setup, then talos doctor")
+    return rc
 
 
 def compile_backend(args, root: Path) -> str:
@@ -1203,6 +1363,12 @@ def recommend_image_update(challenge: str) -> None:
               f"This job will use the pinned image {update.current}.", file=sys.stderr)
 
 
+def cmd_doctor(args, ask) -> int:
+    from talos import doctor
+    return doctor.run(Path.cwd(), full=args.full, challenge=args.challenge, yes=args.yes,
+                      json_out=args.json, ask=ask)
+
+
 def cmd_check_updates(args, ask) -> int:
     """Check published versions without Docker, compute credentials or a configured project."""
     from concurrent.futures import ThreadPoolExecutor
@@ -1229,66 +1395,143 @@ def cmd_check_updates(args, ask) -> int:
         print("To upgrade, review the TIG release and its matching source revision, then update "
               "DEV_IMAGE_TAG and MONOREPO_REF in talos/challenges.py. The image tag must be "
               "available for all challenges and required architectures. Run `make check`, "
-              "redeploy Modal with `talos setup` if used, then run your backend's live smoke test. "
+              "redeploy Modal with `talos setup` if used, then run `talos doctor --full`. "
               "Start new jobs after upgrading. "
               "A newer published tag does not establish source compatibility.")
     return 1 if any(update is None for update in updates) else 0
 
 
-def main(argv=None, ask=default_ask) -> int:
-    p = argparse.ArgumentParser(prog="talos")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("setup")
-    r = sub.add_parser("run")
-    r.add_argument("--challenge")
-    r.add_argument("--direction")
-    r.add_argument("--direction-file")
-    r.add_argument("--track", help="one active track to optimise, or all (the default)")
-    r.add_argument("--nonces", type=int,
-                   help=f"nonces per track in each of the training and held-out sets "
-                        f"(default {NONCES_PER_TRACK})")
-    r.add_argument("--hyperparameters", choices=["mainnet", "none"],
-                   help="per-track hyperparameters from the baseline algorithm's best mainnet "
-                        "benchmark (mainnet, the default) or none")
-    r.add_argument("--mode", choices=["single-shot", "agentic"])
-    r.add_argument("--scoring", choices=["metered", "native"],
-                   help="research scoring: native (fast, validated on metered; the default) or "
-                        "metered (TIG's runtime for every candidate)")
-    r.add_argument("--start", choices=["mainnet", "template"],
-                   help="start from mainnet's top algorithm (the default) or from the empty "
-                        "template")
-    r.add_argument("--search", choices=["greedy", "anneal"],
-                   help="keep only improvements (greedy, the default) or anneal")
-    r.add_argument("--chains", type=int, help="independent search chains (default 1)")
-    r.add_argument("--budget-usd", type=float)
-    r.add_argument("--budget-hours", type=float)
-    r.add_argument("--budget-iterations", type=int)
-    r.add_argument("--budget-compute-usd", type=float)
-    r.add_argument("--resume")
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="talos",
+        description="Talos researches better algorithms for a TIG challenge: it asks an LLM for "
+                    "edits, scores each candidate on TIG's benchmark and keeps the "
+                    "improvements.")
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
+    sub.add_parser("setup", help="choose a backend and LLM provider and save the settings",
+                   description="Interactive setup: pick a compute backend (modal, c3 or local) "
+                               "and an LLM provider, then save them to the Talos config.")
+    r = sub.add_parser(
+        "run", help="research a challenge, or resume a job",
+        description="Start a research job on one challenge, or resume an earlier job with "
+                    "--resume. Options left out are asked for interactively.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+               "  talos run --challenge knapsack --direction \"...\" --budget-usd 20 "
+               "--budget-hours 4\n"
+               "  talos run --resume <job_id> --add-iterations 10\n"
+               "  talos run --challenge knapsack --direction-file notes.md "
+               "--budget-iterations 30 --yes\n")
+    what = r.add_argument_group("what to research")
+    what.add_argument("--challenge", choices=list(CHALLENGES), help="challenge to research")
+    what.add_argument("--direction", help="what to try, in your own words")
+    what.add_argument("--direction-file", help="read the direction from this file")
+    what.add_argument("--track", help="one active track to optimise, or all (the default)")
+    what.add_argument("--start", choices=["mainnet", "template"],
+                      help="start from mainnet's top algorithm (the default) or from the empty "
+                           "template")
+    what.add_argument("--hyperparameters", choices=["mainnet", "none"],
+                      help="per-track hyperparameters from the baseline algorithm's best "
+                           "mainnet benchmark (mainnet, the default) or none")
+    budget = r.add_argument_group("budget")
+    budget.add_argument("--budget-usd", type=float, help="cap on LLM spend in USD")
+    budget.add_argument("--budget-hours", type=float, help="cap on wall-clock hours")
+    budget.add_argument("--budget-iterations", type=int, help="cap on research iterations")
+    budget.add_argument("--budget-compute-usd", type=float,
+                        help="cap on backend compute spend in USD")
+    search = r.add_argument_group("search")
+    search.add_argument("--mode", choices=["single-shot", "agentic"],
+                        help="how the LLM edits: one reply per iteration (single-shot) or an "
+                             "agent loop (agentic)")
+    search.add_argument("--scoring", choices=["metered", "native"],
+                        help="research scoring: native (fast, validated on metered; the "
+                             "default) or metered (TIG's runtime for every candidate)")
+    search.add_argument("--search", choices=["greedy", "anneal"],
+                        help="keep only improvements (greedy, the default) or anneal")
+    search.add_argument("--chains", type=int, help="independent search chains (default 1)")
+    search.add_argument("--nonces", type=int,
+                        help=f"nonces per track in each of the training and held-out sets "
+                             f"(default {NONCES_PER_TRACK})")
+    resume = r.add_argument_group("resume")
+    resume.add_argument("--resume", metavar="JOB_ID", help="resume this job from runs/")
     # Each adds to one cap of a resumed job's budget (talos/extend.py); refused without --resume.
-    r.add_argument("--add-iterations", type=int)
-    r.add_argument("--add-hours", type=float)
-    r.add_argument("--add-usd", type=float)
-    r.add_argument("--add-compute-usd", type=float)
-    r.add_argument("--yes", action="store_true")
+    resume.add_argument("--add-iterations", type=int,
+                        help="add this many iterations to the resumed job's cap")
+    resume.add_argument("--add-hours", type=float,
+                        help="add this many hours to the resumed job's cap")
+    resume.add_argument("--add-usd", type=float,
+                        help="add this many USD to the resumed job's LLM spend cap")
+    resume.add_argument("--add-compute-usd", type=float,
+                        help="add this many USD to the resumed job's compute cap")
+    r.add_argument("--yes", action="store_true",
+                   help="skip every question and the confirmation; take defaults (compute cap "
+                        f"${DEFAULT_COMPUTE_USD:.0f} on hosted backends)")
     r.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)
-    c = sub.add_parser("compile")
-    c.add_argument("--challenge", required=True)
-    c.add_argument("--dir", default="algorithm")
-    c.add_argument("--backend", choices=list(BACKENDS))
+    d = sub.add_parser("demo", help="watch a scripted job: no account, network or spend",
+                       description="Run a scripted job in-process on the real research loop. "
+                                   "It shows a compile failure and its fix, iterations with "
+                                   "no gain, a false positive on the held-out nonces and a "
+                                   "win, then the package a real job writes.")
+    d.add_argument("--challenge", choices=list(CHALLENGES), default=DEFAULT_CHALLENGE,
+                   help=f"challenge to label the demo with (default {DEFAULT_CHALLENGE})")
+    d.add_argument("--delay", type=float, default=0.4,
+                   help="seconds to pause after each event line (default 0.4; 0 disables)")
+    c = sub.add_parser("compile", help="compile an algorithm directory on the backend",
+                       description="Compile a challenge algorithm and print the result. "
+                                   "Agents call this from inside a run.")
+    c.add_argument("--challenge", required=True, choices=list(CHALLENGES),
+                   help="challenge the algorithm belongs to")
+    c.add_argument("--dir", default="algorithm",
+                   help="directory holding mod.rs (default: algorithm)")
+    c.add_argument("--backend", choices=list(BACKENDS),
+                   help="compute backend (default: from the Talos config)")
     c.add_argument("--native", action="store_true",
                    help="build the unmetered talos-native runner, as a --scoring native job "
                         "scores it")
-    sub.add_parser("status")
+    sub.add_parser("status", help="list jobs under runs/ and their state",
+                   description="List the jobs under runs/ with their state, iteration count "
+                               "and spend.")
     rep = sub.add_parser("report", help="write runs/<job_id>/package/report.html from the run's "
-                                        "files")
-    rep.add_argument("job_id")
-    updates = sub.add_parser("check-updates", help="check GHCR for newer TIG dev images")
+                                        "files",
+                         description="Write runs/<job_id>/package/report.html from the files "
+                                     "of a finished or interrupted run.")
+    rep.add_argument("job_id", help="job id, the directory name under runs/")
+    updates = sub.add_parser("check-updates", help="check GHCR for newer TIG dev images",
+                             description="Compare the configured TIG dev image tag with the "
+                                         "newest one published on GHCR.")
     updates.add_argument("--challenge", choices=list(CHALLENGES),
                          help="check one challenge (default: all)")
-    args = p.parse_args(argv)
-    return {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
-            "report": cmd_report, "check-updates": cmd_check_updates}[args.cmd](args, ask)
+    doc = sub.add_parser(
+        "doctor", help="check the config, credentials, backend, mainnet and GHCR",
+        description="Run free health checks: the config, the LLM credential and one test "
+                    "call, the compute backend, mainnet and the GHCR dev images. --full also "
+                    "compiles and scores one baseline on the backend, after showing its cost "
+                    "and asking.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+               "  talos doctor\n"
+               "  talos doctor --full --challenge knapsack\n"
+               "  talos doctor --json\n")
+    doc.add_argument("--full", action="store_true",
+                     help="also compile and score one baseline on the backend (spends "
+                          "compute; asks first)")
+    doc.add_argument("--challenge", choices=list(CHALLENGES), default=DEFAULT_CHALLENGE,
+                     help=f"challenge for --full (default {DEFAULT_CHALLENGE})")
+    doc.add_argument("--yes", action="store_true",
+                     help="run --full without asking; with --json, --full needs it")
+    doc.add_argument("--json", action="store_true",
+                     help="print one JSON document instead of text lines")
+    return p
+
+
+COMMANDS = {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
+            "report": cmd_report, "check-updates": cmd_check_updates, "demo": cmd_demo,
+            "doctor": cmd_doctor}
+
+
+def main(argv=None, ask=default_ask) -> int:
+    args = build_parser().parse_args(argv)
+    return COMMANDS[args.cmd](args, ask)
 
 
 if __name__ == "__main__":

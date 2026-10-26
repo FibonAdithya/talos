@@ -16,6 +16,10 @@ TEMPLATE_START_FILES: dict[str, tuple[str, ...]] = {
                          "scenarios.rs", "constants.rs", "utils.rs"),
 }
 
+# `tested`: at least one Talos job got past its baseline on some backend.
+STATUSES: tuple[str, ...] = ("tested", "untested", "known broken")
+DEFAULT_CHALLENGE = "knapsack"
+
 C3_CPU_WORKERS = 4
 # Hardware preference order, tried in turn at job start until one has capacity
 # (`talos/bench.py::ModalBench.select_hardware`, `talos/c3_bench.py::C3Bench.select_hardware`).
@@ -57,14 +61,32 @@ class ChallengeSpec:
     beat: BeatRule = BeatRule()
     cpu: int = 4
     memory_mib: int = 8192
+    status: str = "untested"
+    issue: int | None = None
 
 
-def _cpu(name: str, cid: str) -> ChallengeSpec:
-    return ChallengeSpec(name=name, id=cid, is_gpu=False)
+def _cpu(name: str, cid: str, status: str = "untested", issue: int | None = None) -> ChallengeSpec:
+    return ChallengeSpec(name=name, id=cid, is_gpu=False, status=status, issue=issue)
 
 
-def _gpu(name: str, cid: str) -> ChallengeSpec:
-    return ChallengeSpec(name=name, id=cid, is_gpu=True)
+def _gpu(name: str, cid: str, status: str = "untested", issue: int | None = None) -> ChallengeSpec:
+    return ChallengeSpec(name=name, id=cid, is_gpu=True, status=status, issue=issue)
+
+
+def status_text(spec: ChallengeSpec) -> str:
+    """The status as shown to the user: a known-broken challenge names its issue."""
+    if spec.status == "known broken" and spec.issue is not None:
+        return f"known broken (#{spec.issue})"
+    return spec.status
+
+
+def status_warning(spec: ChallengeSpec) -> str | None:
+    """The warning printed before a job on a challenge that is not tested, or None."""
+    if spec.status == "untested":
+        return f"warning: {spec.name} has never been run end to end with Talos"
+    if spec.status == "known broken":
+        return f"warning: {spec.name} is known broken: see issue #{spec.issue}"
+    return None
 
 
 def hardware_options(spec: ChallengeSpec) -> tuple[str, ...]:
@@ -161,11 +183,11 @@ CHALLENGES: dict[str, ChallengeSpec] = {
     for s in (
         _cpu("satisfiability", "c001"),
         _cpu("vehicle_routing", "c002"),
-        _cpu("knapsack", "c003"),
+        _cpu("knapsack", "c003", status="tested"),
         _gpu("vector_search", "c004"),
-        _gpu("hypergraph", "c005"),
+        _gpu("hypergraph", "c005", status="tested"),
         _gpu("neuralnet_optimizer", "c006"),
-        _cpu("job_scheduling", "c007"),
-        _cpu("energy_arbitrage", "c008"),
+        _cpu("job_scheduling", "c007", status="known broken", issue=36),
+        _cpu("energy_arbitrage", "c008", status="tested"),
     )
 }
