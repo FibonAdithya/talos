@@ -430,6 +430,18 @@ A resumed job keeps the provider, model, mode, track, hyperparameters and nonces
 with, whatever `talos.config.json` says now. A C3 job that was still running when Talos
 stopped is reattached rather than paid for twice.
 
+An `exhausted` job continues when you add budget to it:
+
+```bash
+talos run --resume 20260917-101006-knapsack --add-iterations 20
+```
+
+Nothing is re-measured: the job keeps its baseline, nonces, hardware, calibration, best
+candidate and lineage. An annealing job continues at the temperature its spend gives on the
+new total budget, rather than reheating. If another cap is still spent (say `--add-iterations`
+on a job out of hours), the extension is refused and names the flag to add. The `--add-*`
+flags also work on any job `--resume` accepts. A `won` job cannot be continued.
+
 Talos now pins TIG dev image `0.0.8` and source with the upstream seed-obfuscation fix.
 After upgrading from `0.0.7`, start a new job: saved runs from the old build cannot resume
 against the new runtime. Baselines are measured again automatically. Modal users must
@@ -516,7 +528,11 @@ Prompts for anything not given as a flag, unless `--yes` is passed.
 | `--budget-hours N` | Wall-clock cap in hours. |
 | `--budget-iterations N` | Iteration cap. |
 | `--budget-compute-usd N` | Estimated compute spend cap in USD. |
-| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed. Cannot change its mode, track, hyperparameters, nonces, start, search or chains. |
+| `--resume JOB_ID` | Continue a job that was interrupted, cancelled, paused or failed, or an `exhausted` job given an `--add-*` flag. Cannot change its mode, track, hyperparameters, nonces, start, search or chains. |
+| `--add-iterations N` | Adds N to the job's iteration cap. Only with `--resume`; refused for a cap the job was started without. |
+| `--add-hours N` | Adds N to the job's wall-clock cap. Only with `--resume`; refused for a cap the job was started without. |
+| `--add-usd N` | Adds N to the job's LLM spend cap. Only with `--resume`; refused for a cap the job was started without. |
+| `--add-compute-usd N` | Adds N to the job's compute spend cap. Only with `--resume`; refused for a cap the job was started without. |
 | `--yes` | Accept defaults instead of prompting. At least one of `--budget-usd`, `--budget-hours` or `--budget-iterations` must still be given; compute defaults to $20 (not asked and not set on the `local` backend, where it is always zero). |
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
@@ -574,7 +590,7 @@ One line per job under `runs/`:
 ```
 
 Status is one of `queued`, `measuring_baseline`, `researching`, `confirming`, `won`,
-`exhausted` (a budget ran out), `cancelled` (Ctrl-C), `paused` (the compute backend was
+`exhausted` (a budget ran out; resumable with `--add-*`), `cancelled` (Ctrl-C), `paused` (the compute backend was
 unreachable) or `failed` (the reason is in `state.json` and the last lines of
 `timeline.jsonl`).
 
@@ -612,8 +628,8 @@ Each job gets a directory under `runs/`:
 | Path | Contents |
 |---|---|
 | `runs/<job_id>/job.json` | The job's fixed inputs: challenge, direction, provider, model, mode, budget, nonces, fuel, track, baseline algorithm, hyperparameters, scoring, start, search, chains and the annealing settings. Written once. |
-| `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log, and the lineage tree (`nodes`, one per iteration, and `chains`, each chain's current node, best node and stall count). A `--scoring native` job also records its scoring, its per-track time budgets and a `validations` list: one entry per candidate that improved natively, with its iteration, its outcome (`validated` or `demoted`) and the reason it was demoted. |
-| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. A tree job (anneal, several chains or a template start) adds `accept` (one per scored candidate: chain, node, parent, family, score, decision, probability, temperature) and `reheat`. |
+| `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log, and the lineage tree (`nodes`, one per iteration, and `chains`, each chain's current node, best node and stall count). A job resumed with `--add-*` records each extension in `budget_extensions` (when, at which iteration, the status it was resumed from, and what it added). A `--scoring native` job also records its scoring, its per-track time budgets and a `validations` list: one entry per candidate that improved natively, with its iteration, its outcome (`validated` or `demoted`) and the reason it was demoted. |
+| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A resume with `--add-*` adds `budget_extended` (the additions and the resulting budget). A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. A tree job (anneal, several chains or a template start) adds `accept` (one per scored candidate: chain, node, parent, family, score, decision, probability, temperature) and `reheat`. |
 | `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
 | `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
 | `runs/<job_id>/challenge/` | A `--start template` job only: the challenge files and the template the LLM was shown. |
@@ -654,6 +670,8 @@ is cached outside the run directory, in `~/.talos/baselines/`; see
   question is skipped, no default is applied, and the cap stays unset.
 - The wall-clock budget (`--budget-hours`) counts elapsed time from the job's start,
   including time spent resumed.
+- `talos run --resume JOB_ID --add-*` adds to the job's caps (see [Resume](#resume)). The time
+  between a stop and the continuation is not counted against `--budget-hours`.
 
 Every spend figure in the status lines and the final report is an **estimate**, not a billed
 amount. Compute spend is measured running seconds times list prices in a table shipped with

@@ -347,3 +347,33 @@ def test_evidence_draft_lists_only_the_best_path_in_a_tree(tmp_path):
     text = evidence_draft(replace(spec, chains=2), st)
     assert "- Root step: Root step desc\n- Best step: Best step desc" in text
     assert "Other chain" not in text
+
+
+def test_readme_reports_budget_extensions(tmp_path):
+    # mutation: omitting the section hides that the job ran on more budget than job.json says
+    spec, st, store = make(tmp_path, status="exhausted")  # budget usd=1.0
+    st.budget_extensions = [{"at": 0.0, "iteration": 3, "previous_status": "exhausted",
+                             "add": {"iterations": None, "hours": None, "usd": 0.5,
+                                     "compute_usd": None}}]
+    text = (build_package(spec, st, store) / "README.md").read_text(encoding="utf-8")
+    assert "- Started with: usd 1.0\n" in text
+    assert "- Extended at iteration 3 (was exhausted): +0.5 usd\n" in text
+    assert "- Now: usd 1.5\n" in text
+
+
+def test_readme_without_extensions_has_no_budget_section(tmp_path):
+    # mutation: always printing the section
+    spec, st, store = make(tmp_path, status="exhausted")
+    assert "Budget extensions" not in (build_package(spec, st, store) / "README.md").read_text(
+        encoding="utf-8")
+
+
+def test_no_candidate_readme_reports_budget_extensions(tmp_path):
+    # mutation: adding the section to the candidate README only
+    spec, st, store = make(tmp_path, status="exhausted")
+    st.best = None
+    st.budget_extensions = [{"at": 0.0, "iteration": 3, "previous_status": "exhausted",
+                             "add": {"iterations": None, "hours": None, "usd": 0.5,
+                                     "compute_usd": None}}]
+    assert "- Now: usd 1.5\n" in (build_package(spec, st, store) / "README.md").read_text(
+        encoding="utf-8")
