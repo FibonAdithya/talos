@@ -676,6 +676,47 @@ def test_status_line_reports_hours_left(tmp_path):
     assert cli._status_line(spec, state, 5400.0).endswith("| 2.5h left")
 
 
+def _budget_spec(challenge, budget):
+    return cli.JobSpec(job_id="j", challenge=challenge, direction="d", provider="claude-cli",
+                       model="m", mode="single-shot", budget=budget, rand_hash="ab" * 32,
+                       tracks=["t"], training=[], holdout=[], fuel=1, created_at=0.0,
+                       monorepo_ref="r", challenge_id="c003")
+
+
+def test_status_line_counts_added_hours(tmp_path):
+    # mutation: _status_line reading spec.budget.hours prints "0.0h left" (1h cap, 1.5h used)
+    from talos.budget import Budget, Spend
+    from talos.state import JobState
+    spec = _budget_spec("knapsack", Budget(usd=None, hours=1.0, iterations=None,
+                                           compute_usd=1.0))
+    state = JobState.fresh(Spend(started_at=0.0))
+    state.budget_extensions = [{"add": {"iterations": None, "hours": 2.0, "usd": None,
+                                        "compute_usd": None}}]
+    assert cli._status_line(spec, state, 5400.0).endswith("| 1.5h left")
+
+
+def test_freeze_hardware_checks_the_extended_budget(tmp_path, monkeypatch):
+    # mutation: the pre-probe check reading spec.budget raises BudgetExhausted on a job whose
+    # extension gave it room. hypergraph on modal has options ('L40S', 'A100-80GB', 'H100'),
+    # so the pre-probe check runs; with no options it is skipped and this would pass anyway.
+    from talos.budget import Budget, Spend
+    from talos.state import JobState, JobStore
+    # setenv, not delenv(raising=False): delenv on an unset name records nothing, so the L40
+    # that freeze_hardware exports would leak into every later test.
+    monkeypatch.setenv("TALOS_HARDWARE", "")
+    spec = _budget_spec("hypergraph", Budget(usd=None, hours=None, iterations=1,
+                                             compute_usd=None))
+    state = JobState.fresh(Spend(started_at=0.0))
+    state.spend.iterations = 1
+    state.budget_extensions = [{"add": {"iterations": 1, "hours": None, "usd": None,
+                                        "compute_usd": None}}]
+    bench = types.SimpleNamespace(select_hardware=lambda ch, chosen=None: "L40",
+                                  cost_mark=lambda: 0.0, cost_usd_since=lambda m: 0.0)
+    cli.freeze_hardware(bench, spec, state, JobStore(tmp_path), "modal", log=lambda s: None,
+                        clock=lambda: 0.0)
+    assert state.hardware == "L40"
+
+
 # Payloads below are copied from runs/20260916-095103-knapsack/timeline.jsonl (a real C3 job),
 # with the expected lines written by hand.
 def test_event_line_hypothesis_shows_title_and_tag_only():

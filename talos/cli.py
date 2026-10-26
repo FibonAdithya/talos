@@ -23,7 +23,7 @@ from pathlib import Path
 
 from talos import image_updates
 from talos import mainnet as mainnet_api
-from talos.budget import Budget, BudgetExhausted, Spend, exhausted
+from talos.budget import Budget, BudgetExhausted, Spend, effective_budget, exhausted
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
@@ -246,7 +246,8 @@ def freeze_hardware(bench, spec, state, store, backend: str, log=print,
                     reason="job predates the hardware choice")
     if state.hardware is None:
         if options:
-            dim = exhausted(spec.budget, state.spend, clock())
+            dim = exhausted(effective_budget(spec.budget, state.budget_extensions),
+                            state.spend, clock())
             if dim:
                 raise BudgetExhausted(dim)
             log(f"Probing capacity for {spec.challenge}...")
@@ -471,10 +472,11 @@ def unpriced(provider: str, model: str) -> bool:
 
 def _status_line(spec: JobSpec, state: JobState, now: float) -> str:
     best = f"{state.best.delta['mean_rel_delta']:+.3%}" if state.best else "n/a"
-    if spec.budget.hours is None:
+    hours = effective_budget(spec.budget, state.budget_extensions).hours
+    if hours is None:
         left = "∞"
     else:
-        left = f"{max(0.0, spec.budget.hours - (now - state.spend.started_at) / 3600):.1f}h"
+        left = f"{max(0.0, hours - (now - state.spend.started_at) / 3600):.1f}h"
     llm = "unpriced" if unpriced(spec.provider, spec.model) else f"${state.spend.llm_usd:.2f}"
     return f"best {best} | llm {llm} | compute ≈${state.spend.compute_usd:.2f} | {left} left"
 
