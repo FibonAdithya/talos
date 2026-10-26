@@ -266,7 +266,8 @@ class Loop:
         if rec is None:
             rec = self._measure_calibration()
             if rec is not None:
-                calibration.save(cache_dir, self.spec.challenge, key, rec)
+                # Another job may have stored one while this one measured; that one is kept.
+                rec = calibration.create(cache_dir, self.spec.challenge, key, rec)
         needed = {s.track for s in self._focus()[0]}
         missing = sorted(needed - set((rec or {}).get("tracks", {})))
         if rec is None or missing:
@@ -730,7 +731,7 @@ class Loop:
             entry["mismatches"] = quality_mismatches(res.training, cand.training)
         self.state.validations.append(entry)
         if reason:
-            self._note_demotion(reason, res.training, cand.training)
+            self._note_demotion(n, reason, res.training, cand.training)
             record.update(outcome="failed:validation", error=reason)
             self._event("demoted", reason=reason)
             self._finish_iteration(n, record, improved=False, scored=cand.delta)
@@ -748,23 +749,25 @@ class Loop:
         if beats(base_tr, res.training, self.rule):
             self._confirm(best, res.holdout, res.holdout_reason)
 
-    def _note_demotion(self, reason: str, metered, native) -> None:
+    def _note_demotion(self, n: int, reason: str, metered, native) -> None:
         """Counts the demotion in the calibration record; a fuel-proxy miss also counts against
         each track with a miss (talos/scoring.py::fuel_proxy_misses), and a lowered margin
-        tightens this job's budgets."""
+        tightens this job's budgets. The count is locked against other jobs with the same key
+        and made once per iteration, even when a resume validates it again
+        (talos/calibration.py::count_validation)."""
         if self._calibration is None:
             return
         cache_dir, key = self._calibration
-        rec = calibration.load(cache_dir, self.spec.challenge, key)
-        if rec is None:
+        missed = (sorted({r.track for r in fuel_proxy_misses(metered, native)})
+                  if reason == "fuel_proxy_miss" else [])
+        # created_at as well: job ids are unique only within one runs/ directory, and two
+        # checkouts share the record. Never the rand hash, which must stay inside the job.
+        token = f"{self.spec.job_id}@{self.spec.created_at!r}:{n}"
+        counted = calibration.count_validation(cache_dir, self.spec.challenge, key, token,
+                                               reason, missed)
+        if counted is None:
             return
-        calibration.note_demotion(rec, reason)
-        changed = False
-        if reason == "fuel_proxy_miss":
-            for track in sorted({r.track for r in fuel_proxy_misses(metered, native)}):
-                if track in rec["tracks"]:
-                    changed = calibration.record_miss(rec, track) or changed
-        calibration.save(cache_dir, self.spec.challenge, key, rec)
+        rec, changed = counted
         if changed:
             self.state.fuel_budgets_us = calibration.budgets_us(rec, self.spec.fuel)
             self._save()

@@ -177,7 +177,13 @@ miss lowers that track's margin by 0.1 to a floor of 0.3
 misses and the one-second floor are ESTIMATES with no measurement behind them; they are
 tuned from the misses the records collect. The record stores the ratio measured when it was
 created, plus each track's margin and miss count; it never re-measures the ratio, and the
-budget is computed from it and the job's fuel each time.
+budget is computed from it and the job's fuel each time. Jobs with the same key share the
+record, so every change to it is a load, change and save under an exclusive lock on
+`<key>.lock` beside it (`talos/calibration.py::count_validation`,
+`talos/calibration.py::create`); a job that measured a record while another stored one keeps
+the stored one. Each count also stores a token for the job and iteration, so a resume that
+validates the same iteration again, after a kill between the record's save and `state.json`'s,
+counts nothing.
 
 **Validation.** A candidate that would become the best natively is first scored on the
 metered runtime, on the job's training nonces, by `talos/loop.py::Loop._validate_and_finish`.
