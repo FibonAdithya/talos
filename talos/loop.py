@@ -147,13 +147,18 @@ class Loop:
                 self._event("rate_limited", wait_s=self.t.rate_limit_wait_s)
                 self.sleep(self.t.rate_limit_wait_s)
                 self._check_budget()  # a stop or an hours cap must land during a rate-limit storm
-        # `is not None`, not truthiness: a measured cost of exactly 0.0 is a measurement, and
-        # None means "this model has no price-table entry" — which the CLI reports as unpriced
-        # rather than as $0.00, because a dollar cap cannot be enforced against it.
-        if c.usage.cost_usd is not None:
-            self.state.spend.llm_usd += c.usage.cost_usd
-        self._save()
+        self._charge_llm(c.usage.cost_usd)
         return c
+
+    def _charge_llm(self, cost_usd: float | None) -> None:
+        """Add one LLM call's cost to the job's spend and persist it. Single-shot calls come
+        through _llm; an agentic session's cost comes from talos/agentic.py.
+        `is not None`, not truthiness: a measured cost of exactly 0.0 is a measurement, and
+        None means "this model has no price-table entry" — which the CLI reports as unpriced
+        rather than as $0.00, because a dollar cap cannot be enforced against it."""
+        if cost_usd is not None:
+            self.state.spend.llm_usd += cost_usd
+        self._save()
 
     def _focus(self) -> tuple[list, list]:
         return focus_sets(self.spec.track, self.spec.training, self.spec.holdout)
