@@ -23,7 +23,9 @@ from pathlib import Path
 
 from talos import image_updates
 from talos import mainnet as mainnet_api
-from talos.budget import Budget, BudgetExhausted, Spend, effective_budget, exhausted
+from talos.budget import (ADD_DIMENSIONS, Budget, BudgetExhausted, Spend, effective_budget,
+                          exhausted)
+from talos.extend import ADD_FLAGS, BUDGET_FLAGS, ExtensionRefused, extend
 from talos.c3_bench import C3CommandError
 from talos.c3_jobdir import LocalSettings
 from talos.c3_transport import CliTransport, make_transport
@@ -583,7 +585,10 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
     return _one_line(text, width)
 
 
-def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> int:
+def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
+                add: dict[str, float] | None = None) -> int:
+    """Runs a new job, or resumes one. `add` holds the budget a resume adds, by dimension
+    (only the dimensions the user gave)."""
     # spec §7.1: refuse before anything is spent when the credential is missing.
     if cfg.provider not in UNMETERED and resolve_api_key(cfg) is None:
         env = ENV_KEYS.get(cfg.provider, "TALOS_CUSTOM_API_KEY")
@@ -593,8 +598,11 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
     from talos.package import build_package
     state = store.load() if resume else JobState.fresh(Spend(started_at=time.time()))
     if resume:
-        if state.status in ("won", "exhausted"):
+        if state.status == "won" or (state.status == "exhausted" and not add):
             print(f"job {spec.job_id} already {state.status}; nothing to resume")
+            flag = ADD_FLAGS.get(state.stop_reason) if state.status == "exhausted" else None
+            if flag:
+                print(f"to continue it, add budget with {flag}")
             pkg = build_package(spec, state, store)
             print(f"Package: {pkg}")
             _print_submission_hint(state, pkg)
@@ -605,16 +613,35 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool) -> in
                   f"start a new job with dev image {DEV_IMAGE_TAG} to remeasure the baseline "
                   "and candidates together", file=sys.stderr)
             return 2
-        if state.status in ("cancelled", "failed", "paused"):
-            previous = state.status
+        previous = state.status
+        # A hard-killed job (left researching, say) resumes without a shift: it was working
+        # until it died, as far as its last save shows.
+        stopped = previous in ("cancelled", "failed", "paused", "exhausted")
+        if stopped:
             # The wall-clock budget measures time the job was WORKING. started_at is shifted
             # forward by the pause (approximated as the time since the last save), or a job
             # resumed after its window has passed exits "exhausted (hours)" at once, for ever.
             paused_s = max(0.0, time.time() - (store.run_dir / "state.json").stat().st_mtime)
             state.spend.started_at += paused_s
+        entry = None
+        if add:
+            # After the shift, before any save: a refused extension leaves the files untouched.
+            try:
+                entry = extend(spec.budget, state, add, time.time(), previous)
+            except ExtensionRefused as e:
+                print(f"job {spec.job_id}: {e}", file=sys.stderr)
+                return 2
+        if stopped:
             state.status, state.stop_reason = "researching", None
             store.save(state)
             store.event("resumed", previous_status=previous, paused_s=round(paused_s, 1))
+        elif entry is not None:
+            store.save(state)
+        if entry is not None:
+            budget = effective_budget(spec.budget, state.budget_extensions).to_dict()
+            store.event("budget_extended", add=entry["add"], budget=budget)
+            added = ", ".join(f"+{v} {d}" for d, v in entry["add"].items() if v is not None)
+            print(f"Budget extended: {added}; budget now {budget}")
     else:
         store.save(state)
 
@@ -778,6 +805,13 @@ def _print_submission_hint(state: JobState, pkg: Path) -> None:
 
 def cmd_run(args, ask) -> int:
     root = Path.cwd()
+    add = {d: v for d in ADD_DIMENSIONS
+           if (v := getattr(args, f"add_{d}")) is not None}  # 0 counts as given; extend refuses
+    if add and not args.resume:
+        d = next(iter(add))
+        print(f"{ADD_FLAGS[d]} only applies with --resume; use {BUDGET_FLAGS[d]} for a new job",
+              file=sys.stderr)
+        return 2
     # spec §11: --fake needs neither a config file nor network, so it must be resolved before
     # `load(root)` is even attempted; a fresh clone with no talos.config.json still runs it.
     if args.fake:
@@ -838,7 +872,7 @@ def cmd_run(args, ask) -> int:
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
         if _codex_refused(cfg, spec.start):
             return 2
-        return execute_job(spec, store, cfg, resume=True)
+        return execute_job(spec, store, cfg, resume=True, add=add)
     if args.mode:
         if args.mode == "agentic" and cfg.provider not in CLI_PROVIDERS:
             print(f"--mode agentic needs a CLI provider ({' or '.join(CLI_PROVIDERS)}), "
@@ -1193,6 +1227,11 @@ def main(argv=None, ask=default_ask) -> int:
     r.add_argument("--budget-iterations", type=int)
     r.add_argument("--budget-compute-usd", type=float)
     r.add_argument("--resume")
+    # Each adds to one cap of a resumed job's budget (talos/extend.py); refused without --resume.
+    r.add_argument("--add-iterations", type=int)
+    r.add_argument("--add-hours", type=float)
+    r.add_argument("--add-usd", type=float)
+    r.add_argument("--add-compute-usd", type=float)
     r.add_argument("--yes", action="store_true")
     r.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)
     c = sub.add_parser("compile")
