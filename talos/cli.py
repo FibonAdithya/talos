@@ -636,10 +636,18 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
     return _one_line(text, width)
 
 
+_event_sleep = time.sleep  # the pause between event lines; tests patch this, not time.sleep
+
+
 def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
-                add: dict[str, float] | None = None) -> int:
+                add: dict[str, float] | None = None, *, fakes: tuple | None = None,
+                event_delay: float = 0.0) -> int:
     """Runs a new job, or resumes one. `add` holds the budget a resume adds, by dimension
-    (only the dimensions the user gave)."""
+    (only the dimensions the user gave). With provider "fake", `fakes` is the (provider, bench)
+    pair to run in place of the `--fake` one (`talos demo` passes its scripted pair).
+    `event_delay` pauses that many seconds after each printed event line."""
+    if fakes is not None and cfg.provider != "fake":
+        raise ValueError("fakes replace the fake provider's pair; the provider must be fake")
     # spec §7.1: refuse before anything is spent when the credential is missing.
     if cfg.provider not in UNMETERED and resolve_api_key(cfg) is None:
         env = ENV_KEYS.get(cfg.provider, "TALOS_CUSTOM_API_KEY")
@@ -711,7 +719,8 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
     if fake:
         from talos.bench import FakeBench
         from talos.providers.fake import FakeProvider
-        provider, bench = FakeProvider(_fake_script), FakeBench(_fake_scores)
+        provider, bench = (fakes if fakes is not None
+                           else (FakeProvider(_fake_script), FakeBench(_fake_scores)))
         cache_dir, mainnet = store.run_dir / "baseline_cache", FAKE_MAINNET
         calibration_dir = store.run_dir / "calibration_cache"
     else:
@@ -790,6 +799,8 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
         if kind == "hypothesis":
             print(flush=True)  # a blank line between iterations
         print(prefix + text, flush=True)
+        if event_delay > 0:
+            _event_sleep(event_delay)
 
     challenge_docs = None
     if spec.start == "template":
@@ -1184,6 +1195,54 @@ def cmd_run(args, ask) -> int:
     return execute_job(spec, store, cfg, resume=False)
 
 
+def cmd_demo(args, ask) -> int:
+    """A scripted job on the real loop, in-process: a compile failure and its fix, two
+    iterations with no gain, a false positive and a win (talos/demo.py)."""
+    from talos.bench import FakeBench
+    from talos.demo import DemoScript, demo_compile_ok, demo_scores, describe_package
+    from talos.providers.fake import FakeProvider
+
+    root = Path.cwd()
+    challenge = args.challenge
+    cfg = Config(provider="fake", model="fake", mode="single-shot", api_base=None,
+                 backend="modal")  # the fake bench is in-process: no backend to pick
+    cs = CHALLENGES[challenge]
+    info = ChallengeInfo(id=cs.id, name=challenge, is_gpu=cs.is_gpu, tracks=["n=1"], max_fuel=1)
+    algorithm, hyperparameters, hp_source = _mainnet_hyperparameters(FAKE_MAINNET, challenge,
+                                                                     info)
+    direction = "demo: raise k"
+    rand_hash = new_rand_hash()
+    training, holdout = draw_nonce_sets(info.tracks, rand_hash, training_count=NONCES_PER_TRACK,
+                                        holdout_count=NONCES_PER_TRACK)
+    job_id = _new_job_id(root, challenge, prefix="demo-")
+    budget = Budget(usd=None, hours=None, iterations=6, compute_usd=None)
+    spec = JobSpec(job_id=job_id, challenge=challenge, direction=direction, provider=cfg.provider,
+                   model=cfg.model, mode=cfg.mode, budget=budget, rand_hash=rand_hash,
+                   tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
+                   created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id, track=None, baseline_algorithm=algorithm,
+                   hyperparameters=hyperparameters, hyperparameters_source=hp_source,
+                   dev_image_tag=DEV_IMAGE_TAG, scoring="native", start="mainnet",
+                   search="greedy", chains=1, anneal=None)
+    store = JobStore(root / "runs" / job_id)
+    store.write_spec(spec)
+    (store.run_dir / "tacit.md").write_text(user_tacit(direction),
+                                            encoding="utf-8", newline="\n")
+    print(f"This is a scripted demo of a {challenge} job: no account, no network and no spend. "
+          f"Results go to runs/{job_id}/.")
+    # Zero prices: the status lines then show $0.00, as the line above promises.
+    rc = execute_job(spec, store, cfg, resume=False,
+                     fakes=(FakeProvider(DemoScript(), usd_per_call=0.0),
+                            FakeBench(demo_scores, compile_ok=demo_compile_ok,
+                                      usd_per_nonce=0.0)),
+                     event_delay=args.delay)
+    print("\nWhat is in the package:")
+    for line in describe_package(store.run_dir / "package"):
+        print(line)
+    print(f"See the run as a page: talos report {job_id}")
+    print("Next: talos setup, then talos doctor")
+    return rc
+
+
 def compile_backend(args, root: Path) -> str:
     """--backend, then TALOS_BACKEND (exported by execute_job for the agentic sandbox, whose
     worktree has no config file), then the config in `root`, then modal."""
@@ -1400,6 +1459,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip every question and the confirmation; take defaults (compute cap "
                         f"${DEFAULT_COMPUTE_USD:.0f} on hosted backends)")
     r.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)
+    d = sub.add_parser("demo", help="watch a scripted job: no account, network or spend",
+                       description="Run a scripted job in-process on the real research loop. "
+                                   "It shows a compile failure and its fix, iterations with "
+                                   "no gain, a false positive on the held-out nonces and a "
+                                   "win, then the package a real job writes.")
+    d.add_argument("--challenge", choices=list(CHALLENGES), default=DEFAULT_CHALLENGE,
+                   help=f"challenge to label the demo with (default {DEFAULT_CHALLENGE})")
+    d.add_argument("--delay", type=float, default=0.4,
+                   help="seconds to pause after each event line (default 0.4; 0 disables)")
     c = sub.add_parser("compile", help="compile an algorithm directory on the backend",
                        description="Compile a challenge algorithm and print the result. "
                                    "Agents call this from inside a run.")
@@ -1429,7 +1497,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
-            "report": cmd_report, "check-updates": cmd_check_updates}
+            "report": cmd_report, "check-updates": cmd_check_updates, "demo": cmd_demo}
 
 
 def main(argv=None, ask=default_ask) -> int:
