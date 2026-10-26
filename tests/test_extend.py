@@ -92,3 +92,13 @@ def test_extend_leaves_the_pending_job_alone():
     st.pending_job = {"purpose": 6, "job_id": "c3-123"}
     extend(b, st, {"iterations": 1}, now=0.0, previous_status="paused")
     assert st.pending_job == {"purpose": 6, "job_id": "c3-123"}
+
+
+def test_rescale_uses_the_real_fraction_of_a_job_that_overshot_its_cap():
+    # A 4 h job that ran 6 h (an iteration overran the cap) and reheated at 0.9 (3.6 h), +4 h.
+    # On the 8 h budget the reheat point is 3.6 / 8 = 0.45, and spend is 6 / 8 = 0.75.
+    # mutation: the clamped spent fraction makes s_old 1.0 and gives 0.9 * 0.75 = 0.675
+    b, st = job(100, 0, hours=4.0)
+    st.chains = [Chain(0, reheated_at=0.9)]
+    extend(b, st, {"hours": 4.0}, now=6 * 3600.0, previous_status="exhausted")
+    assert st.chains[0].reheated_at == pytest.approx(0.45)

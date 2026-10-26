@@ -43,7 +43,10 @@ def extend(budget: Budget, state: JobState, add: dict[str, float], now: float,
     still = exhausted(new, state.spend, now)
     if still:
         raise ExtensionRefused(f"job is still out of budget on {still}; add {ADD_FLAGS[still]}")
-    s_old, s_new = spent_fraction(old, state.spend, now), spent_fraction(new, state.spend, now)
+    # Unclamped: a job that ran past its cap has spent more than 1.0 of it, and clamping s_old
+    # to 1.0 would leave the reheat point too high on the new budget's scale.
+    s_old = spent_fraction(old, state.spend, now, clamp=False)
+    s_new = spent_fraction(new, state.spend, now, clamp=False)
     if s_old > 0:
         for c in state.chains:
             c.reheated_at *= s_new / s_old
