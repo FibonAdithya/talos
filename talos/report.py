@@ -616,7 +616,7 @@ h3{font-size:14px;margin:16px 0 6px}.muted{color:var(--muted);font-weight:400;fo
 .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:4px 24px}
 table{border-collapse:collapse}.kv th{text-align:left;font-weight:500;color:var(--muted);
 padding:2px 12px 2px 0;vertical-align:top;white-space:nowrap}.kv td{padding:2px 0;
-overflow-wrap:anywhere}
+vertical-align:top;overflow-wrap:anywhere}
 table.grid{min-width:min(100%,560px)}table.grid th,table.grid td{border-bottom:1px solid
 var(--line);padding:4px 10px;text-align:right}table.grid th:first-child,table.grid
 td:first-child{text-align:left}table.grid tr.total td{font-weight:600}
