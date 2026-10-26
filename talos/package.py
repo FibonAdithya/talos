@@ -49,31 +49,35 @@ def _diff(base: dict[str, str], cand: dict[str, str], label: str = "baseline") -
     return "".join(out)
 
 
-def scores_sections(spec: JobSpec, state: JobState) -> list[tuple[str, str]]:
-    """(heading, table) pairs for scores.md and the evidence appendix. Focused jobs get the
-    track's training and held-out tables plus a guard table for the other tracks; unfocused
-    jobs keep the two plain headings."""
+def score_pairs(spec: JobSpec, state: JobState
+                ) -> list[tuple[str, list[NonceResult], list[NonceResult]]]:
+    """(heading, baseline rows, candidate rows) per scores table. Focused jobs get the track's
+    training and held-out rows plus a guard pair for the other tracks; unfocused jobs keep the
+    two plain headings."""
     base, best = state.baseline, state.best
     training_sets, holdout_sets = focus_sets(spec.track, spec.training, spec.holdout)
     if spec.track is None:
-        out = [("Training nonces", scores_markdown(base.training, best.training))]
+        out = [("Training nonces", base.training, best.training)]
         if best.holdout:
-            out.append(("Held-out nonces", scores_markdown(base.holdout, best.holdout)))
+            out.append(("Held-out nonces", base.holdout, best.holdout))
         return out
     t = spec.track
-    out = [(f"Training nonces (track {t})",
-            scores_markdown(select(base.training, training_sets), best.training))]
+    out = [(f"Training nonces (track {t})", select(base.training, training_sets),
+            best.training)]
     if best.holdout:
         focus_ho = [s for s in holdout_sets if s.track == t]
         guards = [s for s in holdout_sets if s.track != t]
-        out.append((f"Held-out nonces (track {t})",
-                    scores_markdown(select(base.holdout, focus_ho),
-                                    select(best.holdout, focus_ho))))
+        out.append((f"Held-out nonces (track {t})", select(base.holdout, focus_ho),
+                    select(best.holdout, focus_ho)))
         if guards:
             out.append(("Regression guard (other tracks, training nonces)",
-                        scores_markdown(select(base.training, guards),
-                                        select(best.holdout, guards))))
+                        select(base.training, guards), select(best.holdout, guards)))
     return out
+
+
+def scores_sections(spec: JobSpec, state: JobState) -> list[tuple[str, str]]:
+    """(heading, table) pairs for scores.md and the evidence appendix."""
+    return [(h, scores_markdown(b, c)) for h, b, c in score_pairs(spec, state)]
 
 
 def evidence_draft(spec: JobSpec, state: JobState) -> str:

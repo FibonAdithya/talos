@@ -377,3 +377,10 @@ def test_no_candidate_readme_reports_budget_extensions(tmp_path):
                                      "compute_usd": None}}]
     assert "- Now: usd 1.5\n" in (build_package(spec, st, store) / "README.md").read_text(
         encoding="utf-8")
+
+
+def test_score_pairs_match_scores_sections(tmp_path):
+    from talos.package import score_pairs, scores_sections
+    spec, st, _ = make(tmp_path)
+    assert [h for h, _, _ in score_pairs(spec, st)] == [h for h, _ in scores_sections(spec, st)]
+    assert len(score_pairs(spec, st)) == 2  # training and held-out
