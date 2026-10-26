@@ -389,3 +389,49 @@ def test_full_cost_text():
     t = doctor.full_cost_text("c3", "hypergraph")
     assert "£0.99" in t and "£2.45" in t
     assert "no compute charge" in doctor.full_cost_text("local", "hypergraph")
+
+
+def test_local_json_full_yes_keeps_stdout_pure_json(tmp_path, monkeypatch, capsys):
+    # mutation: prepare called with its default log=print, or the cost line printed to stdout,
+    # or remove_compile_containers moved out of the finally / dropped
+    all_ok(monkeypatch, tmp_path, backend="local")
+    stub_full_mainnet(monkeypatch)
+    calls = []
+
+    def prepare(challenge, run=None, log=print):
+        calls.append(("prepare", challenge))
+        log("pulling zz-image (about 13 GB, once)")
+        return None
+
+    monkeypatch.setattr(local_transport, "prepare", prepare)
+    monkeypatch.setattr(cli, "local_settings", lambda cfg, info=None: object())
+    monkeypatch.setattr(cli, "make_bench", recording_bench(calls))
+    monkeypatch.setattr(cli, "remove_compile_containers",
+                        lambda run_dir: calls.append(("remove", run_dir)))
+    rc = cli.main(["doctor", "--json", "--full", "--yes"], ask=no_ask)
+    cap = capsys.readouterr()
+    doc = json.loads(cap.out)  # one JSON document and nothing else
+    assert rc == 0 and doc["ok"] is True
+    assert [c["name"] for c in doc["checks"]][-1] == "full"
+    assert "pulling zz-image" in cap.err
+    assert "no compute charge" in cap.err
+    assert [c[0] for c in calls] == ["prepare", "make_bench", "select_hardware", "evaluate",
+                                     "remove"]
+
+
+@pytest.mark.parametrize("exc", [
+    json.JSONDecodeError("Expecting value", "<html>captive portal</html>", 0),
+    OSError("connection reset by peer"),
+])
+def test_mainnet_garbage_or_dropped_connection_is_unreachable(tmp_path, monkeypatch, capsys,
+                                                              exc):
+    # mutation: the except in check_mainnet narrowed back to MainnetError (a traceback)
+    all_ok(monkeypatch, tmp_path)
+
+    def fetch(get_json=None):
+        raise exc
+    monkeypatch.setattr(mainnet, "fetch_challenges", fetch)
+    rc = cli.main(["doctor"], ask=no_ask)
+    ln = line_for(capsys.readouterr().out, "mainnet")
+    assert rc == 1
+    assert ln.startswith("mainnet: FAIL: unreachable") and "check your network" in ln

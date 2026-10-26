@@ -3,6 +3,7 @@ scores one baseline on the configured backend. Every dependency is reached throu
 and `mainnet` modules so tests can replace it."""
 from __future__ import annotations
 
+import http.client
 import json
 import shutil
 import sys
@@ -142,7 +143,9 @@ def check_backend(cfg: Config) -> Check:
 def check_mainnet() -> Check:
     try:
         infos = {i.name: i for i in mainnet.fetch_challenges()}
-    except mainnet.MainnetError as e:
+    except (mainnet.MainnetError, ValueError, OSError, http.client.HTTPException) as e:
+        # ValueError: a captive portal's HTML page is not JSON. OSError: a connection dropped
+        # on a path that does not wrap it. Doctor diagnoses the network, so none may escape.
         return Check("mainnet", FAIL, f"unreachable: {e}; check your network")
     drift = []
     for name, spec in CHALLENGES.items():
@@ -244,7 +247,8 @@ def full_check(cfg: Config, challenge: str) -> Check:
             local = None
             try:
                 if cfg.backend == "local":
-                    local_transport.prepare(challenge)
+                    # stdout belongs to the text lines or, with --json, to the JSON alone
+                    local_transport.prepare(challenge, log=_to_stderr)
                     local = cli.local_settings(cfg)
                 bench = cli.make_bench(
                     cfg.backend, run_dir, PendingJobStore.memory(),
@@ -267,6 +271,10 @@ def full_check(cfg: Config, challenge: str) -> Check:
              f"{k}/{total} nonces ok", f"compute spend (estimated) ${spend:.2f}"]
     status = OK if r.compile.ok and k > 0 else FAIL
     return Check("full", status, ", ".join(parts))
+
+
+def _to_stderr(msg: str) -> None:
+    print(msg, file=sys.stderr)
 
 
 def _line(c: Check) -> str:

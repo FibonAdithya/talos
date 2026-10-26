@@ -295,3 +295,15 @@ def test_fetch_challenges_keeps_a_challenge_without_tracks_or_fuel():
 
     assert mainnet.fetch_challenges(get_json=gj) == [
         mainnet.ChallengeInfo("c009", "new_one", False, [], 0)]
+
+
+def test_challenge_info_without_fuel_budget_raises():
+    # mutation: dropping the max_fuel check hands a job a fuel budget of 0
+    def gj(url):
+        if "/get-challenges?" in url:
+            return {"challenges": [{"id": "c003", "config": {
+                "name": "knapsack", "type": "cpu", "active_tracks": {"n=1": {}}}}]}
+        return fake_get_json(url)
+
+    with pytest.raises(mainnet.MainnetError, match="max_fuel_budget"):
+        mainnet.fetch_challenge_info("knapsack", get_json=gj)
