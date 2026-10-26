@@ -157,7 +157,11 @@ progress.
    `talos/cli.py::freeze_hardware` checks the budget before it and charges what
    the bench estimated for it. A job with `--budget-compute-usd 0` must stop
    before the baseline compile, and before the probe. A guard written as
-   `if budget:` reintroduces the bug this was fixed for.
+   `if budget:` reintroduces the bug this was fixed for. This covers the
+   compute calls a job makes. `talos doctor --full` runs outside any job and
+   has no budget: its probe and its one compile-and-score are guarded by the
+   `Spend this?` confirmation (default no) or `--yes` instead (the repo owner's
+   decision, 2026-10-26).
 6. **`state.json` is written atomically and fsynced.**
    `talos/state.py::_atomic_write` is the only way it is written. A resume
    reads it back; a truncated `state.json` is an unresumable job.
@@ -217,6 +221,8 @@ Do not decide these yourself. Raise them and stop.
   provider and Modal account.
 - Running `tests/test_live.py`. It spends the user's Modal budget, C3 credit or, for
   the agentic test, LLM tokens.
+- Running `talos doctor --full` against a real backend. It compiles and scores a
+  baseline on the user's Modal account, C3 credit or machine, outside any job budget.
 - Changing the calibration constants in `talos/calibration.py` (`MARGIN_START`,
   `MARGIN_STEP`, `MARGIN_FLOOR`, `MISS_LIMIT`, `BUDGET_FLOOR_US`), or changing the default
   of `talos run --scoring` (`native` since 2026-09-29, the repo owner's decision). Together
@@ -245,7 +251,10 @@ nobody.
 | The research loop, its guards, the agentic sandbox, the baseline cache | `docs/architecture.md` |
 | Modal, C3 and local transports, job directories, timings, the dev images | `docs/compute-backends.md` |
 | Why a decision was made (non-authoritative) | `docs/ai/specs/` |
-| CLI entry point, wizards, flags | `talos/cli.py::main` |
+| CLI flags and dispatch | `talos/cli.py::build_parser`, `talos/cli.py::COMMANDS` |
+| Wizard menus and the yes/no confirmation | `talos/wizard.py`; the `run` wizard and job summary in `talos/cli.py::cmd_run` |
+| `talos demo`: scripted provider, scores, package guide | `talos/demo.py`, `talos/cli.py::cmd_demo` |
+| `talos doctor`: health checks and `--full` | `talos/doctor.py` |
 | Per-challenge pins, beat rules, hardware | `talos/challenges.py::CHALLENGES` |
 | One iteration of the research loop | `talos/loop.py::Loop.iterate`, confirmation in `talos/loop.py::Loop._confirm` |
 | Lineage tree, chains, annealing accept rule and temperature | `talos/lineage.py::decide`, `talos/lineage.py::temperature`, `talos/loop.py::Loop._anneal_step` |

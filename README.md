@@ -314,7 +314,7 @@ talos --help
   **C3 API key** prompt in `talos setup`. With a key, Talos talks to C3 over HTTPS and nothing
   from C3 needs installing. This path is covered by unit tests, and one real C3 job ran over
   it from Linux on 2026-09-18 (MEASURED, `docs/ai/specs/2026-09-17-c3-mcp-transport-design.md`
-  §8). None has run from Windows, so run the smoke test in step 5 before a real run. The `c3`
+  §8). None has run from Windows, so run `talos doctor --full` (step 5) before a real run. The `c3`
   CLI path (key left blank) has not been tried on Windows: C3's documented installer is a
   shell script, and Windows cannot mark job.sh executable on disk, so it is unknown whether
   a job uploaded by the CLI from Windows would start.
@@ -540,7 +540,7 @@ The free checks run in this order and print one line each, `name: ok (detail)` o
 - `provider`: one test call to the LLM.
 - `backend`: Modal has every function of the `talos-bench` app deployed; C3 is logged in and
   has credit (`warn` under £1); Docker answers on a local backend.
-- `mainnet`: mainnet is reachable and its challenge ids and hardware classes match
+- `mainnet`: mainnet is reachable, and each challenge's id and CPU/GPU flag match
   `talos/challenges.py`.
 - `images`: the pinned dev image is on GHCR for every challenge.
 
@@ -635,8 +635,8 @@ track, the hyperparameters (`mainnet` or `none`), and the nonces per track (defa
 Talos refuses to start, before spending anything, when: there is no API key for the
 provider; the model has no entry in the price table, or the provider is `codex-cli` (which
 reports no cost), and the only budget is `--budget-usd` (a dollar cap it could not enforce);
-the mainnet challenge id no longer matches `talos/challenges.py`; or, on C3, the challenge's
-dev image tag is not on GHCR.
+the mainnet challenge id no longer matches `talos/challenges.py`; mainnet gives no fuel
+budget for the challenge; or, on C3, the challenge's dev image tag is not on GHCR.
 
 Exit code 0 when the job ends `won`, or when you decline the confirmation; 1 when it ends any other way, or when the mainnet or
 dev image check stops it; 2 for invalid arguments, a missing config, or a missing API key.
@@ -649,7 +649,7 @@ talos compile --challenge knapsack --dir algorithm
 
 | Flag | Meaning |
 |---|---|
-| `--challenge NAME` | Required. |
+| `--challenge NAME` | Required. One of the names in the challenge status table under `talos run`; any other name exits 2 with a usage error. |
 | `--dir PATH` | Directory whose `.rs` and `.cu` files are compiled (default `algorithm`). |
 | `--backend modal\|c3\|local` | Backend to use. Without it: `TALOS_BACKEND`, then `talos.config.json`, then `modal`. |
 | `--native` | Build the unmetered `talos-native` runner instead of TIG's metered build. This is the build a `--scoring native` job (the default) scores with, and its agent is told to pass this flag. Without it the build is TIG's metered one, the build a submission uses. |
