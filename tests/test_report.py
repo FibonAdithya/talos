@@ -1,4 +1,6 @@
 import json
+import re
+from datetime import datetime, timezone
 
 from talos.lineage import Node
 from talos.report import (
@@ -10,7 +12,7 @@ from talos.report import (
     run_sources,
     truncate,
 )
-from tests.run_fixture import make_run
+from tests.run_fixture import HASH, make_run
 
 
 def _node(i, parent=0, **kw):
@@ -231,3 +233,124 @@ def test_read_timeline_skips_bad_lines(tmp_path):
     p.write_text(json.dumps({"kind": "a"}) + "\n{not json\n" + json.dumps({"kind": "b"}) + "\n",
                  encoding="utf-8")
     assert len(read_timeline(p)) == 2 and read_timeline(tmp_path / "absent") == []
+
+
+# ── render_report ────────────────────────────────────────────────────
+
+
+def _render(spec, st, store):
+    from talos.report import render_report
+    return render_report(spec, st, read_timeline(store.run_dir / "timeline.jsonl"),
+                         run_sources(store.run_dir, spec, st))
+
+
+def rendered(tmp_path, hyps, **kw):
+    return _render(*make_run(tmp_path, hyps, **kw))
+
+
+def _scored(n, against=0, **kw):
+    return [{"iteration": i, "against": against, "mean_rel_delta": 0.01 * i, **kw}
+            for i in range(1, n + 1)]
+
+
+def _classes(html):
+    return dict(re.findall(r'<g data-node="(\d+)" class="([^"]*)"', html))
+
+
+def test_every_node_drawn_once(tmp_path):
+    hyps = _scored(6) + [{"iteration": 7, "against": 0, "outcome": "failed:compile"}]
+    html = rendered(tmp_path, hyps, best=5)
+    ids = re.findall(r'data-node="(\d+)"', html)
+    assert sorted(map(int, ids)) == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_no_external_urls(tmp_path):
+    html = rendered(tmp_path, _scored(3), best=2,
+                    timeline=[{"kind": "started"}, {"kind": "false_positive", "iteration": 2,
+                                                    "holdout": {"mean_rel_delta": -0.01}}])
+    assert not re.search(r"https?://|@import|(?:src|href)=\"(?!#)", html)
+
+
+def test_no_rand_hash(tmp_path):
+    assert HASH not in rendered(tmp_path, _scored(3), best=2)
+
+
+def test_llm_text_is_escaped(tmp_path):
+    evil = "</script><script>alert(1)</script>"
+    hyps = [{"iteration": 1, "against": 0, "outcome": "improved", "mean_rel_delta": 0.1,
+             "title": evil, "description": evil, "strategy_tag": evil, "error": evil}]
+    files = {1: {"mod.rs": f"line a\n{evil}\nline c\n"}}
+    html = rendered(tmp_path, hyps, best=1, iteration_files=files)
+    assert evil not in html and "<script>alert(1)" not in html
+    assert html.count("<script") == 2   # the JSON block and the page script
+
+
+def test_holdout_diamond_at_iteration(tmp_path):
+    timeline = [{"kind": "started"},
+                {"kind": "false_positive", "iteration": 4, "holdout": {"mean_rel_delta": -0.01}}]
+    html = rendered(tmp_path, _scored(5), best=5, false_positives=[4], timeline=timeline)
+    assert 'data-holdout="4"' in html and 'data-holdout="5"' not in html
+
+
+def test_failed_node_on_strip_and_outlier_cut(tmp_path):
+    hyps = [{"iteration": i, "against": 0, "mean_rel_delta": 0.02 + 0.001 * i}
+            for i in range(1, 11)]
+    hyps += [{"iteration": 11, "against": 0, "mean_rel_delta": -1.0},
+             {"iteration": 12, "against": 0, "outcome": "failed:compile"}]
+    cls = _classes(rendered(tmp_path, hyps))
+    assert "cut" in cls["11"].split() and "cut" not in cls["5"].split()
+    assert {"k-failed", "strip"} <= set(cls["12"].split()) and "strip" not in cls["5"].split()
+
+
+def test_one_star_rendered(tmp_path):
+    hyps = _scored(5, outcome="improved")
+    nodes = [_node(i, outcome="improved", score=0.01 * i, best=i in (2, 5))
+             for i in range(1, 6)]
+    cls = _classes(rendered(tmp_path, hyps, nodes=nodes, best=5))
+    assert [i for i, c in cls.items() if "k-best" in c.split()] == ["5"]
+
+
+def test_unrecorded_parent_has_no_edge(tmp_path):
+    hyps = [{"iteration": 1, "against": 0, "mean_rel_delta": 0.01},
+            {"iteration": 2, "against": 1, "mean_rel_delta": 0.02},
+            {"iteration": 3, "against": 99, "mean_rel_delta": 0.03}]
+    html = rendered(tmp_path, hyps)
+    assert "parent #99 not recorded" in html
+    assert 'data-edge="0-1"' in html and 'data-edge="1-2"' in html
+    assert 'data-edge="99-3"' not in html
+
+
+def test_deterministic(tmp_path):
+    run = make_run(tmp_path, _scored(4), best=3,
+                   timeline=[{"kind": "started"}, {"kind": "won", "iteration": 3,
+                                                   "holdout": {"mean_rel_delta": 0.02}}])
+    a, b = _render(*run), _render(*run)
+    assert a == b
+    assert datetime.now(timezone.utc).strftime("%Y-%m-%d") not in a
+    assert "2001-09-09" in a   # the fixture's first timeline ts
+
+
+def test_no_best_and_no_baseline_branches(tmp_path):
+    no_best = rendered(tmp_path / "a", _scored(3))
+    assert "No candidate beat the baseline" in no_best and 'data-node="1"' in no_best
+    no_base = rendered(tmp_path / "b", _scored(3), baseline=None)
+    assert "data-node=" not in no_base and "knapsack" in no_base
+
+
+def test_per_track_tables(tmp_path):
+    html = rendered(tmp_path, _scored(3), best=2)
+    # make_run's best: baseline 100/100, candidate 110/111 on training -> +10.500%
+    assert "Training nonces" in html and "Held-out nonces" in html
+    assert "<td>t</td>" in html and "+10.500%" in html
+
+
+def test_200_node_report_under_2mb(tmp_path):
+    def body(i, lines):
+        return "".join(f"    let value_{i}_{k:05d} = compute(x, y, z);\n" for k in range(lines))
+    hyps = [{"iteration": i, "against": i - 1, "outcome": "improved",
+             "mean_rel_delta": 0.0001 * i} for i in range(1, 201)]
+    files = {i: {"mod.rs": body(i, 1300)} for i in range(1, 200)}
+    files[200] = {"mod.rs": body(200, 11000)}
+    html = rendered(tmp_path, hyps, best=200, iteration_files=files)
+    assert len(html.encode("utf-8")) < 2_000_000
+    assert html.count("truncated (") == 201
