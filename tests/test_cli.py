@@ -10,7 +10,7 @@ import pytest
 from talos import cli
 from talos.bench import BenchCancelled, EvalResult
 from talos.c3_bench import C3CommandError
-from talos.challenges import DEV_IMAGE_TAG
+from talos.challenges import CHALLENGES, DEV_IMAGE_TAG
 from talos.config import (Config, ConfigError, load, resolve_api_key, resolve_c3_api_key,
                           save)
 from talos.mainnet import MainnetError, TrackHyperparameters
@@ -133,7 +133,7 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     monkeypatch.setattr(cli, "execute_job",
                         lambda spec, store, cfg, resume: seen.update(spec=spec, cfg=cfg) or 0)
     prompts = []
-    answers = iter(["knapsack", "go", "abc", "3", "4", "5", "agentic", "", "", ""])
+    answers = iter(["knapsack", "go", "abc", "3", "4", "5", "agentic", "", "", "", ""])  # last: Start this job?
 
     def ask(prompt, default=None, secret=False):
         prompts.append(prompt)
@@ -148,10 +148,11 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     assert "$" not in prompts[0] and "estimated" not in prompts[0]
     assert "CPU, tested" in prompts[0]
     assert prompts.count("Iteration budget") == 2  # the typo was re-asked, not fatal
-    assert prompts[-4].startswith("Mode:\n") and "roughly 5-20x the tokens" in prompts[-4]
-    assert prompts[-3].startswith("Track to optimise:\n") and "n=1" in prompts[-3]
-    assert prompts[-2].startswith("Hyperparameters:\n")
-    assert prompts[-1] == "Nonces per track"
+    assert prompts[-5].startswith("Mode:\n") and "roughly 5-20x the tokens" in prompts[-5]
+    assert prompts[-4].startswith("Track to optimise:\n") and "n=1" in prompts[-4]
+    assert prompts[-3].startswith("Hyperparameters:\n")
+    assert prompts[-2] == "Nonces per track"
+    assert prompts[-1] == "Start this job?"
     assert seen["spec"].track is None
     assert seen["spec"].budget.iterations == 3 and seen["spec"].budget.hours == 4.0
     assert seen["spec"].budget.compute_usd == 5.0
@@ -1459,12 +1460,13 @@ def test_run_wizard_asks_for_nonces_only_when_the_flag_is_absent(tmp_path, monke
     seen = {}
     monkeypatch.setattr(cli, "execute_job",
                         lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
-    ask, prompts = _recording(["", "", "", "6"])  # compute budget, track, hyperparameters
+    ask, prompts = _recording(["", "", "", "6", ""])  # compute budget, track, hyperparameters, nonces, confirm
     rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
                    "--budget-iterations", "3"], ask=ask)
     assert rc == 0 and [s.count for s in seen["spec"].training] == [6]
-    assert prompts[-1] == ("Nonces per track", "8")
-    ask, prompts = _recording(["", "", ""])
+    assert prompts[-2] == ("Nonces per track", "8")
+    assert prompts[-1] == ("Start this job?", "y")
+    ask, prompts = _recording(["", "", "", ""])
     rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
                    "--budget-iterations", "3", "--nonces", "2"], ask=ask)
     assert rc == 0 and [s.count for s in seen["spec"].training] == [2]
@@ -1504,7 +1506,7 @@ def test_run_track_all_on_the_flag_means_every_track(tmp_path, monkeypatch, caps
                    "--budget-iterations", "3", "--track", "all"], ask=ask)
     assert rc == 0 and seen["spec"].track is None
     assert not any(p.startswith("Track to optimise") for p in prompts)  # the flag answered it
-    assert "1 tracks, fuel 7" in capsys.readouterr().out
+    assert "1 tracks, 8 nonces per track, fuel 7" in capsys.readouterr().out
 
 
 def test_resume_of_a_focused_job_with_track_all_is_refused(tmp_path, monkeypatch, capsys):
@@ -1616,7 +1618,7 @@ def test_wizard_hyperparameters_answer_none_and_a_bad_answer(tmp_path, monkeypat
     monkeypatch.setattr(cli, "execute_job",
                         lambda spec, store, cfg, resume: seen.update(spec=spec) or 0)
     wizard = ["knapsack", "go", "3", "4", "5", "single-shot", ""]
-    assert cli.main(["run"], ask=scripted(wizard + ["none", ""])) == 0  # "" = default nonces
+    assert cli.main(["run"], ask=scripted(wizard + ["none", "", ""])) == 0  # "" = default nonces, then yes
     # mutation: ignoring the wizard answer applies mainnet values the user declined
     assert seen["spec"].hyperparameters is None and seen["spec"].baseline_algorithm is None
     # mutation: accepting any answer starts a job whose choice nobody made
@@ -2149,7 +2151,7 @@ def test_run_local_skips_the_compute_budget_question_and_leaves_the_cap_unset(tm
     # raise "unexpected prompt"], mode, track, hyperparameters, nonces (blank = the default
     # for each)
     rc = cli.main(["run", "--challenge", "knapsack"],
-                  ask=scripted(["go", "1", "1", "", "", "", ""]))
+                  ask=scripted(["go", "1", "1", "", "", "", "", ""]))  # last: Start this job?
     assert rc == 1 and seen["compute"] is None
     # --yes must not apply DEFAULT_COMPUTE_USD either
     rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
@@ -2859,7 +2861,7 @@ def test_fake_template_anneal_run_end_to_end(tmp_path, monkeypatch, capsys):
     assert all(n.score == 0.0 and n.accepted for n in state.nodes)
     assert state.chains[2].current == 0 and state.chains[2].best == 0
     assert (run_dir / "package" / "lineage.json").is_file()
-    assert "start template, search anneal, 3 chain(s)" in out
+    assert "start template, anneal, 3 chain(s)" in out
     assert "chain 0 #1 <- #0 [" in out and "accepted (improved)" in out
     # mutation: not passing the stored docs to the Loop leaves them out of every prompt
     assert any("Fake challenge: maximise k." in u for u in prompts)
@@ -3191,3 +3193,122 @@ def test_challenge_flag_lists_its_choices(capsys):
     with pytest.raises(SystemExit):
         cli.main(["compile", "--help"])
     assert "{satisfiability,vehicle_routing,knapsack," in capsys.readouterr().out
+
+
+def anthropic_config(root):
+    save(root, Config(provider="anthropic", model="claude-opus-5", mode="single-shot",
+                      api_base=None), None)
+
+
+def stub_run_effects(monkeypatch):
+    """Record execute_job and recommend_image_update; neither can reach a bench or Docker."""
+    calls = {"execute": [], "image": []}
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    monkeypatch.setattr(cli, "recommend_image_update", lambda c: calls["image"].append(c))
+    monkeypatch.setattr(cli, "execute_job",
+                        lambda spec, store, cfg, resume, add=None:
+                        calls["execute"].append(spec.job_id) or 0)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    return calls
+
+
+DECLINE_ARGV = ["run", "--challenge", "knapsack", "--direction", "go", "--budget-iterations", "3",
+                "--budget-compute-usd", "5", "--hyperparameters", "none", "--nonces", "2"]
+
+
+def test_declining_the_summary_writes_nothing_and_builds_no_bench(tmp_path, monkeypatch, capsys):
+    # mutation: the confirmation placed after JobStore(...) (runs/ exists), after
+    # recommend_image_update (image recorder non-empty), or `return 0` dropped (execute called)
+    monkeypatch.chdir(tmp_path)
+    anthropic_config(tmp_path)
+    calls = stub_run_effects(monkeypatch)
+    inner, prompts = scripted(["", "n"]), []
+
+    def ask(prompt, default=None, secret=False):
+        prompts.append(prompt)
+        return inner(prompt, default, secret)
+    rc = cli.main(DECLINE_ARGV, ask=ask)
+    assert rc == 0
+    assert prompts[-1] == "Start this job?"
+    assert "Not started." in capsys.readouterr().out
+    assert not (tmp_path / "runs").exists()
+    assert calls == {"execute": [], "image": []}
+
+
+def test_eof_at_the_confirmation_is_no(tmp_path, monkeypatch, capsys):
+    # mutation: confirm returns the default on EOF
+    monkeypatch.chdir(tmp_path)
+    anthropic_config(tmp_path)
+    calls = stub_run_effects(monkeypatch)
+    inner = scripted(["", "n"])
+
+    def ask(prompt, default=None, secret=False):
+        if prompt == "Start this job?":
+            raise EOFError
+        return inner(prompt, default, secret)
+    rc = cli.main(DECLINE_ARGV, ask=ask)
+    assert rc == 0
+    assert "Not started." in capsys.readouterr().out
+    assert not (tmp_path / "runs").exists()
+    assert calls == {"execute": [], "image": []}
+
+
+def test_accepting_the_summary_starts_the_job(tmp_path, monkeypatch, capsys):
+    # mutation: the id re-stamped after the summary, so the printed results path differs from
+    # the job that ran; or the job not started on yes
+    monkeypatch.chdir(tmp_path)
+    anthropic_config(tmp_path)
+    calls = stub_run_effects(monkeypatch)
+    assert cli.main(DECLINE_ARGV, ask=scripted(["", "y"])) == 0
+    assert len(calls["execute"]) == 1 and len(calls["image"]) == 1
+    job_id = calls["execute"][0]
+    assert (tmp_path / "runs" / job_id / "job.json").exists()
+    out = capsys.readouterr().out
+    assert f"runs/{job_id}/" in out
+    print(out)  # sample for the report (shown with -s)
+
+
+def test_yes_prints_the_summary_and_never_asks(tmp_path, monkeypatch, capsys):
+    # mutation: the confirmation not skipped under --yes
+    monkeypatch.chdir(tmp_path)
+    anthropic_config(tmp_path)
+    calls = stub_run_effects(monkeypatch)
+
+    def ask(prompt, default=None, secret=False):
+        raise AssertionError(f"--yes must not prompt: {prompt}")
+    rc = cli.main([*DECLINE_ARGV, "--yes"], ask=ask)
+    assert rc == 0 and len(calls["execute"]) == 1
+    out = capsys.readouterr().out
+    assert "Job summary" in out and "knapsack (CPU, tested)" in out
+
+
+def test_summary_lists_each_budget_cap_and_billing(tmp_path, monkeypatch, capsys):
+    # mutation: a cap dropped from the summary, or a truthiness check hiding the zero cap
+    monkeypatch.chdir(tmp_path)
+    anthropic_config(tmp_path)
+    stub_run_effects(monkeypatch)
+    argv = ["run", "--challenge", "knapsack", "--direction", "go", "--hyperparameters", "none",
+            "--nonces", "2", "--budget-usd", "7", "--budget-hours", "2",
+            "--budget-iterations", "9", "--yes"]
+    assert cli.main([*argv, "--budget-compute-usd", "3"]) == 0
+    out = capsys.readouterr().out
+    for text in ("LLM $7.00", "2 h", "9 iterations", "compute $3.00",
+                 "billed per container second, no fixed per-job overhead"):
+        assert text in out
+    assert cli.main([*argv, "--budget-compute-usd", "0"]) == 0
+    assert "compute $0.00" in capsys.readouterr().out
+
+
+def test_summary_shows_the_challenge_warning(tmp_path, monkeypatch, capsys):
+    # mutation: the warning left out of the summary
+    monkeypatch.chdir(tmp_path)
+    anthropic_config(tmp_path)
+    stub_run_effects(monkeypatch)
+    monkeypatch.setattr(cli, "fetch_challenge_info",
+                        lambda name: type("I", (), {"id": CHALLENGES[name].id,
+                                                    "is_gpu": CHALLENGES[name].is_gpu,
+                                                    "tracks": ["n=1"], "max_fuel": 7})())
+    assert cli.main(["run", "--challenge", "vehicle_routing", "--direction", "go",
+                     "--budget-iterations", "1", "--hyperparameters", "none", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "untested" in out and "never been run end to end" in out

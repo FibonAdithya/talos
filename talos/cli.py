@@ -47,7 +47,7 @@ from talos.providers import DEFAULT_MODELS, KINDS, make_provider, validate_provi
 from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
 from talos.prompts import WHOLE_FILE_FORMAT
-from talos.wizard import ask_choice
+from talos.wizard import ask_choice, confirm
 from talos.state import JobSpec, JobState, JobStore, user_tacit
 from talos.types import Usage
 
@@ -853,6 +853,58 @@ def _print_submission_hint(state: JobState, pkg: Path) -> None:
           f"on the held-out nonces. Read {pkg / 'README.md'} before submitting it.")
 
 
+BACKEND_BILLING = {
+    "modal": "billed per container second, no fixed per-job overhead",
+    "c3": "one batch job per iteration, about 12 minutes of fixed overhead each "
+          "(docs/compute-backends.md#c3-timings)",
+    "local": "Docker on this machine, no compute charge",
+}
+
+
+def _new_job_id(root: Path, challenge: str, prefix: str = "") -> str:
+    stamp = prefix + time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
+    job_id, n = stamp, 1
+    while (root / "runs" / job_id / "job.json").exists():  # two runs in the same second
+        n += 1
+        job_id = f"{stamp}-{n}"
+    return job_id
+
+
+def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: int,
+                 cfg: Config, budget: Budget, start: str, search: str, chains: int,
+                 scoring: str, hp_line: str, backend: str) -> str:
+    cs = CHALLENGES[challenge]
+    warning = status_warning(cs)
+    caps = []
+    if budget.usd is not None:
+        caps.append(f"LLM ${budget.usd:.2f}")
+    if budget.hours is not None:
+        caps.append(f"{budget.hours:g} h")
+    if budget.iterations is not None:
+        caps.append(f"{budget.iterations} iterations")
+    if budget.compute_usd is not None:
+        caps.append(f"compute ${budget.compute_usd:.2f}")
+    budget_text = ", ".join(caps)
+    if unpriced_reason(cfg.provider, cfg.model):
+        budget_text += " (LLM spend unpriced)"
+    billing = ("fake (in-process, no charge)" if cfg.provider == "fake"
+               else BACKEND_BILLING[backend])
+    lines = [
+        "Job summary",
+        f"  challenge: {challenge} ({'GPU' if cs.is_gpu else 'CPU'}, {status_text(cs)})"
+        + (f" - {warning}" if warning else ""),
+        f"  scope:     {scope}, {nonces} nonces per track, fuel {fuel}",
+        f"  provider:  {cfg.provider} / {cfg.model}, {cfg.mode} mode",
+        f"  search:    start {start}, {search}, {chains} chain(s), scoring {scoring}",
+        f"  {hp_line}",
+        f"  budget:    {budget_text}",
+        f"  backend:   {backend} - {billing}" if cfg.provider != "fake" else
+        f"  backend:   {billing}",
+        f"  results:   runs/{job_id}/",
+    ]
+    return "\n".join(lines)
+
+
 def cmd_run(args, ask) -> int:
     root = Path.cwd()
     add = {d: v for d in ADD_DIMENSIONS
@@ -1087,23 +1139,37 @@ def cmd_run(args, ask) -> int:
         except MainnetError as e:
             print(f"mainnet unreachable: {e}", file=sys.stderr)
             return 1
+    job_id = _new_job_id(root, challenge)
+    scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
+    if hyperparameters is None and algorithm is not None:
+        hp_line = (f"hyperparameters: none (no mainnet benchmark of {algorithm['name']} "
+                   f"at fuel {info.max_fuel})")
+    elif hyperparameters is None:
+        hp_line = "hyperparameters: none"
+    else:
+        used = sum(1 for v in hyperparameters.values() if v is not None)
+        hp_line = f"hyperparameters: {used}/{len(info.tracks)} tracks from mainnet"
+    scoring = args.scoring or "native"
+    print(_job_summary(job_id=job_id, challenge=challenge, scope=scope, nonces=nonces,
+                       fuel=info.max_fuel, cfg=cfg, budget=budget, start=start, search=search,
+                       chains=chains, scoring=scoring, hp_line=hp_line,
+                       backend=cfg.backend))
+    # Nothing below this point has run yet: no image recommendation, no run directory, no bench.
+    if not args.yes and not confirm(ask, "Start this job?", True):
+        print("Not started.")
+        return 0
     if cfg.provider != "fake":
         recommend_image_update(challenge)
     rand_hash = new_rand_hash()
     training, holdout = draw_nonce_sets(info.tracks, rand_hash, training_count=nonces,
                                         holdout_count=nonces)
-    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{challenge}"
-    job_id, n = stamp, 1
-    while (root / "runs" / job_id / "job.json").exists():  # two runs in the same second
-        n += 1
-        job_id = f"{stamp}-{n}"
     spec = JobSpec(job_id=job_id, challenge=challenge, direction=direction, provider=cfg.provider,
                    model=cfg.model, mode=cfg.mode, budget=budget, rand_hash=rand_hash,
                    tracks=info.tracks, training=training, holdout=holdout, fuel=info.max_fuel,
                    created_at=time.time(), monorepo_ref=MONOREPO_REF, challenge_id=info.id,
                    track=track, baseline_algorithm=algorithm, hyperparameters=hyperparameters,
                    hyperparameters_source=hp_source, dev_image_tag=DEV_IMAGE_TAG,
-                   scoring=args.scoring or "native", start=start, search=search,
+                   scoring=scoring, start=start, search=search,
                    chains=chains,
                    anneal=AnnealSettings().to_dict() if search == "anneal" else None)
     store = JobStore(root / "runs" / job_id)
@@ -1115,18 +1181,6 @@ def cmd_run(args, ask) -> int:
             (docs_dir / name).write_text(text, encoding="utf-8", newline="\n")
     (store.run_dir / "tacit.md").write_text(user_tacit(direction),
                                             encoding="utf-8", newline="\n")
-    scope = f"track {track} of {len(info.tracks)} tracks" if track else f"{len(info.tracks)} tracks"
-    if hyperparameters is None and algorithm is not None:
-        hp_line = (f"hyperparameters: none (no mainnet benchmark of {algorithm['name']} "
-                   f"at fuel {info.max_fuel})")
-    elif hyperparameters is None:
-        hp_line = "hyperparameters: none"
-    else:
-        used = sum(1 for v in hyperparameters.values() if v is not None)
-        hp_line = f"hyperparameters: {used}/{len(info.tracks)} tracks from mainnet"
-    print(f"Job {job_id}: {scope}, fuel {info.max_fuel}, budget {budget.to_dict()}, "
-          f"{nonces} nonces per track, scoring {spec.scoring}, start {start}, search {search}, "
-          f"{chains} chain(s); {hp_line}")
     return execute_job(spec, store, cfg, resume=False)
 
 
