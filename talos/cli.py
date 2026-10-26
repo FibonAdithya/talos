@@ -1361,6 +1361,12 @@ def recommend_image_update(challenge: str) -> None:
               f"This job will use the pinned image {update.current}.", file=sys.stderr)
 
 
+def cmd_doctor(args, ask) -> int:
+    from talos import doctor
+    return doctor.run(Path.cwd(), full=args.full, challenge=args.challenge, yes=args.yes,
+                      json_out=args.json, ask=ask)
+
+
 def cmd_check_updates(args, ask) -> int:
     """Check published versions without Docker, compute credentials or a configured project."""
     from concurrent.futures import ThreadPoolExecutor
@@ -1493,11 +1499,32 @@ def build_parser() -> argparse.ArgumentParser:
                                          "newest one published on GHCR.")
     updates.add_argument("--challenge", choices=list(CHALLENGES),
                          help="check one challenge (default: all)")
+    doc = sub.add_parser(
+        "doctor", help="check the config, credentials, backend, mainnet and GHCR",
+        description="Run free health checks: the config, the LLM credential and one test "
+                    "call, the compute backend, mainnet and the GHCR dev images. --full also "
+                    "compiles and scores one baseline on the backend, after showing its cost "
+                    "and asking.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Examples:\n"
+               "  talos doctor\n"
+               "  talos doctor --full --challenge knapsack\n"
+               "  talos doctor --json\n")
+    doc.add_argument("--full", action="store_true",
+                     help="also compile and score one baseline on the backend (spends "
+                          "compute; asks first)")
+    doc.add_argument("--challenge", choices=list(CHALLENGES), default=DEFAULT_CHALLENGE,
+                     help=f"challenge for --full (default {DEFAULT_CHALLENGE})")
+    doc.add_argument("--yes", action="store_true",
+                     help="run --full without asking (required with --json)")
+    doc.add_argument("--json", action="store_true",
+                     help="print one JSON document instead of text lines")
     return p
 
 
 COMMANDS = {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
-            "report": cmd_report, "check-updates": cmd_check_updates, "demo": cmd_demo}
+            "report": cmd_report, "check-updates": cmd_check_updates, "demo": cmd_demo,
+            "doctor": cmd_doctor}
 
 
 def main(argv=None, ask=default_ask) -> int:

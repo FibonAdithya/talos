@@ -56,18 +56,33 @@ def _block_id(get_json) -> str:
     return get_json(f"{MAINNET_API}/get-block")["block"]["id"]
 
 
-def fetch_challenge_info(name: str, get_json=_get_json) -> ChallengeInfo:
+def fetch_challenges(get_json=_get_json) -> list[ChallengeInfo]:
+    """Every named challenge on mainnet, from one block lookup and one `get-challenges` call.
+    A challenge may have no active tracks; `max_fuel` is 0 when mainnet gives no budget."""
     block_id = _block_id(get_json)
     resp = get_json(f"{MAINNET_API}/get-challenges?block_id={block_id}")
+    out = []
     for c in resp["challenges"]:
         cfg = c.get("config") or {}
-        if cfg.get("name") != name:
+        name = cfg.get("name")
+        if not name:
             continue
-        tracks = sorted((cfg.get("active_tracks") or {}).keys())
-        if not tracks:
+        out.append(ChallengeInfo(id=c["id"], name=name, is_gpu=cfg.get("type") == "gpu",
+                                 tracks=sorted((cfg.get("active_tracks") or {}).keys()),
+                                 max_fuel=int(cfg.get("max_fuel_budget") or 0)))
+    return out
+
+
+def fetch_challenge_info(name: str, get_json=_get_json) -> ChallengeInfo:
+    for info in fetch_challenges(get_json):
+        if info.name != name:
+            continue
+        if not info.tracks:
             raise MainnetError(f"challenge {name} has no active tracks on mainnet")
-        return ChallengeInfo(id=c["id"], name=name, is_gpu=cfg.get("type") == "gpu",
-                             tracks=tracks, max_fuel=int(cfg["max_fuel_budget"]))
+        if not info.max_fuel:
+            # was a KeyError before fetch_challenges defaulted it; a job needs a real budget
+            raise MainnetError(f"challenge {name} has no max_fuel_budget on mainnet")
+        return info
     raise MainnetError(f"challenge {name!r} not found on mainnet")
 
 

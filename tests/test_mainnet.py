@@ -269,3 +269,29 @@ def test_challenge_docs_refuse_a_challenge_without_a_file_list():
     # would run with no problem definition at all
     with pytest.raises(mainnet.MainnetError):
         mainnet.fetch_challenge_docs("knapsack", get_text=lambda u: "x")
+
+
+def test_fetch_challenges_returns_all_with_one_block_lookup():
+    # mutation: a block lookup per challenge, or stopping at the first challenge
+    calls = []
+
+    def gj(url):
+        calls.append(url)
+        return fake_get_json(url)
+
+    infos = mainnet.fetch_challenges(get_json=gj)
+    assert len(calls) == 2
+    assert [(i.name, i.id, i.is_gpu, i.tracks, i.max_fuel) for i in infos] == [
+        ("vehicle_routing", "c002", False, ["n_nodes=600", "n_nodes=700"], 5000000000000),
+        ("hypergraph", "c005", True, ["k=8"], 7)]
+
+
+def test_fetch_challenges_keeps_a_challenge_without_tracks_or_fuel():
+    # mutation: raising on empty tracks in fetch_challenges, or int(cfg["max_fuel_budget"])
+    def gj(url):
+        if "/get-challenges?" in url:
+            return {"challenges": [{"id": "c009", "config": {"name": "new_one", "type": "cpu"}}]}
+        return fake_get_json(url)
+
+    assert mainnet.fetch_challenges(get_json=gj) == [
+        mainnet.ChallengeInfo("c009", "new_one", False, [], 0)]
