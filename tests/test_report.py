@@ -275,6 +275,15 @@ def test_no_rand_hash(tmp_path):
     assert HASH not in rendered(tmp_path, _scored(3), best=2)
 
 
+def test_no_rand_hash_from_timeline_rows(tmp_path):
+    # The loop never writes the hash to the timeline (tests/test_loop.py); this guards the
+    # report against ever rendering a row's text, should one carry it.
+    timeline = [{"kind": "started", "note": HASH},
+                {"kind": "won", "iteration": 2, "error": HASH,
+                 "holdout": {"mean_rel_delta": 0.02, "tracks": HASH}}]
+    assert HASH not in rendered(tmp_path, _scored(3), best=2, confirmed=[2], timeline=timeline)
+
+
 def test_llm_text_is_escaped(tmp_path):
     evil = "</script><script>alert(1)</script>"
     hyps = [{"iteration": 1, "against": 0, "outcome": "improved", "mean_rel_delta": 0.1,
