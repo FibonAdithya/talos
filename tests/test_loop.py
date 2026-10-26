@@ -1006,6 +1006,44 @@ def test_three_fuel_misses_lower_the_margin_and_the_budgets(tmp_path):
     assert fb.calls[-2].fuel_budgets_us == {"t": 8_000_000}  # iteration 3's research call
 
 
+def test_a_kill_after_the_record_save_does_not_count_the_miss_twice_on_resume(tmp_path):
+    # Issue #42 case 2: the calibration record is saved before state.json, which still holds
+    # pending_job["native_training"]. The resume validates iteration 1 again.
+    from talos import calibration
+
+    class Killed(BaseException):
+        pass
+
+    def metered(ch, files, ns):
+        return ["out_of_fuel"] + quality_from_files(ch, files, ns)[1:]
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    one = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(5)], bench=fb, fuel=10_000_000,
+                                budget=one)
+    key = _calibrated(loop, tmp_path)
+
+    def kill(*a, **kw):
+        raise Killed
+
+    loop._finish_iteration = kill  # the hard kill lands between the two saves
+    with pytest.raises(Killed):
+        loop.run()
+    assert store.load().pending_job.get("native_training")
+    assert calibration.load(tmp_path / "cal", "knapsack", key)["tracks"]["t"]["misses"] == 1
+
+    resumed = Loop(store.read_spec(), store.load(), store, FakeProvider([]), fb,
+                   template_rs="pub fn solve_challenge(", clock=lambda: 0.0,
+                   sleep=lambda s: None, thresholds=Thresholds())
+    resumed.calibrate(tmp_path / "cal", "hw")
+    st = resumed.run()
+    assert [v["reason"] for v in st.validations] == ["fuel_proxy_miss"]
+    assert st.pending_job is None and st.iteration == 1
+    rec = calibration.load(tmp_path / "cal", "knapsack", key)
+    # mutation: no counted-token check gives misses 2 and demotions 2
+    assert rec["tracks"]["t"]["misses"] == 1
+    assert rec["demotions"] == {"fuel_proxy_miss": 1}
+
+
 def test_resume_mid_validation_goes_straight_to_the_metered_run(tmp_path):
     loop, fp, fb, store = native(tmp_path, [])  # no LLM reply scripted: none may be asked for
     files = {"mod.rs": "fn solve() { let k = 5; }\n"}

@@ -5,9 +5,11 @@ monorepo pin, dev image tag, baseline code, hyperparameters), cached under
 ~/.talos/calibration/ and reused by every later job with the same key."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
+import sys
 from pathlib import Path
 from statistics import median
 
@@ -25,6 +27,8 @@ MISS_LIMIT = 3
 # ESTIMATE: a guard against timer noise on very fast nonces, not a research economy cap.
 # runtime_floor_s (60 s) would bind on most hypergraph tracks (user decision 2026-09-29).
 BUDGET_FLOOR_US = 1_000_000
+# A resume looks up only its own last validation's token, so the newest few are enough.
+COUNTED_KEEP = 256
 
 
 def calibration_key(challenge: str, hardware_class: str, baseline_files: dict[str, str],
@@ -62,7 +66,7 @@ def track_ratios(metered: list[NonceResult], native: list[NonceResult]) -> dict[
 
 
 def new_record(ratios: dict[str, float]) -> dict:
-    return {"version": 1, "demotions": {},
+    return {"version": 1, "demotions": {}, "counted": {},
             "tracks": {t: {"ratio": r, "margin": MARGIN_START, "misses": 0}
                        for t, r in ratios.items()}}
 
@@ -114,6 +118,8 @@ def load(cache_dir: Path, challenge: str, key: str) -> dict | None:
                 return None
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
+    if not isinstance(rec.get("counted"), dict):
+        rec["counted"] = {}  # absent in records written before issue #42, or malformed
     return rec
 
 
@@ -121,3 +127,76 @@ def save(cache_dir: Path, challenge: str, key: str, record: dict) -> None:
     p = _path(cache_dir, challenge, key)
     p.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(p, json.dumps(record, indent=1))
+
+
+@contextlib.contextmanager
+def _locked(p: Path):
+    """An exclusive lock on the record's .lock file, held across a load-modify-save: two jobs
+    with the same key would otherwise each load, add a count and save, and the second save
+    would drop the first job's count (issue #42). The lock file is never deleted, because a
+    job waiting on a deleted lock file would not exclude a job that creates a new one."""
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p.with_suffix(".lock"), "a+b") as f:
+        if sys.platform == "win32":
+            import msvcrt
+            while True:
+                f.seek(0)
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    continue  # LK_LOCK gives up after ten one-second retries; keep waiting
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def create(cache_dir: Path, challenge: str, key: str, record: dict) -> dict:
+    """Saves a newly measured record unless another job saved one for the key first, and
+    returns the stored one. Overwriting would drop the counts that job has made since."""
+    p = _path(cache_dir, challenge, key)
+    with _locked(p):
+        existing = load(cache_dir, challenge, key)
+        if existing is not None:
+            return existing
+        save(cache_dir, challenge, key, record)
+    return record
+
+
+def count_validation(cache_dir: Path, challenge: str, key: str, token: str, reason: str,
+                     missed_tracks: list[str]) -> tuple[dict, bool] | None:
+    """Counts one demotion, and a miss for each of `missed_tracks` the record has, in one
+    locked load-modify-save. Returns the record and whether a margin changed, so the caller
+    recomputes its budgets; None when there is no record.
+
+    `token` names the validation. The record is saved before the job's state.json, so a kill
+    between the two saves makes the resume validate the same iteration again. That repeat
+    finds the token, counts nothing, and gets back the first count's result: the kill may
+    also have landed before the job saved the budgets that result changed."""
+    p = _path(cache_dir, challenge, key)
+    with _locked(p):
+        rec = load(cache_dir, challenge, key)
+        if rec is None:
+            return None
+        counted = rec["counted"]
+        if token in counted:
+            return rec, bool(counted[token])
+        note_demotion(rec, reason)
+        changed = False
+        for track in missed_tracks:
+            if track in rec["tracks"]:
+                changed = record_miss(rec, track) or changed
+        counted[token] = changed
+        for old in list(counted)[:-COUNTED_KEEP]:
+            del counted[old]
+        save(cache_dir, challenge, key, rec)
+    return rec, changed

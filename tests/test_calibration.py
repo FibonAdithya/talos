@@ -166,3 +166,101 @@ def test_note_demotion_counts_by_reason():
     calibration.note_demotion(rec, "nondeterministic")
     calibration.note_demotion(rec, "nondeterministic")
     assert rec["demotions"] == {"nondeterministic": 2}
+
+
+def test_concurrent_counts_on_one_record_are_not_lost(tmp_path, monkeypatch):
+    # Issue #42 case 1: two jobs demoting at once each load, add, and save. The slow load
+    # makes every thread read before any writes, so without the lock all but one count is
+    # overwritten.
+    # mutation: count_validation without _locked ends with {"nondeterministic": 1}
+    import threading
+    import time
+    calibration.save(tmp_path, "knapsack", "k1", calibration.new_record({"a": 1.0}))
+    real_load = calibration.load
+
+    def slow_load(*a):
+        rec = real_load(*a)
+        time.sleep(0.05)
+        return rec
+
+    monkeypatch.setattr(calibration, "load", slow_load)
+    threads = [threading.Thread(target=calibration.count_validation,
+                                args=(tmp_path, "knapsack", "k1", f"job{i}:1",
+                                      "nondeterministic", []))
+               for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    rec = real_load(tmp_path, "knapsack", "k1")
+    assert rec["demotions"] == {"nondeterministic": 6}
+    assert sorted(rec["counted"]) == [f"job{i}:1" for i in range(6)]
+
+
+def test_a_validation_counted_once_is_not_counted_again(tmp_path):
+    # Issue #42 case 2: a resume validates the same iteration again after a kill between the
+    # record's save and state.json's. The repeat counts nothing but still reports that the
+    # first count lowered the margin, so the resumed job recomputes its budgets.
+    # mutation: dropping the token check counts a fourth miss (misses 1, demotions 4)
+    # mutation: returning False for a repeat leaves the resumed job on the old budgets
+    calibration.save(tmp_path, "knapsack", "k1", calibration.new_record({"a": 1.0}))
+    for i in (1, 2):
+        _, changed = calibration.count_validation(tmp_path, "knapsack", "k1", f"j:{i}",
+                                                  "fuel_proxy_miss", ["a"])
+        assert changed is False
+    rec, changed = calibration.count_validation(tmp_path, "knapsack", "k1", "j:3",
+                                                "fuel_proxy_miss", ["a"])
+    assert changed is True and rec["tracks"]["a"]["margin"] == pytest.approx(0.7)
+    rec, changed = calibration.count_validation(tmp_path, "knapsack", "k1", "j:3",
+                                                "fuel_proxy_miss", ["a"])
+    assert changed is True
+    stored = calibration.load(tmp_path, "knapsack", "k1")
+    assert stored["demotions"] == {"fuel_proxy_miss": 3}
+    assert stored["tracks"]["a"] == {"ratio": 1.0, "margin": pytest.approx(0.7), "misses": 0}
+
+
+def test_count_validation_ignores_tracks_the_record_lacks_and_a_missing_record(tmp_path):
+    # mutation: record_miss on an unknown track raises KeyError out of the loop
+    assert calibration.count_validation(tmp_path, "knapsack", "k1", "j:1", "x", ["a"]) is None
+    calibration.save(tmp_path, "knapsack", "k1", calibration.new_record({"a": 1.0}))
+    rec, changed = calibration.count_validation(tmp_path, "knapsack", "k1", "j:1",
+                                                "fuel_proxy_miss", ["a", "zz"])
+    assert changed is False and rec["tracks"]["a"]["misses"] == 1 and "zz" not in rec["tracks"]
+
+
+def test_counted_tokens_keep_only_the_newest(tmp_path):
+    # A resume needs only its own last token; the cap keeps the record from growing forever.
+    # mutation: no cap leaves COUNTED_KEEP + 2 tokens; dropping the newest instead of the
+    # oldest loses the token a resume looks for
+    calibration.save(tmp_path, "knapsack", "k1", calibration.new_record({"a": 1.0}))
+    n = calibration.COUNTED_KEEP + 2
+    for i in range(n):
+        calibration.count_validation(tmp_path, "knapsack", "k1", f"j:{i}", "x", [])
+    rec = calibration.load(tmp_path, "knapsack", "k1")
+    assert list(rec["counted"]) == [f"j:{i}" for i in range(2, n)]
+    assert rec["demotions"] == {"x": n}
+
+
+def test_a_malformed_counted_field_is_reset_not_fatal(tmp_path):
+    # mutation: keeping a list here makes `token in counted` a list scan and the store a
+    # TypeError
+    rec = calibration.new_record({"a": 1.0})
+    rec["counted"] = ["j:1"]
+    calibration.save(tmp_path, "knapsack", "k1", rec)
+    assert calibration.load(tmp_path, "knapsack", "k1")["counted"] == {}
+    rec, _ = calibration.count_validation(tmp_path, "knapsack", "k1", "j:1", "x", [])
+    assert rec["demotions"] == {"x": 1}
+
+
+def test_create_keeps_a_record_another_job_saved_first(tmp_path):
+    # Two jobs measuring the same key at once: the second must not overwrite the first's
+    # record, which may already hold counted misses.
+    # mutation: create() that always saves returns and stores the ratio-2.0 record
+    first = calibration.new_record({"a": 1.0})
+    first["tracks"]["a"]["misses"] = 2
+    calibration.save(tmp_path, "knapsack", "k1", first)
+    got = calibration.create(tmp_path, "knapsack", "k1", calibration.new_record({"a": 2.0}))
+    assert got == first and calibration.load(tmp_path, "knapsack", "k1") == first
+    fresh = calibration.new_record({"b": 3.0})
+    assert calibration.create(tmp_path, "knapsack", "k2", fresh) == fresh
+    assert calibration.load(tmp_path, "knapsack", "k2") == fresh
