@@ -7,6 +7,7 @@ import shutil
 from importlib import resources
 from pathlib import Path
 
+from talos.budget import ADD_DIMENSIONS, Budget, effective_budget
 from talos.challenges import CHALLENGES
 from talos.lineage import Node
 from talos.prompts import in_tree, parent_label
@@ -108,11 +109,33 @@ def evidence_draft(spec: JobSpec, state: JobState) -> str:
     return filled + bench
 
 
+def _render_budget(b: Budget) -> str:
+    return ", ".join(f"{d} {getattr(b, d)}" for d in ("usd", "hours", "iterations", "compute_usd")
+                     if getattr(b, d) is not None)
+
+
+def _budget_section(spec: JobSpec, state: JobState) -> str:
+    """The budget the job started with, each `--add-*` extension, and the total it ran on;
+    empty for a job never extended. job.json shows only the starting budget."""
+    if not state.budget_extensions:
+        return ""
+    lines = ["## Budget extensions", "", f"- Started with: {_render_budget(spec.budget)}"]
+    for e in state.budget_extensions:
+        added = ", ".join(f"+{e['add'][d]} {d}" for d in ADD_DIMENSIONS
+                          if e["add"].get(d) is not None)
+        lines.append(f"- Extended at iteration {e['iteration']} "
+                     f"(was {e['previous_status']}): {added}")
+    now = effective_budget(spec.budget, state.budget_extensions)
+    lines.append(f"- Now: {_render_budget(now)}")
+    return "\n".join(lines) + "\n\n"
+
+
 def _readme_no_candidate(spec: JobSpec, state: JobState) -> str:
     baseline = f" Baseline: mainnet `{state.baseline.name}`." if state.baseline else ""
     return ("# Talos hand-back\n\n"
             f"No candidate beat the baseline.{baseline} Status: {state.status}. "
             f"Reason: {state.stop_reason}\n\n"
+            + _budget_section(spec, state) +
             "There is nothing to submit from this job.\n")
 
 
@@ -190,6 +213,7 @@ def _readme(spec: JobSpec, state: JobState, template_missing: bool = False) -> s
     head = ("# Talos hand-back\n\n"
             f"Challenge: {spec.challenge}. Baseline: mainnet `{state.baseline.name}`. "
             f"Status: {state.status}. Reason: {state.stop_reason}\n\n")
+    head += _budget_section(spec, state)
     if spec.track:
         head += (f"Optimised for track {spec.track}; the other tracks were re-scored on "
                  "confirmation as a regression guard (see the last section of scores.md).\n\n")

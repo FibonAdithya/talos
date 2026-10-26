@@ -13,7 +13,7 @@ from typing import Callable
 from talos import calibration
 from talos.baseline import resolve_baseline
 from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, EvalResult
-from talos.budget import BudgetExhausted, exhausted
+from talos.budget import BudgetExhausted, effective_budget, exhausted
 from talos.challenges import CHALLENGES
 from talos.edits import EditError, EditOutcome, apply_edit_response, apply_whole_file_response
 from talos.diagnostics import dead_new_functions, defined_functions, first_error
@@ -127,7 +127,7 @@ class Loop:
         self.store.save(self.state)
 
     def _check_budget(self) -> None:
-        dim = exhausted(self.spec.budget, self.state.spend, self.clock())
+        dim = exhausted(self._budget(), self.state.spend, self.clock())
         if dim:
             raise BudgetExhausted(dim)
         if self._stop:
@@ -438,8 +438,12 @@ class Loop:
         return (AnnealSettings.from_dict(self.spec.anneal) if self.spec.anneal
                 else AnnealSettings())
 
+    def _budget(self):
+        """The job's budget with every `--add-*` extension added (talos/extend.py)."""
+        return effective_budget(self.spec.budget, self.state.budget_extensions)
+
     def _spent(self) -> float:
-        return spent_fraction(self.spec.budget, self.state.spend, self.clock())
+        return spent_fraction(self._budget(), self.state.spend, self.clock())
 
     def _anneal_step(self, n: int, record: dict, score: float) -> None:
         """Accepts or rejects a scored candidate that is not a job-wide improvement: always when

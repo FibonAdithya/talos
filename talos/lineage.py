@@ -74,8 +74,10 @@ def chain_for(iteration: int, chains: int) -> int:
     return (iteration - 1) % chains
 
 
-def spent_fraction(budget: Budget, spend: Spend, now: float) -> float:
-    """Largest spent fraction over the capped dimensions, clamped to [0, 1]; a cap of 0 is 1.0."""
+def spent_fraction(budget: Budget, spend: Spend, now: float, clamp: bool = True) -> float:
+    """Largest spent fraction over the capped dimensions, clamped to [0, 1]; a cap of 0 is 1.0.
+    clamp=False keeps a fraction above 1 for a job that overshot a cap (hours, usd and compute
+    are checked between calls, so a call can run past them)."""
     fractions: list[float] = []
 
     def add(used: float, cap: float | None) -> None:
@@ -88,7 +90,8 @@ def spent_fraction(budget: Budget, spend: Spend, now: float) -> float:
     add(spend.compute_usd, budget.compute_usd)
     if not fractions:
         return 0.0
-    return min(1.0, max(0.0, max(fractions)))
+    top = max(0.0, max(fractions))
+    return min(1.0, top) if clamp else top
 
 
 def temperature(settings: AnnealSettings, spent: float, reheated_at: float) -> float:

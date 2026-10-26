@@ -157,6 +157,10 @@ class JobState:
     # The lineage tree and one cursor per chain; empty for a job that does not anneal.
     nodes: list[Node] = field(default_factory=list)
     chains: list[Chain] = field(default_factory=list)
+    # One entry per `talos run --resume --add-*`: when, at which iteration, the status it was
+    # resumed from, and what it added. job.json keeps the budget the job started with;
+    # talos/budget.py::effective_budget adds these to it.
+    budget_extensions: list[dict] = field(default_factory=list)
 
     @classmethod
     def fresh(cls, spend: Spend) -> "JobState":
@@ -175,7 +179,8 @@ class JobState:
                 "hardware": self.hardware, "scoring": self.scoring,
                 "fuel_budgets_us": self.fuel_budgets_us, "validations": self.validations,
                 "nodes": [n.to_dict() for n in self.nodes],
-                "chains": [c.to_dict() for c in self.chains]}
+                "chains": [c.to_dict() for c in self.chains],
+                "budget_extensions": self.budget_extensions}
 
     @classmethod
     def from_dict(cls, d: dict) -> "JobState":
@@ -192,7 +197,8 @@ class JobState:
                    scoring=d.get("scoring"), fuel_budgets_us=d.get("fuel_budgets_us"),
                    validations=d.get("validations", []),
                    nodes=[Node.from_dict(n) for n in d.get("nodes", [])],
-                   chains=[Chain.from_dict(c) for c in d.get("chains", [])])
+                   chains=[Chain.from_dict(c) for c in d.get("chains", [])],
+                   budget_extensions=d.get("budget_extensions", []))
 
 
 def _atomic_write(path: Path, text: str) -> None:

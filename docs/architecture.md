@@ -53,6 +53,11 @@ flowchart TD
     stop --> package
 ```
 
+A stopped job can be resumed with `talos run --resume`. An `exhausted` one resumes only with
+added budget (`--add-*`): `talos/extend.py::extend` records the extension in
+`state.budget_extensions`, and every budget check reads `talos/budget.py::effective_budget`,
+the job's original budget plus its extensions. `job.json` is not rewritten.
+
 Baseline and candidates are always scored on the same nonces, fuel and hardware class, and
 on the same hyperparameters except in a `--start template` job, so the delta between them
 measures the edit and nothing else. In a template job the candidates run without

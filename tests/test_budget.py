@@ -1,6 +1,6 @@
 import pytest
 
-from talos.budget import Budget, Spend, exhausted
+from talos.budget import Budget, Spend, effective_budget, exhausted
 
 
 def test_zero_budget_is_exhausted_before_first_call():
@@ -52,3 +52,14 @@ def test_zero_cap_is_a_valid_budget():
     # `--budget-iterations 0` as "no budget dimension set"
     Budget(usd=0.0, hours=None, iterations=None, compute_usd=None).validate()
     Budget(usd=None, hours=None, iterations=0, compute_usd=None).validate()
+
+
+def test_effective_budget_adds_every_extension_to_set_caps_only():
+    # mutation: using only the last extension gives iterations 7
+    # mutation: `(cap or 0) + add` turns the unset compute cap into 1.0
+    b = Budget(usd=1.0, hours=2.0, iterations=5, compute_usd=None)
+    ext = [{"add": {"iterations": 3, "hours": None, "usd": 0.5, "compute_usd": None}},
+           {"add": {"iterations": 2, "hours": 1.5, "usd": None, "compute_usd": 1.0}}]
+    assert effective_budget(b, ext) == Budget(usd=1.5, hours=3.5, iterations=10,
+                                              compute_usd=None)
+    assert effective_budget(b, []) == b

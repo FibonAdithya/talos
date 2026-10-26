@@ -353,7 +353,7 @@ def test_update_advisory_runs_only_for_new_real_jobs(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(cli, "recommend_image_update", seen.append)
 
-    def execute(spec, store, cfg, resume):
+    def execute(spec, store, cfg, resume, add=None):
         if not resume:
             store.save(JobState.fresh(Spend(started_at=0.0)))
         return 0
@@ -674,6 +674,47 @@ def test_status_line_reports_hours_left(tmp_path):
                        created_at=0.0, monorepo_ref="r", challenge_id="c003")
     state = JobState.fresh(Spend(started_at=0.0))
     assert cli._status_line(spec, state, 5400.0).endswith("| 2.5h left")
+
+
+def _budget_spec(challenge, budget):
+    return cli.JobSpec(job_id="j", challenge=challenge, direction="d", provider="claude-cli",
+                       model="m", mode="single-shot", budget=budget, rand_hash="ab" * 32,
+                       tracks=["t"], training=[], holdout=[], fuel=1, created_at=0.0,
+                       monorepo_ref="r", challenge_id="c003")
+
+
+def test_status_line_counts_added_hours(tmp_path):
+    # mutation: _status_line reading spec.budget.hours prints "0.0h left" (1h cap, 1.5h used)
+    from talos.budget import Budget, Spend
+    from talos.state import JobState
+    spec = _budget_spec("knapsack", Budget(usd=None, hours=1.0, iterations=None,
+                                           compute_usd=1.0))
+    state = JobState.fresh(Spend(started_at=0.0))
+    state.budget_extensions = [{"add": {"iterations": None, "hours": 2.0, "usd": None,
+                                        "compute_usd": None}}]
+    assert cli._status_line(spec, state, 5400.0).endswith("| 1.5h left")
+
+
+def test_freeze_hardware_checks_the_extended_budget(tmp_path, monkeypatch):
+    # mutation: the pre-probe check reading spec.budget raises BudgetExhausted on a job whose
+    # extension gave it room. hypergraph on modal has options ('L40S', 'A100-80GB', 'H100'),
+    # so the pre-probe check runs; with no options it is skipped and this would pass anyway.
+    from talos.budget import Budget, Spend
+    from talos.state import JobState, JobStore
+    # setenv, not delenv(raising=False): delenv on an unset name records nothing, so the L40
+    # that freeze_hardware exports would leak into every later test.
+    monkeypatch.setenv("TALOS_HARDWARE", "")
+    spec = _budget_spec("hypergraph", Budget(usd=None, hours=None, iterations=1,
+                                             compute_usd=None))
+    state = JobState.fresh(Spend(started_at=0.0))
+    state.spend.iterations = 1
+    state.budget_extensions = [{"add": {"iterations": 1, "hours": None, "usd": None,
+                                        "compute_usd": None}}]
+    bench = types.SimpleNamespace(select_hardware=lambda ch, chosen=None: "L40",
+                                  cost_mark=lambda: 0.0, cost_usd_since=lambda m: 0.0)
+    cli.freeze_hardware(bench, spec, state, JobStore(tmp_path), "modal", log=lambda s: None,
+                        clock=lambda: 0.0)
+    assert state.hardware == "L40"
 
 
 # Payloads below are copied from runs/20260916-095103-knapsack/timeline.jsonl (a real C3 job),
@@ -1333,7 +1374,7 @@ def test_resume_with_a_different_nonce_count_is_refused(tmp_path, monkeypatch, c
     run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
     resumed = []
     monkeypatch.setattr(cli, "execute_job",
-                        lambda spec, store, cfg, resume: resumed.append(resume) or 0)
+                        lambda spec, store, cfg, resume, add=None: resumed.append(resume) or 0)
     assert cli.main(["run", "--resume", run_dir.name, "--nonces", "5"]) == 2
     assert "started with 4 nonces" in capsys.readouterr().err
     assert resumed == []
@@ -2836,3 +2877,168 @@ def test_fake_template_anneal_chains_resume_reads_the_stored_challenge(
     assert "pub fn solve_challenge(" in proposals[0][0]
     for system, user in prompts:
         assert marker not in system + user and "REFETCHED" not in system + user
+
+
+def stopped_job(tmp_path, monkeypatch, status="exhausted", stop_reason="iterations",
+                extra=(), **state_kw):
+    """A fake job whose 5-iteration cap is spent, stopped before any candidate; once resumed
+    the fake provider wins on its first iteration."""
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch, extra) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    st = json.loads((run_dir / "state.json").read_text())
+    st.update(status=status, stop_reason=stop_reason, best=None, iteration=5, confirmed=[],
+              hypotheses=[], nodes=[], chains=[])
+    st["spend"]["iterations"] = 5
+    st.update(state_kw)
+    (run_dir / "state.json").write_text(json.dumps(st))
+    return run_dir
+
+
+def test_resume_continues_an_exhausted_job_with_added_iterations(tmp_path, monkeypatch, capsys):
+    # mutation: the old refusal of exhausted jobs exits 1 "nothing to resume"
+    # mutation: rewriting job.json to hold the new budget breaks invariant 1's write-once file
+    run_dir = stopped_job(tmp_path, monkeypatch)
+    spec_bytes = (run_dir / "job.json").read_bytes()
+    capsys.readouterr()
+    assert cli.main(["run", "--resume", run_dir.name, "--add-iterations", "2"]) == 0
+    assert "Status: won" in capsys.readouterr().out
+    st = json.loads((run_dir / "state.json").read_text())
+    assert st["spend"]["iterations"] == 6
+    [entry] = st["budget_extensions"]
+    assert entry["previous_status"] == "exhausted" and entry["add"]["iterations"] == 2
+    ev = [json.loads(ln) for ln in (run_dir / "timeline.jsonl").read_text().splitlines()]
+    assert [e["budget"]["iterations"] for e in ev if e["kind"] == "budget_extended"] == [7]
+    assert "resumed" in [e["kind"] for e in ev]
+    assert (run_dir / "job.json").read_bytes() == spec_bytes
+
+
+def test_exhausted_resume_without_added_budget_names_the_flag(tmp_path, monkeypatch, capsys):
+    # mutation: dropping the hint leaves the user with "nothing to resume" and no way forward
+    run_dir = stopped_job(tmp_path, monkeypatch)
+    capsys.readouterr()
+    assert cli.main(["run", "--resume", run_dir.name]) == 1
+    out = capsys.readouterr().out
+    assert "already exhausted; nothing to resume" in out and "--add-iterations" in out
+
+
+def test_exhausted_resume_with_an_unknown_reason_does_not_crash(tmp_path, monkeypatch, capsys):
+    # Review Focus 3. mutation: ADD_FLAGS[state.stop_reason] raises KeyError
+    run_dir = stopped_job(tmp_path, monkeypatch, stop_reason="budget")
+    assert cli.main(["run", "--resume", run_dir.name]) == 1
+    assert "already exhausted; nothing to resume" in capsys.readouterr().out
+
+
+def test_extension_still_out_of_budget_is_refused_untouched(tmp_path, monkeypatch, capsys):
+    # mutation: saving the shift or the entry before extend() checks changes state.json
+    # 4 h cap, started 5 h ago, saved just now (no pause to shift): still out on hours
+    run_dir = stopped_job(tmp_path, monkeypatch, stop_reason="hours",
+                          extra=("--budget-hours", "4"))
+    st = json.loads((run_dir / "state.json").read_text())
+    st["spend"]["started_at"] = time.time() - 5 * 3600
+    (run_dir / "state.json").write_text(json.dumps(st))
+    before = {n: (run_dir / n).read_bytes() for n in ("state.json", "timeline.jsonl")}
+    assert cli.main(["run", "--resume", run_dir.name, "--add-iterations", "2"]) == 2
+    err = capsys.readouterr().err
+    assert "still out of budget on hours" in err and "--add-hours" in err
+    assert before == {n: (run_dir / n).read_bytes() for n in before}
+
+
+def test_hours_exhausted_job_continues_with_added_hours(tmp_path, monkeypatch, capsys):
+    # Review Focus 5. 4 h cap, started 5 h ago, last saved 1 h ago: the shift gives 4 h used,
+    # and +1 h leaves room.
+    # mutation: not shifting started_at for an exhausted job counts 5 h, refused with exit 2
+    run_dir = stopped_job(tmp_path, monkeypatch, stop_reason="hours",
+                          extra=("--budget-hours", "4"))
+    st = json.loads((run_dir / "state.json").read_text())
+    st["spend"]["iterations"] = 0  # only hours is spent
+    st["spend"]["started_at"] = time.time() - 5 * 3600
+    (run_dir / "state.json").write_text(json.dumps(st))
+    saved = time.time() - 3600
+    os.utime(run_dir / "state.json", (saved, saved))
+    assert cli.main(["run", "--resume", run_dir.name, "--add-hours", "1"]) == 0
+
+
+def test_add_flag_for_a_cap_the_job_never_had_is_refused(tmp_path, monkeypatch, capsys):
+    # mutation: creating a new hours cap the user never set
+    run_dir = stopped_job(tmp_path, monkeypatch)
+    before = (run_dir / "state.json").read_bytes()
+    assert cli.main(["run", "--resume", run_dir.name, "--add-hours", "1"]) == 2
+    assert "--budget-hours" in capsys.readouterr().err
+    assert (run_dir / "state.json").read_bytes() == before
+
+
+def test_add_flags_need_resume(tmp_path, monkeypatch, capsys):
+    # mutation: ignoring --add-iterations on a new job silently drops the user's budget
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch, extra=("--add-iterations", "2")) == 2
+    assert "only applies with --resume" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_extension_raises_the_cap_of_a_cancelled_job(tmp_path, monkeypatch, capsys):
+    # mutation: applying extensions to exhausted jobs only resumes this one at 5/5, exit 1
+    run_dir = stopped_job(tmp_path, monkeypatch, status="cancelled",
+                          stop_reason="user requested stop")
+    assert cli.main(["run", "--resume", run_dir.name, "--add-iterations", "1"]) == 0
+    st = json.loads((run_dir / "state.json").read_text())
+    assert st["budget_extensions"][0]["previous_status"] == "cancelled"
+
+
+def test_hard_killed_job_is_extended_without_a_clock_shift(tmp_path, monkeypatch, capsys):
+    # mutation: shifting started_at for every status moves a hard-killed job's clock by the
+    # hour since its last save
+    run_dir = stopped_job(tmp_path, monkeypatch, status="researching", stop_reason=None)
+    st = json.loads((run_dir / "state.json").read_text())
+    started = st["spend"]["started_at"]
+    saved = time.time() - 3600
+    os.utime(run_dir / "state.json", (saved, saved))
+    assert cli.main(["run", "--resume", run_dir.name, "--add-iterations", "1"]) == 0
+    st = json.loads((run_dir / "state.json").read_text())
+    assert st["spend"]["started_at"] == started
+    assert st["budget_extensions"][0]["previous_status"] == "researching"
+
+
+def test_job_exhausted_before_its_baseline_measures_it_once(tmp_path, monkeypatch, capsys):
+    # mutation: an extension path that skips measure_baseline when the status was exhausted
+    run_dir = stopped_job(tmp_path, monkeypatch, baseline=None)
+    n_before = len((run_dir / "timeline.jsonl").read_text().splitlines())
+    assert cli.main(["run", "--resume", run_dir.name, "--add-iterations", "1"]) == 0
+    new = [json.loads(ln)["kind"]
+           for ln in (run_dir / "timeline.jsonl").read_text().splitlines()[n_before:]]
+    assert new.count("baseline_ready") == 1
+
+
+def test_add_flags_on_a_won_job_record_nothing(tmp_path, monkeypatch, capsys):
+    # Review Focus 2. mutation: extending (and saving) before the won refusal records an entry
+    # on a job that never runs again
+    # mutation: extending before the won refusal without saving still prints "Budget extended"
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)
+    assert fake_run(monkeypatch) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    capsys.readouterr()
+    assert cli.main(["run", "--resume", run_dir.name, "--add-iterations", "1"]) == 1
+    out = capsys.readouterr().out
+    assert "already won" in out and "Budget extended" not in out
+    assert json.loads((run_dir / "state.json").read_text()).get("budget_extensions", []) == []
+
+
+def test_hard_killed_job_saves_its_extension_before_the_run_starts(tmp_path, monkeypatch):
+    # mutation: saving a non-stopped job's extension only when the loop next saves loses it to
+    # a kill during the hardware probe, while timeline.jsonl already says budget_extended
+    class Killed(BaseException):
+        pass
+
+    run_dir = stopped_job(tmp_path, monkeypatch, status="researching", stop_reason=None)
+
+    def kill(*a, **k):
+        raise Killed()
+
+    monkeypatch.setattr(cli, "freeze_hardware", kill)
+    with pytest.raises(Killed):
+        cli.main(["run", "--resume", run_dir.name, "--add-iterations", "1"])
+    st = json.loads((run_dir / "state.json").read_text())
+    assert [e["add"]["iterations"] for e in st["budget_extensions"]] == [1]

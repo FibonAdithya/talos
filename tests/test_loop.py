@@ -9,6 +9,7 @@ import pytest
 from talos.budget import Budget, BudgetExhausted, Spend
 from talos.bench import FakeBench
 from talos.challenges import BeatRule
+from talos.extend import extend
 from talos.loop import Loop, Thresholds
 from talos.prompts import SEARCH_REPLACE_FORMAT, WHOLE_FILE_FORMAT
 from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
@@ -1925,3 +1926,34 @@ def test_greedy_emits_one_accept_line_per_iteration_when_chains_score_apart(
         (1, 0, 0, True, "improved"), (2, 1, 0, False, "failed:edit"),
         (3, 0, 1, False, "failed:score")]
     assert accept[2]["score"] is not None and accept[1]["score"] is None
+
+
+def test_loop_checks_and_anneals_against_the_extended_budget(tmp_path):
+    # mutation: _spent reading spec.budget gives 1.0; _check_budget reading it raises
+    b = Budget(usd=None, hours=None, iterations=4, compute_usd=None)
+    loop, *_ = make(tmp_path, [], budget=b)
+    loop.state.spend.iterations = 4
+    loop.state.budget_extensions = [{"add": {"iterations": 4, "hours": None, "usd": None,
+                                             "compute_usd": None}}]
+    assert loop._spent() == pytest.approx(0.5)
+    loop._check_budget()  # does not raise
+
+
+def test_an_extended_exhausted_loop_runs_the_added_iterations(tmp_path):
+    # mutation: any reader left on spec.budget stops the second run at once with 2 iterations
+    # failed edits: each iteration is counted, nothing ever wins, two provider calls each
+    script = [r for t in "abcd" for r in (hyp(t), "no edit blocks here")]
+    b = Budget(usd=None, hours=None, iterations=2, compute_usd=None)
+    th = Thresholds(distill=99)  # two provider calls per iteration, no distill call
+    loop, _, _, store = make(tmp_path, script[:4], scores=heldout_flat, budget=b,
+                             thresholds=th)
+    assert loop.run().status == "exhausted"
+    st = store.load()
+    extend(b, st, {"iterations": 2}, now=0.0, previous_status="exhausted")
+    st.status = "researching"  # as execute_job does
+    again = Loop(store.read_spec(), st, store, FakeProvider(script[4:]),
+                 FakeBench(heldout_flat), template_rs="x", clock=lambda: 0.0,
+                 sleep=lambda s: None, thresholds=th)
+    final = again.run()
+    assert final.status == "exhausted" and final.stop_reason == "iterations"
+    assert final.spend.iterations == 4
