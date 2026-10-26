@@ -57,7 +57,8 @@ def check_update(challenge: str, fetch=None, clock=time.monotonic) -> ImageUpdat
     deadline = clock() + CHECK_TIMEOUT_S
 
     def get(url, headers):
-        remaining = deadline - clock()
+        # Clamped: (c + 5.0) - c can round to 5.000000000000028 (issue #50).
+        remaining = min(CHECK_TIMEOUT_S, deadline - clock())
         if remaining <= 0:
             raise UpdateCheckError("GHCR update check timed out")
         try:

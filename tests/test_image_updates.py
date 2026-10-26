@@ -102,6 +102,17 @@ def test_timeout_budget_is_shared_across_requests():
     assert [call[2] for call in calls] == [5.0, 1.0]
 
 
+def test_timeout_never_exceeds_the_cap_when_the_clock_has_not_moved():
+    # Issue #50: (c + 5.0) - c is 5.000000000000028 for this c, as on a freshly booted
+    # Windows runner whose coarse monotonic clock returns one value twice.
+    # mutation: dropping the clamp passes 5.000000000000028 to fetch
+    c = 251.52078439328736
+    assert (c + image_updates.CHECK_TIMEOUT_S) - c > image_updates.CHECK_TIMEOUT_S
+    fetch, calls = registry([({"tags": ["0.0.9"]}, "")])
+    assert check_update("knapsack", fetch=fetch, clock=lambda: c).latest == "0.0.9"
+    assert [call[2] for call in calls] == [5.0, 5.0]
+
+
 @pytest.mark.parametrize("failure", [TimeoutError(), urllib.error.URLError("offline"),
                                     json.JSONDecodeError("invalid", "", 0)])
 def test_unreadable_metadata_is_unknown(failure):
