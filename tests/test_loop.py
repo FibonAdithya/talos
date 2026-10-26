@@ -1044,6 +1044,53 @@ def test_a_kill_after_the_record_save_does_not_count_the_miss_twice_on_resume(tm
     assert rec["demotions"] == {"fuel_proxy_miss": 1}
 
 
+def test_a_kill_after_a_margin_change_does_not_record_the_validation_twice(tmp_path):
+    # The record starts one miss short of MISS_LIMIT, so this job's miss lowers the margin. A
+    # state.json save there would store the validation while pending_job still holds
+    # native_training, and the resume would validate iteration 1 again and append it twice.
+    from talos import calibration
+
+    class Killed(BaseException):
+        pass
+
+    def metered(ch, files, ns):
+        return ["out_of_fuel"] + quality_from_files(ch, files, ns)[1:]
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    one = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(5)], bench=fb, fuel=10_000_000,
+                                budget=one)
+    key = _calibrated(loop, tmp_path)
+    rec = calibration.load(tmp_path / "cal", "knapsack", key)
+    rec["tracks"]["t"]["misses"] = calibration.MISS_LIMIT - 1
+    calibration.save(tmp_path / "cal", "knapsack", key, rec)
+
+    def kill(*a, **kw):
+        raise Killed
+
+    loop._finish_iteration = kill
+    with pytest.raises(Killed):
+        loop.run()
+    saved = store.load()
+    assert saved.pending_job.get("native_training")
+    # mutation: saving state.json in _note_demotion stores the validation before the kill
+    assert saved.validations == [] and saved.fuel_budgets_us == {"t": 8_000_000}
+
+    resumed = Loop(store.read_spec(), store.load(), store, FakeProvider([]), fb,
+                   template_rs="pub fn solve_challenge(", clock=lambda: 0.0,
+                   sleep=lambda s: None, thresholds=Thresholds())
+    resumed.calibrate(tmp_path / "cal", "hw")
+    st = resumed.run()
+    assert st.pending_job is None and st.iteration == 1
+    assert [v["iteration"] for v in st.validations] == [1]
+    # The repeat counts nothing but returns the first count's margin change, so the resumed
+    # job still tightens its budgets: 1.0 us/fuel x 10_000_000 x 0.7.
+    # mutation: count_validation returning False for a repeat leaves 8_000_000
+    assert st.fuel_budgets_us == {"t": 7_000_000}
+    assert store.load().fuel_budgets_us == {"t": 7_000_000}
+    rec = calibration.load(tmp_path / "cal", "knapsack", key)
+    assert rec["tracks"]["t"]["misses"] == 0 and rec["demotions"] == {"fuel_proxy_miss": 1}
+
+
 def test_resume_mid_validation_goes_straight_to_the_metered_run(tmp_path):
     loop, fp, fb, store = native(tmp_path, [])  # no LLM reply scripted: none may be asked for
     files = {"mod.rs": "fn solve() { let k = 5; }\n"}

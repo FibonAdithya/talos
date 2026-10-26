@@ -769,8 +769,11 @@ class Loop:
             return
         rec, changed = counted
         if changed:
+            # No save here: _finish_iteration saves next. A save now would store the validation
+            # while pending_job still holds native_training, and a resume after a kill would
+            # validate the iteration again and record it twice. That resume recomputes these
+            # budgets from the repeat's result instead.
             self.state.fuel_budgets_us = calibration.budgets_us(rec, self.spec.fuel)
-            self._save()
 
     def _confirm(self, cand: Candidate, ho, reason: str) -> None:
         """The held-out results come back from the same evaluate call that scored training: the
