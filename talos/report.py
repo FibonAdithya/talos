@@ -241,9 +241,9 @@ def holdout_points(timeline: list[dict]) -> dict[int, float]:
 # ── rendering ────────────────────────────────────────────────────────
 
 BEST_DIFF_CAP = 400_000
-_W, _H = 1000, 430  # SVG viewBox
+_W, _H = 1000, 420  # SVG viewBox
 _LEFT, _RIGHT, _TOP, _PLOT_BOTTOM = 64, 20, 18, 330
-_STRIP_Y = 362  # the failure strip, below the x-axis
+_STRIP_Y = 378  # the failure strip, below the x-axis tick labels
 _KIND_LABELS = {"best": "current best", "improved": "improved", "accepted": "accepted",
                 "rejected": "rejected (scored)", "demoted": "demoted on metered validation",
                 "false_positive": "false positive (held-out)", "failed": "failed, no score"}
@@ -340,7 +340,7 @@ def _figure(spec: JobSpec, nodes: list[ReportNode], axis: Axis,
                    f'text-anchor="end">{_esc(_tick_label(t, step))}</text>')
     out.append(f'<line class="zero" x1="{_LEFT}" x2="{_W - _RIGHT}" y1="{y(0.0):.1f}" '
                f'y2="{y(0.0):.1f}"/><text class="zlabel" x="{_W - _RIGHT - 4}" '
-               f'y="{y(0.0) - 5:.1f}" text-anchor="end">mainnet baseline</text>')
+               f'y="{y(0.0) + 14:.1f}" text-anchor="end">mainnet baseline</text>')
     out.append(f'<line class="axis" x1="{_LEFT}" x2="{_W - _RIGHT}" y1="{_PLOT_BOTTOM + 8}" '
                f'y2="{_PLOT_BOTTOM + 8}"/>')
     xstep = next(s for s in (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 10**9)
@@ -420,7 +420,8 @@ def _legend() -> str:
                     for k, v in _KIND_LABELS.items())
     return (f'<ul class="legend" id="legend-outcome">{items}'
             '<li class="lh"><span class="sw"></span>held-out delta</li>'
-            '<li class="ls"><span class="sw"></span>best so far</li></ul>'
+            '<li class="ls"><span class="sw"></span>best so far</li>'
+            '<li class="lr"><span class="sw"></span>former best</li></ul>'
             '<ul class="legend" id="legend-group" hidden></ul>')
 
 
@@ -607,7 +608,7 @@ _CSS = """
 --accepted:#6d9cf0;--rejected:#7c7c84;--demoted:#f59d3d;--false_positive:#f59d3d;
 --failed:#f06a6a;--holdout:#b195f2;--step:#4cc983;--add:#173a24;--addfg:#a6e8bf;
 --del:#45201f;--delfg:#f3b0ae;--hunk:#a3a7f0;color-scheme:dark}}
-*{box-sizing:border-box}
+*{box-sizing:border-box}[hidden]{display:none!important}
 body{margin:0 auto;max-width:1400px;padding:16px;background:var(--bg);color:var(--fg);
 font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 h1{font-size:22px;margin:4px 0 12px}h2{font-size:17px;margin:28px 0 8px}
@@ -628,6 +629,7 @@ font-size:12px;color:var(--muted)}.legend li{display:flex;align-items:center;gap
 .legend .k-best .sw{border-radius:2px;transform:rotate(45deg)}
 .legend .lh .sw{background:none;border:2px solid var(--holdout);border-radius:1px;
 transform:rotate(45deg)}.legend .ls .sw{height:2px;border-radius:0;background:var(--step)}
+.legend .lr .sw{background:none;border:1px solid var(--fg);opacity:.6}
 .figwrap{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
 @media (min-width:1100px){.figwrap.open{grid-template-columns:minmax(0,1fr) 440px}}
 #fig{width:100%;height:auto;display:block}
@@ -657,7 +659,7 @@ svg .cutlabel{font-size:10px}
 .k-false_positive{--c:var(--false_positive)}.k-failed{--c:var(--failed)}
 .node .m{fill:var(--c);stroke:var(--c);stroke-width:1}.node .x{fill:none;stroke-width:2}
 .node.k-false_positive .m{fill:none;stroke-width:2}.node.k-best .m{stroke:var(--bg)}
-.node .ring{fill:none;stroke:var(--best);stroke-width:1.2}.node .hit{fill:transparent}
+.node .ring{fill:none;stroke:var(--fg);stroke-width:1;opacity:.45}.node .hit{fill:transparent}
 .node{cursor:pointer}.node.sel .hit{fill:var(--c);opacity:.25}
 .edge{stroke:var(--muted);stroke-width:.8;opacity:.25}.edge.solid{opacity:.7;stroke-width:1.1}
 .stepline{fill:none;stroke:var(--step);stroke-width:1.5;opacity:.55}
