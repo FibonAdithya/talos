@@ -266,8 +266,9 @@ It asks the same questions on every OS; they are listed under
 .venv\Scripts\talos.exe doctor --full
 ```
 
-`doctor` is free. `doctor --full` compiles and scores one real baseline on your backend; it
-shows the cost and asks `Spend this?` (default no) first. The measured figure is for knapsack
+`doctor` spends no compute; its provider check makes one small LLM test call. `doctor --full`
+compiles and scores one real baseline on your backend; it shows the cost and asks `Spend this?`
+(default no) first. The measured figure is for knapsack
 on C3 only (MEASURED 2026-09-15: £0.02 and 12 min 20 s); see [`talos doctor`](#talos-doctor).
 
 ### 6. Run a job
@@ -488,7 +489,7 @@ same instead of telling you to submit it.
 | `talos status` | Lists every job under `runs/` with its status, iteration and spend. |
 | `talos report JOB_ID` | Writes `runs/<job_id>/package/report.html`, a one-page view of the job's search, from the files already in the run directory. |
 | `talos demo` | Runs a scripted job with no account, network or spend, and prints its package guide. |
-| `talos doctor` | Runs free health checks on the config, credential, backend, mainnet and dev images; `--full` also scores one real baseline after asking. |
+| `talos doctor` | Runs health checks on the config, credential, provider (one small LLM test call), backend, mainnet and dev images, with no compute spend; `--full` also scores one real baseline after asking. |
 | `talos check-updates` | Checks GHCR for newer published TIG dev image versions and prints upgrade guidance. |
 
 ### `talos setup`
@@ -519,7 +520,7 @@ package path, a one-line description of each package file, `talos report <job_id
 ### `talos doctor`
 
 ```bash
-talos doctor                                    # free checks only
+talos doctor                                    # no compute; one small LLM test call
 talos doctor --full --challenge knapsack        # also score one baseline, after asking
 talos doctor --json                             # one JSON document instead of text lines
 ```
