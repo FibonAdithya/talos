@@ -326,7 +326,8 @@ and no other track may get worse. The LLM still sees and may edit every file.
 
 **`--nonces`.** Every nonce is scored for the baseline on both sets and for every candidate on
 training, then again on held-out when it wins on training, so the count sets the cost of
-every evaluation. On hypergraph an L40 spends about 10 minutes per nonce-per-track on the
+every evaluation. On C3 and local, a candidate's training stops early once its errors put it
+over the error ceiling, so a failing candidate costs less. On hypergraph an L40 spends about 10 minutes per nonce-per-track on the
 baseline's two sets at the current fuel (measured 2026-09-25); 32 made that baseline 11 hours
 against the 6-hour C3 job limit. A resume keeps the sets the job was drawn with.
 
