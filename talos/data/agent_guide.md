@@ -33,7 +33,9 @@ Rules:
    outside any job budget.
 4. If there is no `talos.config.json`, stop and ask the user to run `talos setup`. Then run
    `talos doctor` and fix what it reports before starting a job.
-5. To try Talos with no account and no spend, run `talos demo --delay 0`.
+5. To try Talos with no account and no spend, run `talos demo --delay 0`. Its LLM and scores
+   are scripted: its `won` status and package show what a real job produces, and there is
+   nothing in it to submit. Say so when you report a demo.
 
 ## 3. Starting a job
 
@@ -177,7 +179,9 @@ Package: runs/<job_id>/package/
 Next step: <one suggestion, such as submitting, or resuming with more budget if the user agrees>
 ```
 
-Do not tell the user to submit anything unless the outcome is `won`.
+Do not tell the user to submit anything unless the outcome is `won` on a real job (not a demo).
+After a demo, the next step is for the user to run `talos setup` themselves (it asks for
+credentials interactively), then for you to run `talos doctor`.
 
 ## 7. Troubleshooting
 
