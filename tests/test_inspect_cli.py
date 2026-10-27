@@ -40,7 +40,8 @@ def test_status_table_and_json(tmp_path, monkeypatch, capsys):
 
 def test_status_with_no_jobs(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    assert cli.main(["status"]) == 0 and "no jobs under runs/" in capsys.readouterr().out
+    assert cli.main(["status"]) == 0
+    assert capsys.readouterr().out == f"no jobs under {tmp_path.resolve() / 'runs'}\n"
     assert cli.main(["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {"schema_version": 1, "jobs": []}
 

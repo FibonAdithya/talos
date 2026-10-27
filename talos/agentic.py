@@ -216,12 +216,15 @@ _AGENT_ENV_ALLOWLIST = frozenset({
 _TRANSCRIPT_CAP = 200_000
 
 
-def _agent_env() -> dict[str, str]:
+def _agent_env(worktree: Path) -> dict[str, str]:
     """The agent runs `talos compile`; make sure the interpreter that runs Talos is first on PATH so
     the console script resolves even when the venv is not activated in the agent's shell."""
     env = {k: v for k, v in os.environ.items()
            if k in _AGENT_ENV_ALLOWLIST or k.startswith("XDG_")}
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
+    # The sandbox's `talos compile` must not fall through to the user's workspace and read their
+    # config and secrets; it behaves as it did before workspaces: no config, state in the worktree.
+    env["TALOS_WORKSPACE"] = str(worktree)
     return env
 
 
@@ -232,7 +235,7 @@ def _run_agent(cmd: list[str], wt: Path, prompt: str, timeout_s: int,
     caller's to check, after it has read the session's cost: a failed session spent tokens too."""
     try:
         r = run(cmd, cwd=wt, input=prompt, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=timeout_s, env=_agent_env())
+                errors="replace", timeout=timeout_s, env=_agent_env(wt))
     except FileNotFoundError:
         raise AgenticError(f"{cmd[0]} CLI not found on PATH") from None
     except subprocess.TimeoutExpired:

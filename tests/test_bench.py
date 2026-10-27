@@ -190,7 +190,7 @@ def _fake_modal(raiser):
     return mod
 
 
-def test_missing_deployment_says_run_talos_setup(monkeypatch):
+def test_missing_deployment_says_run_talos_deploy(monkeypatch):
     mod = _fake_modal(lambda nf: nf("app has no function score_batch_knapsack"))
     monkeypatch.setitem(sys.modules, "modal", mod)
     clock = FakeClock()
@@ -198,12 +198,12 @@ def test_missing_deployment_says_run_talos_setup(monkeypatch):
     b = ModalBench(clock=clock, sleep=recording_sleep(clock, sleeps))
     with pytest.raises(BenchUnavailable) as ei:
         b.evaluate(req())
-    assert "talos setup" in str(ei.value)
+    assert "talos deploy" in str(ei.value)
     # mutation: retrying a NotFoundError wastes the whole window on a deterministic error
     assert sleeps == []
 
 
-def test_transient_lookup_failure_is_retried_not_blamed_on_setup(monkeypatch):
+def test_transient_lookup_failure_is_retried_not_blamed_on_deploy(monkeypatch):
     mod = _fake_modal(lambda nf: ConnectionError("connection reset"))
     monkeypatch.setitem(sys.modules, "modal", mod)
     clock = FakeClock()
@@ -213,8 +213,59 @@ def test_transient_lookup_failure_is_retried_not_blamed_on_setup(monkeypatch):
         b.evaluate(req())
     # mutation: converting every lookup error to "not deployed" pauses the run on a network
     # blip and prints the wrong advice
-    assert "talos setup" not in str(ei.value)
+    assert "talos deploy" not in str(ei.value)
     assert sleeps
+
+
+def _recording_modal(exc=None):
+    looked_up = []
+
+    class NotFoundError(Exception):
+        pass
+
+    def from_name(app_name, name):
+        looked_up.append((app_name, name))
+        raise (exc or NotFoundError)("no such function")
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=NotFoundError)
+    mod.Function = types.SimpleNamespace(from_name=from_name)
+    return mod, looked_up
+
+
+def test_check_deploy_missing_marker_says_talos_deploy(monkeypatch):
+    from talos.deploy_digest import marker_name
+    mod, looked_up = _recording_modal()
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    with pytest.raises(BenchUnavailable) as ei:
+        ModalBench().check_deploy()
+    # mutation: looking up any other name checks nothing about this client's source
+    assert looked_up == [("talos-bench", marker_name())]
+    assert "talos deploy" in str(ei.value) and "different Talos code" in str(ei.value)
+
+
+def test_check_deploy_transient_error_propagates(monkeypatch):
+    mod, _ = _recording_modal(ConnectionError)
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    # mutation: turning every error into BenchUnavailable blames the deploy for a network blip
+    with pytest.raises(ConnectionError):
+        ModalBench().check_deploy()
+
+
+def test_check_deploy_passes_when_the_marker_exists(monkeypatch):
+    seen = []
+
+    class Fn:
+        def hydrate(self):
+            seen.append("hydrate")
+
+    mod = types.ModuleType("modal")
+    mod.exception = types.SimpleNamespace(NotFoundError=type("NotFoundError", (Exception,), {}))
+    mod.Function = types.SimpleNamespace(from_name=lambda app, name: Fn())
+    monkeypatch.setitem(sys.modules, "modal", mod)
+    ModalBench().check_deploy()
+    # mutation: from_name alone is lazy and would never notice a missing marker
+    assert seen == ["hydrate"]
 
 
 def test_lookup_is_cached_after_a_successful_hydrate(monkeypatch):
@@ -375,7 +426,7 @@ def test_modal_starmap_carries_the_per_track_timeout(monkeypatch):
 
 
 def test_a_stale_deploy_is_reported_at_once_not_retried_as_an_outage(monkeypatch):
-    # The PR that added timeout_s to the score function needs `talos setup` re-run on Modal. Without
+    # The PR that added timeout_s to the score function needs `talos deploy` re-run on Modal. Without
     # this check a client talking to the old deploy retried the TypeError for the whole
     # 900 s window and then reported "Modal unreachable". mutation: treating the TypeError
     # like a transport error brings the 17 retries and the wrong diagnosis back
@@ -395,15 +446,15 @@ def test_a_stale_deploy_is_reported_at_once_not_retried_as_an_outage(monkeypatch
     monkeypatch.setitem(sys.modules, "modal", mod)
     clock, sleeps = FakeClock(), []
     b = ModalBench(clock=clock, sleep=recording_sleep(clock, sleeps))
-    with pytest.raises(BenchUnavailable, match="talos setup"):
+    with pytest.raises(BenchUnavailable, match="talos deploy"):
         b.evaluate(req(baseline=base(100)))
     assert sleeps == []
 
 
-def test_a_native_compile_against_an_app_without_mode_asks_for_setup_at_once(monkeypatch):
+def test_a_native_compile_against_an_app_without_mode_asks_for_deploy_at_once(monkeypatch):
     # An app deployed before native scoring has a compile function with no `mode` keyword.
     # mutation: treating that TypeError as an outage retries it for 900 s and then reports
-    # "Modal unreachable" instead of asking for `talos setup`
+    # "Modal unreachable" instead of asking for `talos deploy`
     class Fn:
         def hydrate(self):
             pass
@@ -417,7 +468,7 @@ def test_a_native_compile_against_an_app_without_mode_asks_for_setup_at_once(mon
     monkeypatch.setitem(sys.modules, "modal", mod)
     clock, sleeps = FakeClock(), []
     b = ModalBench(clock=clock, sleep=recording_sleep(clock, sleeps))
-    with pytest.raises(BenchUnavailable, match="talos setup"):
+    with pytest.raises(BenchUnavailable, match="talos deploy"):
         b.evaluate(EvalRequest(challenge="knapsack", files={"mod.rs": "x"}, training=TR,
                                holdout=[], fuel=1, baseline_training=None, rule=BeatRule(),
                                mode="native", fuel_budgets_us={"t": 900}))

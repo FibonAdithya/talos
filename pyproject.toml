@@ -1,16 +1,34 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "talos-tig"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Single-user autoresearch loop for TIG challenges"
 requires-python = ">=3.10"
-license = {text = "GPL-3.0-or-later"}
-dependencies = ["modal>=1.5,<2", "anthropic>=1,<2"]
+readme = "README.md"
+license = "GPL-3.0-or-later"
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/FibonAdithya/talos"
+Issues = "https://github.com/FibonAdithya/talos/issues"
+Documentation = "https://github.com/FibonAdithya/talos/blob/main/docs/usage.md"
 
 [project.optional-dependencies]
+modal = ["modal>=1.5,<2"]
+anthropic = ["anthropic>=1,<2"]
+all = ["talos-tig[modal,anthropic]"]
 dev = ["pytest>=8", "ruff>=0.5"]
 
 [project.scripts]
@@ -18,6 +36,9 @@ talos = "talos.cli:main"
 
 [tool.setuptools]
 packages = ["talos", "talos.providers", "modal_app"]
+
+[tool.setuptools.dynamic]
+version = {attr = "talos.__version__"}
 
 [tool.setuptools.package-data]
 talos = ["data/*.md"]

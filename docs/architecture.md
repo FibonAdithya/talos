@@ -329,7 +329,8 @@ left nothing to read back, the error names the tool calls the CLI refused, for e
 `agent did not fill in .talos/hypothesis.json; the CLI refused 3 tool calls (Edit x2, Read x1)`.
 
 The child process gets an environment allowlist rather than your environment: no LLM keys,
-no Modal tokens.
+no Modal tokens. `TALOS_WORKSPACE` is set to the worktree, so a `talos compile` inside the
+sandbox finds no config and never reads your `talos.config.json` or `.talos/secrets.json`.
 
 `codex-cli` is opt-in. Codex ignores that settings file, and its own `--sandbox
 workspace-write` restricts writes only: under it the agent can execute arbitrary

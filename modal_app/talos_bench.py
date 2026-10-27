@@ -1,4 +1,5 @@
-"""Modal app `talos-bench`. Deployed once into the user's Modal account by `talos setup`.
+"""Modal app `talos-bench`. Deployed into the user's Modal account by `talos setup`, and
+redeployed by `talos deploy` after an upgrade.
 Every function runs inside the official TIG dev image for its challenge plus a pinned
 monorepo checkout at /app. Artifacts live on the `talos-artifacts` Volume keyed by the
 content hash of the submitted files."""
@@ -14,6 +15,7 @@ import modal
 from talos import inside
 from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MODAL_GPUS, MONOREPO_REF, dev_image,
                               gpu_slug, modal_workers)
+from talos.deploy_digest import marker_name
 from talos.inside import NONCE_TIMEOUT_S
 
 APP_NAME = "talos-bench"
@@ -140,6 +142,10 @@ def register(app, image=_image, probe_image=_probe_image) -> None:
     for gpu in MODAL_GPUS:
         app.function(name=f"probe_{gpu_slug(gpu)}", image=probe_image(), gpu=gpu, timeout=60,
                      serialized=True)(_mk_probe(gpu))
+    # Never called: a client looks it up to learn which source this app was deployed from, and
+    # a redeploy removes the previous deployed_<digest>.
+    app.function(name=marker_name(), image=probe_image(), timeout=10,
+                 serialized=True)(_mk_marker())
 
 
 def _mk_compile(n):
@@ -158,6 +164,14 @@ def _mk_probe(gpu):
     def probe() -> str:
         return gpu  # reaching here at all is the measurement: the GPU had capacity
     return probe
+
+
+def _mk_marker():
+    # A closure, like _mk_probe: the probe image has no talos source, and cloudpickle pickles a
+    # module-level function by reference but a closure by value.
+    def marker() -> None:
+        return None
+    return marker
 
 
 register(app)

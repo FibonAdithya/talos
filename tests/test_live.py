@@ -145,7 +145,7 @@ def test_c3_gpu_probe(tmp_path):
 def test_modal_gpu_probe():
     """Manual: the Modal GPU capacity probe, for real. Run:
     TALOS_LIVE_BACKEND=modal .venv/bin/pytest -m live tests/test_live.py -k modal_gpu_probe -s
-    Needs the app deployed at this version (`talos setup`, or `modal deploy -m
+    Needs the app deployed at this version (`talos deploy`, or `modal deploy -m
     modal_app.talos_bench`): the probe functions are new. Costs seconds of one GPU."""
     if os.environ.get("TALOS_LIVE_BACKEND") != "modal":
         pytest.skip("set TALOS_LIVE_BACKEND=modal")

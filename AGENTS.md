@@ -134,7 +134,7 @@ progress.
    (`modal_app/talos_bench.py::content_hash`) and the baseline cache key. The
    exit codes in `talos/inside.py` were read from `tig-runtime` at that
    commit. Bumping either pin silently changes what every cached baseline
-   meant, and the Modal app must be redeployed (`talos setup`) before any run.
+   meant, and the Modal app must be redeployed (`talos deploy`) before any run.
    The baseline cache key also includes the hyperparameter map
    (`talos/baseline.py::effective_hyperparameters`); a key computed without one
    is unchanged from before the map existed.
@@ -199,7 +199,9 @@ Run from the repo root:
 
     make check
 
-That is the same command CI runs (`.github/workflows/ci.yml`). No target uses
+That is the command CI's `check` job runs (`.github/workflows/ci.yml`). CI also runs a
+`wheel` job that builds the wheel, checks its contents with `scripts/check_wheel.py` and
+runs it with no extras; `make check` does not cover that. No target uses
 `|| true`; a red suite is a failure, not a warning. The `Makefile` is the
 executable definition of a valid change.
 
@@ -268,6 +270,7 @@ nobody.
 | Wizard menus and the yes/no confirmation | `talos/wizard.py`; the `run` wizard and job summary in `talos/cli.py::cmd_run` |
 | `talos demo`: scripted provider, scores, package guide | `talos/demo.py`, `talos/cli.py::cmd_demo` |
 | `talos doctor`: health checks and `--full` | `talos/doctor.py` |
+| Where config, secrets and runs live (the workspace); `--workspace`; optional extras | `talos/workspace.py`, `talos/extras.py`, `docs/usage.md#workspace` |
 | Per-challenge pins, beat rules, hardware | `talos/challenges.py::CHALLENGES` |
 | One iteration of the research loop | `talos/loop.py::Loop.iterate`, confirmation in `talos/loop.py::Loop._confirm` |
 | Lineage tree, chains, annealing accept rule and temperature | `talos/lineage.py::decide`, `talos/lineage.py::temperature`, `talos/loop.py::Loop._anneal_step` |
@@ -276,6 +279,7 @@ nobody.
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |
 | Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `talos/inside.py` |
 | Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
+| Stale-deploy check before spend; `talos deploy` | `talos/deploy_digest.py`, `talos/bench.py::ModalBench.check_deploy`, `talos/cli.py::cmd_deploy` |
 | C3 client: deploy, poll, pull, cost estimate | `talos/c3_bench.py::C3Bench` |
 | C3 job directory: .c3 config, job.sh, payload.json | `talos/c3_jobdir.py::write_job_dir` |
 | C3 in-container runner: build, score, write results (the local backend runs it too) | `talos/c3_job.py::main` |

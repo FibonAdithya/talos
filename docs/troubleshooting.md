@@ -9,26 +9,57 @@ message below. Text in angle brackets, such as `<job_id>`, is filled in by Talos
 
 ### `modal deploy failed`
 
-**Symptom:** `talos setup` stops with `modal deploy failed: <Modal's output>`.
+**Symptom:** `talos setup` or `talos deploy` stops with `modal deploy failed: <Modal's output>`.
 
-**Cause:** the `modal deploy` command that setup runs returned non-zero. The text after the
+**Cause:** the `modal deploy` command that setup and `talos deploy` run returned non-zero. The text after the
 colon is the end of Modal's own error output, and says why.
 
-**Fix:** act on Modal's message, then run `talos setup` again. If the message is about the
-token, create a new one at modal.com/settings/tokens and give it to setup.
+**Fix:** act on Modal's message, then run the same command again. If the message is about the
+token, create a new one at modal.com/settings/tokens and give it to `talos setup`.
 
 ### The Modal app is missing or older than the client
 
 **Symptom:** a run stops with one of:
 
-- ``Modal function <name> not found in app talos-bench: <error>. Run `talos setup` to deploy.``
-- ``the deployed talos-bench app predates this client (<error>). Run `talos setup` to redeploy.``
+- ``Modal function <name> not found in app talos-bench: <error>. Run `talos deploy`.``
+- ``the deployed talos-bench app was built from different Talos code than this client; run `talos deploy` ``
+- ``the deployed talos-bench app predates this client (<error>). Run `talos deploy` to redeploy.``
 
 **Cause:** the app deployed in your Modal account does not match this version of Talos. This
 happens after pulling a new version without redeploying, because the score function's
 arguments change between versions.
 
-**Fix:** `talos setup`, then `talos run --resume <job_id>` if a job stopped.
+**Fix:** `talos deploy` (it reads no config and keeps the Modal token `talos setup` stored), then
+`talos run --resume <job_id>` if a job stopped. `talos doctor` reports the same condition.
+
+### A command needs an extra that is not installed
+
+**Symptom:** exit code 2 and ``the modal backend needs the modal extra: uv tool install --python 3.12 'talos-tig[modal]' (in a clone: pip install -e '.[modal]')``. The name of the
+extra and the thing that needs it vary (`modal` or `anthropic`; `talos deploy`, the modal
+backend or the anthropic provider).
+
+**Cause:** the `modal` or `anthropic` package is not installed. Talos installs neither by
+default.
+
+**Fix:** run the command the message prints. It names every extra that is installed now as
+well as the missing one, because `uv tool install` replaces the extras of an existing install
+rather than adding to them (MEASURED 2026-10-27). If you edit the command, keep every extra
+you use.
+
+### `talos.config.json not found`
+
+**Symptom:** ``talos.config.json not found in <workspace>; run `talos setup` first``, or
+`TALOS_WORKSPACE=<value> is not a directory` with exit code 2.
+
+**Cause:** the workspace Talos chose has no config. It is `TALOS_WORKSPACE` or `--workspace`
+if given, else the nearest directory at or above the current one that holds
+`talos.config.json`, else `~/.talos/workspace`
+([Workspace](usage.md#workspace)). A config made in another directory, or in a clone with
+an earlier version, is not found from outside it.
+
+**Fix:** run `talos setup`, or run from inside the directory that holds the config, or pass
+`--workspace DIR`. For the `is not a directory` message, create the directory or fix the variable;
+only `talos setup`, `talos demo` and `talos run --fake` create a missing workspace.
 
 ### No API key for the provider
 

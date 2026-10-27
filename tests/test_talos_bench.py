@@ -214,7 +214,8 @@ def test_register_deploys_one_function_set_per_gpu_and_a_probe_per_gpu():
         # the probe must not pull a 13 GB dev image: its cold start is the whole measurement
         assert kw["image"] == "slim" and kw["gpu"] == gpu and kw["timeout"] <= 120
         assert fn() == gpu
-    expected = (2 * len(cpu_names) + 2 * len(gpu_names) * len(MODAL_GPUS) + len(MODAL_GPUS))
+    expected = (2 * len(cpu_names) + 2 * len(gpu_names) * len(MODAL_GPUS) + len(MODAL_GPUS)
+                + 1)  # the deploy marker
     assert len(names) == expected
 
 

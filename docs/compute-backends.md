@@ -6,8 +6,11 @@ what maintainers do to keep the C3 and local backends working. For choosing and 
 
 ## Transports
 
-On Modal, `talos setup` deploys the benchmark app to your account, and Talos calls its compile
-and score functions.
+On Modal, `talos setup` (or, after an upgrade, `talos deploy`) deploys the benchmark app to your
+account, and Talos calls its compile and score functions. The app carries a marker function,
+`deployed_<12 hex digits>`, named after a digest of the Talos code it was built from. `talos run`
+and `talos compile` look the marker up, and stop with a message naming `talos deploy` when the client's
+digest is not deployed; `talos doctor` reports the same.
 
 On the C3 backend Talos uses C3's hosted MCP endpoint (`https://api.cthree.cloud/mcp`) when
 a C3 API key is configured, and the `c3` CLI when it is not. The key path needs no C3
@@ -36,7 +39,7 @@ The Modal packing is part of the hardware class, `cpu4-mem8192-x4`
 (`talos/challenges.py::hardware_class`): four nonces sharing a container's cores and memory
 time differently from one nonce alone, so a Modal CPU baseline cached before batching is
 never a hit and is re-measured on the first run after upgrading. Upgrading also needs
-`talos setup`, because the per-nonce `score_nonce_<challenge>` function is replaced. GPU
+`talos deploy`, because the per-nonce `score_nonce_<challenge>` function is replaced. GPU
 classes are unchanged. Each nonce in a Modal batch has a quarter of the container's 8 GiB,
 against 4 GiB on C3's profile; a memory bump is a change to `ChallengeSpec.memory_mib`, and
 therefore to the class.
@@ -65,7 +68,7 @@ On Modal, an artifact is stored under `/artifacts/<challenge>/<artifact id>/`. A
 hash includes its mode, and it is stored there as `talos-native` beside `algo.ptx`, never over
 the metered `algo.so`. A Modal app deployed before native scoring keeps working for metered
 jobs and refuses a native one as a stale deploy (`talos/bench.py::_stale_deploy`); run
-`talos setup` to redeploy.
+`talos deploy` to redeploy.
 
 ## Hardware fallback
 
@@ -85,7 +88,7 @@ out for the same reason as the smaller GPUs. On Modal a CPU challenge has one cl
 The choice is made once and frozen, never per call, because the baseline and every candidate
 must score on the same hardware class (AGENTS.md invariant 1) and the class is in the baseline
 cache key. Modal's own `gpu=["L40S", "A100-80GB"]` fallback list is deliberately not used: it
-picks a GPU per container. Instead `talos setup` deploys one `compile_<challenge>_<gpu>` and
+picks a GPU per container. Instead the Modal deploy (`talos setup` or `talos deploy`) creates one `compile_<challenge>_<gpu>` and
 `score_batch_<challenge>_<gpu>` pair per GPU, plus one `probe_<gpu>` function on a stock image,
 and `talos/cli.py::freeze_hardware` fixes the hardware before the baseline:
 
@@ -111,9 +114,9 @@ below what the container billed); C3 charges the probe's whole two-minute wallti
 option's rate, the most it can bill. A probe that never started charges nothing.
 
 The local backend has one hardware class and no probe, and so does a CPU challenge on Modal.
-The Modal app must be redeployed (`talos setup`) after upgrading to a version with this table:
-the old deploy has no per-GPU functions, and a run against it stops with "Run `talos setup` to
-deploy".
+The Modal app must be redeployed (`talos deploy`) after upgrading to a version with this table:
+the old deploy has no per-GPU functions, and a run against it stops with "the deployed
+talos-bench app was built from different Talos code than this client; run `talos deploy`".
 
 Both GPU probes were run against live accounts on 2026-09-24 (`tests/test_live.py`, the
 `c3_gpu_probe` and `modal_gpu_probe` tests): C3 accepted the `ubuntu:24.04` probe with
@@ -159,7 +162,7 @@ sources would still expose its hidden seed through serialization and debug forma
 Keep both pins fixed for a run; a moving `latest` tag would let image contents change
 without invalidating cached artifacts or measurements. An upgrade gets new baseline
 cache keys and local volumes; existing runs with different or unrecorded pins must be
-restarted as new jobs. Redeploy Modal with `talos setup` and run `talos doctor --full`
+restarted as new jobs. Redeploy Modal with `talos deploy` and run `talos doctor --full`
 after upgrading.
 
 `talos check-updates` compares the configured tag with the newest published stable numeric

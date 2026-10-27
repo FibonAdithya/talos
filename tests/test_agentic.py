@@ -480,11 +480,17 @@ def test_attach_agentic_copies_transcript_to_iteration_dir(tmp_path):
     assert (it_dir / "agent_stdout.txt").read_text() == "agent output"
 
 
-def test_agent_env_passes_the_backend_through(monkeypatch):
+def test_agent_env_pins_the_workspace_to_the_worktree(tmp_path, monkeypatch):
+    from talos.agentic import _agent_env
+    monkeypatch.setenv("TALOS_WORKSPACE", "/elsewhere")
+    assert _agent_env(tmp_path)["TALOS_WORKSPACE"] == str(tmp_path)
+
+
+def test_agent_env_passes_the_backend_through(tmp_path, monkeypatch):
     from talos.agentic import _agent_env
     monkeypatch.setenv("TALOS_BACKEND", "c3")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
-    env = _agent_env()
+    env = _agent_env(tmp_path)
     # mutation: dropping TALOS_BACKEND from the allowlist sends agentic C3 compiles to Modal;
     # widening the allowlist leaks keys into the sandbox
     assert env["TALOS_BACKEND"] == "c3" and "ANTHROPIC_API_KEY" not in env
@@ -530,22 +536,22 @@ def test_claude_md_shows_the_hyperparameters():
     assert 'track t: {"x":1}' in text and "do not rename or remove" in text
 
 
-def test_agent_env_passes_the_c3_api_key_through(monkeypatch):
+def test_agent_env_passes_the_c3_api_key_through(tmp_path, monkeypatch):
     from talos.agentic import _agent_env
     monkeypatch.setenv("C3_API_KEY", "c3_key_1")
     monkeypatch.setenv("C3_AUTH_TOKEN", "raw-token")
-    env = _agent_env()
+    env = _agent_env(tmp_path)
     # mutation: dropping it from the allowlist fails every agentic `talos compile` on C3 for a
     # user with no `c3 login` session; the allowlist stays exact, so other C3_ vars stay out
     assert env["C3_API_KEY"] == "c3_key_1" and "C3_AUTH_TOKEN" not in env
 
 
-def test_agent_env_passes_the_frozen_gpu_through(monkeypatch):
+def test_agent_env_passes_the_frozen_gpu_through(tmp_path, monkeypatch):
     from talos.agentic import _agent_env
     monkeypatch.setenv("TALOS_HARDWARE", "A100-80GB")
     # mutation: dropping TALOS_HARDWARE from the allowlist makes every sandbox `talos compile`
     # probe for a GPU of its own instead of using the job's
-    assert _agent_env()["TALOS_HARDWARE"] == "A100-80GB"
+    assert _agent_env(tmp_path)["TALOS_HARDWARE"] == "A100-80GB"
 
 
 def test_a_native_job_tells_its_agent_to_compile_natively():

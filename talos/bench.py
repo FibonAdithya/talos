@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from talos.challenges import CHALLENGES, BeatRule, hardware_options, gpu_slug, modal_workers
+from talos.deploy_digest import marker_name
 from talos.diagnostics import dead_new_functions
 from talos.inside import NONCE_TIMEOUT_S
 from talos.scoring import holdout_decision
@@ -210,10 +211,22 @@ class ModalBench:
             raise ValueError(f"{challenge} is a GPU challenge; select_hardware was not called")
         return f"{kind}_{challenge}_{gpu_slug(self.gpu)}"
 
+    def check_deploy(self) -> None:
+        """Raises BenchUnavailable when the deployed app was not built from this client's
+        source. A lookup starts no container. Only NotFoundError means "stale"; anything else
+        propagates, as in _fn."""
+        import modal
+        try:
+            modal.Function.from_name(self.app_name, marker_name()).hydrate()
+        except modal.exception.NotFoundError:
+            raise BenchUnavailable(
+                f"the deployed {self.app_name} app was built from different Talos code than "
+                f"this client; run `talos deploy`") from None
+
     def _fn(self, name: str):
         """Only a genuine "not deployed" becomes BenchUnavailable. Anything else — a network
         blip during hydrate — propagates so _with_retry treats it as an outage and retries,
-        instead of telling the user to run `talos setup`."""
+        instead of telling the user to run `talos deploy`."""
         cached = self._fns.get(name)
         if cached is not None:
             return cached
@@ -227,7 +240,7 @@ class ModalBench:
             raise BenchUnavailable(
                 f"Modal function {name} not found in app {self.app_name}: "
                 f"{type(e).__name__}: {_redact(str(e))[:300]}. "
-                f"Run `talos setup` to deploy.") from None
+                f"Run `talos deploy`.") from None
 
     def _with_retry(self, call: Callable[[], object]):
         """The window is anchored at the FIRST failure, not at call start: a starmap over 64
@@ -245,7 +258,7 @@ class ModalBench:
                     raise BenchUnavailable(
                         f"the deployed {self.app_name} app predates this client "
                         f"({type(e).__name__}: {_redact(str(e))[:200]}). "
-                        f"Run `talos setup` to redeploy.") from None
+                        f"Run `talos deploy` to redeploy.") from None
                 if deadline is None:
                     deadline = self._clock() + self.retry_window_s
                 if self._clock() + delay > deadline:

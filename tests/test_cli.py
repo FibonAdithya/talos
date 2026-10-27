@@ -571,6 +571,12 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
 
     def stub(ok):
         class B:
+            def check_deploy(self):
+                pass
+
+            def _with_retry(self, call):
+                return call()
+
             def select_hardware(self, challenge, chosen=None):
                 return None
 
@@ -1283,6 +1289,12 @@ class _RefusingBench:
 
     def __init__(self, why):
         self._why = why
+
+    def check_deploy(self):
+        pass
+
+    def _with_retry(self, call):
+        return call()
 
     def select_hardware(self, challenge, chosen=None):
         return None
@@ -2462,6 +2474,59 @@ def test_deploy_bench_deploys_the_app_as_a_package_module():
     assert (Path(kw["cwd"]) / "modal_app" / "talos_bench.py").is_file()
 
 
+def test_deploy_command_deploys_without_a_config(tmp_path, monkeypatch, capsys):
+    from talos.deploy_digest import marker_name
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    monkeypatch.setattr("talos.extras.importlib.util.find_spec", lambda name, *a, **k: object())
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: calls.append(a))
+    assert cli.main(["deploy"]) == 0
+    # mutation: passing a token re-sets the one `talos setup` stored; reading a config needs one
+    assert calls == [(None, None)]
+    assert marker_name() in capsys.readouterr().out
+
+
+def test_deploy_without_the_modal_extra_names_the_install_command(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("talos.extras.importlib.util.find_spec", lambda name: None)
+    monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: pytest.fail("deployed"))
+    rc = cli.main(["deploy"])
+    err = capsys.readouterr().err
+    # mutation: skipping require() lets `-m modal` fail with a bare "No module named modal"
+    assert rc == 2 and "talos deploy needs the modal extra" in err
+
+
+def test_deploy_command_reports_a_failed_modal_deploy(tmp_path, monkeypatch, capsys):
+    from talos.deploy_digest import marker_name
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("talos.extras.importlib.util.find_spec", lambda name, *a, **k: object())
+
+    def fail(*a, **k):
+        raise ConfigError("modal deploy failed: boom")
+    monkeypatch.setattr(cli, "deploy_bench", fail)
+    rc = cli.main(["deploy"])
+    out, err = capsys.readouterr()
+    # mutation: not catching the failure ends in a traceback; printing "Deployed" anyway hides it
+    assert rc == 2 and "modal deploy failed: boom" in err
+    assert marker_name() not in out
+
+
+def test_deploy_uses_the_running_interpreters_modal(monkeypatch):
+    import shutil
+    import sys
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/modal")
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(list(cmd))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    cli.deploy_bench("ak-1", "as-1", run=run)
+    # mutation: a `modal` found on PATH may belong to another environment, without the
+    # modal this Talos was installed with
+    assert len(seen) == 2
+    assert all(c[:3] == [sys.executable, "-m", "modal"] for c in seen)
+
+
 # ── Hardware fallback ──────────────────────────────────────────────────────
 def hypergraph_info():
     return type("I", (), {"id": "c005", "name": "hypergraph", "is_gpu": True,
@@ -2530,6 +2595,50 @@ def test_execute_job_freezes_the_probed_gpu_in_state_and_exports_it(tmp_path, mo
     rc = _gpu_run(tmp_path, monkeypatch, b2, extra=["--resume", run_dir.name])
     assert rc == 1 and b2.selections == [("hypergraph", "A100-80GB")]
     assert b2.seen_env == ["A100-80GB"]
+
+
+def test_execute_job_pauses_on_stale_deploy_before_any_spend(tmp_path, monkeypatch, capsys):
+    from talos.bench import BenchUnavailable
+
+    class Stale(_ProbingBench):
+        def check_deploy(self):
+            raise BenchUnavailable("the deployed talos-bench app was built from different Talos "
+                                   "code than this client; run `talos deploy`")
+
+    b = Stale()
+    rc = _gpu_run(tmp_path, monkeypatch, b, challenge="knapsack")
+    run_dir = next((tmp_path / "runs").iterdir())
+    st = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    # mutation: checking after freeze_hardware probes (and bills) a GPU on a stale app; not
+    # checking at all runs the whole job on old code
+    assert rc == 1 and st["status"] == "paused" and "talos deploy" in st["stop_reason"]
+    assert b.selections == [] and b.seen_env == []
+
+
+def test_execute_job_retries_a_transient_deploy_lookup_instead_of_crashing(tmp_path,
+                                                                          monkeypatch):
+    from talos.bench import ModalBench
+    from tests.test_bench import FakeClock, recording_sleep
+    clock, sleeps, lookups = FakeClock(), [], []
+
+    class Flaky(ModalBench):
+        def check_deploy(self):
+            lookups.append(1)
+            if len(lookups) == 1:
+                raise ConnectionError("connection reset")
+
+        def select_hardware(self, challenge, chosen=None):
+            self.reached = True
+            return None
+
+        def evaluate(self, request):
+            raise BenchCancelled("stop")
+
+    b = Flaky(clock=clock, sleep=recording_sleep(clock, sleeps))
+    b.reached = False
+    rc = _gpu_run(tmp_path, monkeypatch, b, challenge="knapsack")
+    # mutation: a bare check_deploy lets the ConnectionError end `talos run` in a traceback
+    assert len(lookups) == 2 and sleeps and b.reached and rc == 1
 
 
 def test_execute_job_pauses_when_no_gpu_is_available(tmp_path, monkeypatch, capsys):
@@ -2641,6 +2750,25 @@ def test_compile_uses_the_exported_gpu_or_probes_for_one(tmp_path, monkeypatch):
     assert cli.main(["compile", "--challenge", "hypergraph", "--dir", "src",
                      "--backend", "modal"]) == 0
     assert b.selections[-1] == ("hypergraph", None)
+
+
+def test_compile_on_modal_refuses_a_stale_deploy_before_probing(tmp_path, monkeypatch, capsys):
+    from talos.bench import BenchUnavailable
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TALOS_BACKEND", raising=False)
+    monkeypatch.delenv("TALOS_HARDWARE", raising=False)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "mod.rs").write_text("fn x(){}")
+
+    class Stale(_ProbingBench):
+        def check_deploy(self):
+            raise BenchUnavailable("built from different Talos code; run `talos deploy`")
+
+    b = Stale("L40S")
+    monkeypatch.setattr(cli, "make_bench", lambda *a, **k: b)
+    rc = cli.main(["compile", "--challenge", "hypergraph", "--dir", "src", "--backend", "modal"])
+    # mutation: skipping the check in `talos compile` compiles on stale code and bills a probe
+    assert rc == 1 and b.selections == [] and "talos deploy" in capsys.readouterr().err
 
 
 def test_a_job_from_before_the_gpu_choice_is_frozen_to_the_first_option_not_probed(tmp_path,
@@ -2775,6 +2903,12 @@ def test_compile_is_metered_by_default_and_native_on_the_flag(tmp_path, monkeypa
     modes = []
 
     class Bench:
+        def check_deploy(self):
+            pass
+
+        def _with_retry(self, call):
+            return call()
+
         def select_hardware(self, challenge, chosen=None):
             return None
 
@@ -3365,7 +3499,7 @@ def test_accepting_the_summary_starts_the_job(tmp_path, monkeypatch, capsys):
     job_id = calls["execute"][0]
     assert (tmp_path / "runs" / job_id / "job.json").exists()
     out = capsys.readouterr().out
-    assert f"runs/{job_id}/" in out
+    assert f"  results:   {tmp_path.resolve() / 'runs' / job_id}\n" in out
 
 
 def test_summary_labels_codex_cli_spend_not_tracked(tmp_path, monkeypatch, capsys):
@@ -3427,3 +3561,14 @@ def test_summary_shows_the_challenge_warning(tmp_path, monkeypatch, capsys):
                      "--budget-iterations", "1", "--hyperparameters", "none", "--yes"]) == 0
     out = capsys.readouterr().out
     assert "untested" in out and "never been run end to end" in out
+
+
+def test_version_flag_prints_the_package_version(capsys):
+    import importlib.metadata
+
+    import talos
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == f"talos {talos.__version__}\n"
+    assert importlib.metadata.version("talos-tig") == talos.__version__

@@ -39,7 +39,7 @@ def load(root: Path) -> Config:
     root = Path(root)
     cp = root / "talos.config.json"
     if not cp.exists():
-        raise ConfigError("talos.config.json not found; run `talos setup` first")
+        raise ConfigError(f"talos.config.json not found in {root}; run `talos setup` first")
     d = json.loads(cp.read_text(encoding="utf-8"))
     return Config(provider=d["provider"], model=d["model"], mode=d.get("mode", "single-shot"),
                   api_base=d.get("api_base"), backend=d.get("backend", "modal"),
