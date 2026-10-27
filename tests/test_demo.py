@@ -112,3 +112,24 @@ def test_describe_package_unknown_name(tmp_path):
         "baseline",
         "  zzz.bin  - (no description)",
     ]
+
+
+def test_demo_run_survives_a_cp1252_stdout(tmp_path, monkeypatch):
+    # Issue #85. On Windows a piped stdout is cp1252, which has no ≈ (every status line) or ≤
+    # (an LLM-written title); before the fix the job ended "failed" at its first status line.
+    # mutation: dropping the UTF-8 reconfigure from main() raises inside on_event
+    import io
+    import sys
+
+    from talos import demo
+    _, description, new_k = demo._STEPS[1]
+    monkeypatch.setitem(demo._STEPS, 1, ("keep w ≤ cap", description, new_k))
+    buf = io.BytesIO()
+    out = io.TextIOWrapper(buf, encoding="cp1252", newline="\n")
+    monkeypatch.setattr(sys, "stdout", out)
+    rc, run_dir = _run_demo(tmp_path, monkeypatch)
+    out.flush()
+    text = buf.getvalue().decode("utf-8")
+    assert rc == 0
+    assert json.loads((run_dir / "state.json").read_text(encoding="utf-8"))["status"] != "failed"
+    assert "trying: keep w ≤ cap" in text and "compute ≈$" in text

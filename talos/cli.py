@@ -1351,7 +1351,6 @@ def cmd_status(args, ask) -> int:
     """Lists the jobs under runs/, or one job's detail. Reads runs/ only."""
     from talos import inspect_run
 
-    _utf8_stdout()
     root = Path.cwd() / "runs"
     if args.job_id is not None:
         try:
@@ -1382,7 +1381,6 @@ def cmd_show(args, ask) -> int:
     """One iteration's hypothesis, outcome, scores and files. Reads runs/ only."""
     from talos import inspect_run
 
-    _utf8_stdout()
     try:
         run = inspect_run.load_run(Path.cwd() / "runs", args.job_id)
         detail = inspect_run.iteration_detail(run, args.iteration)
@@ -1400,7 +1398,6 @@ def cmd_diff(args, ask) -> int:
     """One iteration's unified diff against the baseline or its parent. Reads runs/ only."""
     from talos import inspect_run
 
-    _utf8_stdout()
     try:
         run = inspect_run.load_run(Path.cwd() / "runs", args.job_id)
         text = inspect_run.iteration_diff(run, args.iteration, args.against)
@@ -1633,6 +1630,9 @@ COMMANDS = {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status"
 
 def main(argv=None, ask=default_ask) -> int:
     args = build_parser().parse_args(argv)
+    # Every command, not only the inspect ones: `talos run` prints ≈, ∞ and LLM-written
+    # titles on every iteration (issue #85).
+    _utf8_stdout()
     return COMMANDS[args.cmd](args, ask)
 
 

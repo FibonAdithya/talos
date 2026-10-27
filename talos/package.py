@@ -45,8 +45,12 @@ def _diff(base: dict[str, str], cand: dict[str, str], label: str = "baseline") -
     for name in sorted(set(base) | set(cand)):
         a = base.get(name, "").splitlines(keepends=True)
         b = cand.get(name, "").splitlines(keepends=True)
-        out.extend(difflib.unified_diff(a, b, fromfile=f"{label}/{name}",
-                                        tofile=f"candidate/{name}"))
+        for line in difflib.unified_diff(a, b, fromfile=f"{label}/{name}",
+                                         tofile=f"candidate/{name}"):
+            # A file's last line with no newline: difflib leaves it unterminated, so the next
+            # line runs onto it. diff and git mark it instead (issue #86).
+            out.append(line if line.endswith("\n")
+                       else line + "\n\\ No newline at end of file\n")
     return "".join(out)
 
 
