@@ -1,6 +1,10 @@
 import json
+import shutil
+import subprocess
 import zipfile
 from dataclasses import replace
+
+import pytest
 
 from talos.budget import Budget, Spend
 from talos.lineage import ROOT, Chain, Node
@@ -414,3 +418,29 @@ def test_report_failure_does_not_stop_package(tmp_path, monkeypatch, capsys):
     assert (tmp_path / "package.zip").is_file()
     assert "report.html not written" in capsys.readouterr().err
     assert "report.html" not in zipfile.ZipFile(tmp_path / "package.zip").namelist()
+
+
+def test_diff_marks_a_last_line_with_no_newline():
+    # Issue #86: the '-' and '+' lines ran together ('-b+c') with no end-of-file marker.
+    # mutation: dropping the marker, or appending it without the newline before it
+    from talos.package import _diff
+    assert _diff({"mod.rs": "a\nb"}, {"mod.rs": "a\nc"}) == (
+        "--- baseline/mod.rs\n+++ candidate/mod.rs\n@@ -1,2 +1,2 @@\n a\n"
+        "-b\n\\ No newline at end of file\n+c\n\\ No newline at end of file\n")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+@pytest.mark.parametrize("base, cand", [("a\nb", "a\nc"),          # changed, neither ends in \n
+                                        ("a\nb", "a\nb\n"),        # newline added
+                                        ("a\nb\n", "a\nb"),        # newline removed
+                                        ("x\na\nb", "y\na\nb"),    # unchanged context last line
+                                        ("a\nb\n", "a\nc\n")])     # ordinary change
+def test_diff_applies_with_git_and_reproduces_the_candidate(tmp_path, base, cand):
+    # mutation: any malformed last line makes git apply refuse the patch or rebuild other bytes
+    from talos.package import _diff
+    (tmp_path / "mod.rs").write_bytes(base.encode())
+    (tmp_path / "p.patch").write_bytes(_diff({"mod.rs": base}, {"mod.rs": cand}).encode())
+    r = subprocess.run(["git", "apply", "-p1", "p.patch"], cwd=tmp_path, capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "mod.rs").read_bytes() == cand.encode()
