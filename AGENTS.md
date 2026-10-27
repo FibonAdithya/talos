@@ -199,7 +199,9 @@ Run from the repo root:
 
     make check
 
-That is the same command CI runs (`.github/workflows/ci.yml`). No target uses
+That is the command CI's `check` job runs (`.github/workflows/ci.yml`). CI also runs a
+`wheel` job that builds the wheel, checks its contents with `scripts/check_wheel.py` and
+runs it with no extras; `make check` does not cover that. No target uses
 `|| true`; a red suite is a failure, not a warning. The `Makefile` is the
 executable definition of a valid change.
 
