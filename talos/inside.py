@@ -11,6 +11,7 @@ import multiprocessing
 import os
 import re
 import platform
+import signal
 import subprocess
 import tempfile
 import time
@@ -347,6 +348,20 @@ def run_task(task: NonceTask, run=subprocess.run) -> dict:
                      hyperparameters=hp)
 
 
+def _own_process_group() -> None:
+    """Pool initializer: the worker leads a process group of its own, which the solver and
+    verifier it starts inherit, so a stop can kill them together (run_nonces)."""
+    os.setpgrp()
+
+
+def _kill_groups(pids: list[int]) -> None:
+    for pid in pids:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass  # that worker and everything it started have already exited
+
+
 def run_nonces(tasks: list[NonceTask], workers: int, run=subprocess.run,
                pool_factory=None) -> Iterator[dict]:
     """Scores `tasks` on `workers` processes at once and yields each row as it finishes, in no
@@ -355,8 +370,21 @@ def run_nonces(tasks: list[NonceTask], workers: int, run=subprocess.run,
     and cannot carry an injected runner into a worker process, so the pool is only used with
     the real subprocess, or with a `pool_factory` a test supplied to drive that branch."""
     if workers > 1 and (pool_factory is not None or run is subprocess.run):
-        with (pool_factory or multiprocessing.Pool)(workers) as pool:
-            yield from pool.imap_unordered(run_task, tasks)
+        groups = hasattr(os, "setpgrp")  # the containers are Linux; the tests also run on Windows
+        pool = (pool_factory(workers) if pool_factory is not None else
+                multiprocessing.Pool(workers, initializer=_own_process_group if groups else None))
+        with pool:
+            try:
+                yield from pool.imap_unordered(run_task, tasks)
+            except GeneratorExit:
+                # The caller stopped early (talos/c3_job.py::_score). terminate() kills only the
+                # workers; the tig-runtime each one started would run on to its own timeout and
+                # keep the job alive. Terminate first, so no worker is replaced in between.
+                pids = [p.pid for p in multiprocessing.active_children()]
+                pool.terminate()
+                if groups and pool_factory is None:
+                    _kill_groups(pids)
+                raise
     else:
         for t in tasks:
             yield run_task(t, run=run)

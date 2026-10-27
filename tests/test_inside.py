@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -646,3 +648,49 @@ def test_native_artifact_paths(tmp_path):
     p.parent.mkdir(parents=True)
     p.write_text("x")
     assert inside.native_artifact_paths(tmp_path, "hypergraph", "talos_cand")[1] == p
+
+
+def _alive(pid: int) -> bool:
+    """Running or sleeping; a zombie waiting for its reaper has stopped running."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs Linux /proc and fork")
+def test_closing_the_pool_stream_early_kills_the_solvers_it_started(tmp_path, monkeypatch):
+    # Issue #84. Pool.terminate() kills the workers but not the tig-runtime each one started;
+    # those would run on to their own timeout and keep a C3 job alive after the stop.
+    import time
+    pids = tmp_path / "pids"
+    pids.mkdir()
+    fake = tmp_path / "bin" / "tig-runtime"
+    fake.parent.mkdir()
+    # nonce 0 exits at once (an `invalid` row, nothing saved); the others record their pid
+    # and sleep well past the test
+    fake.write_text('#!/bin/sh\n[ "$3" = 0 ] && exit 0\necho $$ > "' + str(pids)
+                    + '/$3"\nexec sleep 120\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    rows = inside.run_nonces([_task(n, tmp_path, timeout_s=300) for n in range(3)], 3)
+    assert next(rows)["nonce"] == 0
+    deadline = time.monotonic() + 20
+    while len(list(pids.iterdir())) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    started = [int(p.read_text()) for p in pids.iterdir()]
+    try:
+        assert len(started) == 2 and all(_alive(pid) for pid in started)
+        rows.close()
+        deadline = time.monotonic() + 10
+        while any(_alive(pid) for pid in started) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        # mutation: terminating the pool without killing each worker's process group
+        assert not any(_alive(pid) for pid in started)
+    finally:
+        for pid in started:  # a failing run must not leave the sleeps behind
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

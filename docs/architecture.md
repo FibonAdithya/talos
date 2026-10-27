@@ -268,6 +268,17 @@ the error ceiling. TIG caps fuel, not seconds, so this is a limit on research co
 TIG rule: `Thresholds.runtime_ceiling` in `talos/loop.py` sets the multiplier, and 0
 disables it.
 
+On the C3 and local backends a candidate's job also stops scoring training nonces as soon as
+its errors so far, over the training nonce count, exceed the error ceiling
+(`talos/c3_job.py::_score`). Errors only grow, so no later nonce could change the
+`failed:runtime` verdict. The job kills the solver processes still running
+(`talos/inside.py::run_nonces`), and the nonces it never started come back as `not_run`
+errors; the iteration's error text gives the counts, and its runtime ratio covers only the
+nonces that ran. Only research candidates stop early (`EvalRequest.stop_at_error_ceiling` in
+`talos/bench.py`): the baseline, calibration and native validation always score every
+nonce, because their rows are used nonce by nonce afterwards. Modal ignores the flag, since
+all of a call's batches run at once.
+
 ## The agentic sandbox
 
 `--mode agentic` hands each iteration to a headless `claude` or `codex` session in a

@@ -94,6 +94,11 @@ class EvalRequest:
     # fuel_budgets_us (microseconds of solve time; a track absent from it runs without one).
     mode: str = "metered"
     fuel_budgets_us: dict[str, int] | None = None
+    # A C3 or local job stops scoring training nonces once the errors so far put the candidate
+    # over rule.error_ceiling, which no later nonce can undo; the rest come back "not_run".
+    # Only research candidates set it: the baseline, calibration and validation rows are used
+    # nonce by nonce afterwards. Modal ignores it, since its batches all run at once.
+    stop_at_error_ceiling: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in SCORING_MODES:

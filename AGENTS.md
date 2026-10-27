@@ -91,6 +91,10 @@ progress.
    baseline runs under the flat `talos/inside.py::NONCE_TIMEOUT_S`, a candidate under the
    tighter per-track cap from `talos/loop.py::Loop._timeouts`. A nonce over the cap is a
    `timeout` error, never a quality, so it can only fail a candidate, never flatter one.
+   Likewise, a candidate's C3 or local job stops once its training errors are
+   over the error ceiling (`talos/c3_job.py::_score`): the nonces it never started are
+   `not_run` errors, so a candidate scored on fewer nonces is always one that had already
+   failed. The baseline, calibration and validation runs never stop early.
    With `--scoring native` there is a second, bounded asymmetry. Research candidates run
    natively (`talos/inside.py::run_nonce_native`) under a per-track time budget calibrated
    from the baseline's metered fuel (`talos/calibration.py::budgets_us`), while the baseline

@@ -573,7 +573,8 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
         runtime = data.get("runtime_ratio")
         text = (f"scored {data['mean_rel_delta']:+.3%} vs baseline "
                 f"(worst track {data['worst_rel_delta']:+.3%}, errors {data['error_rate']:.1%}"
-                + (f", runtime x{runtime:.2f})" if runtime is not None else ")"))
+                + (f", runtime x{runtime:.2f}" if runtime is not None else "")
+                + (f", {data['not_run']} not run" if data.get("not_run") else "") + ")")
     elif kind == "compile_failed":
         # a timeline written before the loop recorded `error` has only the output's tail
         error = data.get("error") or first_error(data.get("output") or "")

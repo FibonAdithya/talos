@@ -185,7 +185,9 @@ class Loop:
                           holdout=holdout, fuel=self.spec.fuel, baseline_training=base,
                           rule=self.rule, prior_functions=prior,
                           timeouts=self._timeouts(baseline_training),
-                          hyperparameters=self._candidate_hyperparameters())
+                          hyperparameters=self._candidate_hyperparameters(),
+                          # a validation's rows decide a demotion reason nonce by nonce
+                          stop_at_error_ceiling=not validation)
         if scoring == "native":
             # Held-out is decided on the metered validation run, never on native results.
             req.holdout, req.baseline_training = [], None
@@ -678,15 +680,27 @@ class Loop:
         # What the next prompt's recall block says about this attempt, beyond its outcome.
         record.update(mean_rel_delta=delta.mean_rel_delta, worst_track=worst.track,
                       worst_rel_delta=delta.worst_rel_delta)
+        # A job stopped at the error ceiling (issue #84) never started these. They count as
+        # errors at the worst quality in the delta, but have no runtime to compare.
+        ran = [r for r in results if r.error != "not_run"]
+        not_run = len(results) - len(ran)
         if self._scoring() == "metered":
             # Native runtimes are not comparable with the baseline's metered ones; the
             # validated record gets the metered ratio instead (_validate_and_finish).
-            record["runtime_ratio"] = runtime_ratio(base_tr, results)
+            keys = {(r.track, r.nonce) for r in ran}
+            record["runtime_ratio"] = runtime_ratio(
+                [r for r in base_tr if (r.track, r.nonce) in keys], ran)
         self._event("scored", mean_rel_delta=delta.mean_rel_delta,
                     worst_rel_delta=delta.worst_rel_delta, error_rate=delta.error_rate,
-                    runtime_ratio=record.get("runtime_ratio"))
+                    runtime_ratio=record.get("runtime_ratio"),
+                    **({"not_run": not_run} if not_run else {}))
         if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a failure
             record.update(outcome="failed:runtime", error_rate=delta.error_rate)
+            if not_run:
+                failed = sum(1 for r in ran if not r.ok)
+                record["error"] = (f"stopped early at the error ceiling: {failed} of the "
+                                   f"{len(ran)} nonces run failed; {not_run} of "
+                                   f"{len(results)} not run")
             self._finish_iteration(n, record, improved=False, scored=cand.delta)
             return
         # spec §7.7: a candidate that beats the baseline on training becomes the best, whether or
