@@ -1,9 +1,12 @@
+import math
+
 import pytest
 
 from talos.challenges import BeatRule
-from talos.scoring import (ScoringError, beats, beats_focused, bundle_delta, focus_sets,
+from talos.scoring import (Bar, ScoringError, beats, beats_focused, bundle_delta, focus_sets,
                            fuel_proxy_misses, quality_mismatches,
-                           runtime_ratio, select, validation_failure)
+                           improves, runtime_ratio, select, validation_failure,
+                           worst_track_shortfall)
 from talos.types import NonceResult, NonceSet
 
 
@@ -180,36 +183,38 @@ def vrows(qs, track="t", error=None, limit=()):
 VBASE = vrows([100, 100, 100, 100])
 # a non-zero margin, so a stepping stone can improve without beats()
 VRULE = BeatRule(margin=0.005, track_tolerance=0.0, error_ceiling=0.05)
+# the bar before any best on a mainnet start: the baseline against itself
+BAR0 = Bar(0.0, 0.0)
 
 
 def test_validation_passes_a_stepping_stone_short_of_the_margin():
     # mean 100.25 vs 100: +0.25%, short of the 0.5% margin, above a best of 0.0
     # mutation: requiring beats() here (spec §5.3 as written) demotes every stepping stone
     step = vrows([100, 100, 100, 101])
-    reason, d = validation_failure(True, step, step, VBASE, 0.0, VRULE)
+    reason, d = validation_failure(True, step, step, VBASE, BAR0, VRULE)
     assert reason is None and d.mean_rel_delta == pytest.approx(0.0025)
 
 
 def test_each_failure_reason_in_order():
     good = vrows([110, 110, 110, 110])
-    assert validation_failure(False, [], good, VBASE, 0.0, VRULE)[0] == \
+    assert validation_failure(False, [], good, VBASE, BAR0, VRULE)[0] == \
         "native_metered_build_mismatch"
     oof = vrows([None, 110, 110, 110], error="out_of_fuel", limit=(0,))
     # mutation: out_of_fuel read as an ordinary error lets a fuel-proxy miss through as long
     # as the error rate stays under the ceiling; checked before the quality comparison
-    assert validation_failure(True, oof, good, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+    assert validation_failure(True, oof, good, VBASE, BAR0, VRULE)[0] == "fuel_proxy_miss"
     drift = vrows([110, 110, 110, 111])
     # mutation: comparing means instead of nonce by nonce hides a +1/-1 pair of drifts
-    assert validation_failure(True, drift, good, VBASE, 0.0, VRULE)[0] == "nondeterministic"
+    assert validation_failure(True, drift, good, VBASE, BAR0, VRULE)[0] == "nondeterministic"
     pair = vrows([111, 109, 110, 110])
-    assert validation_failure(True, pair, good, VBASE, 0.0, VRULE)[0] == "nondeterministic"
+    assert validation_failure(True, pair, good, VBASE, BAR0, VRULE)[0] == "nondeterministic"
     worse = vrows([100, 100, 100, 100])
-    assert validation_failure(True, worse, worse, VBASE, 0.0, VRULE)[0] == "not_improved"
+    assert validation_failure(True, worse, worse, VBASE, BAR0, VRULE)[0] == "not_improved"
     timeouts = vrows([None, 110, 110, 110], error="timeout")
     # 1 error in 4 nonces is a rate of 0.25, above the 0.05 ceiling (by hand)
-    assert validation_failure(True, timeouts, good, VBASE, 0.0, VRULE)[0] == "error_ceiling"
+    assert validation_failure(True, timeouts, good, VBASE, BAR0, VRULE)[0] == "error_ceiling"
     short = vrows([110, 110])
-    assert validation_failure(True, short, short, VBASE, 0.0, VRULE)[0] == "unscoreable"
+    assert validation_failure(True, short, short, VBASE, BAR0, VRULE)[0] == "unscoreable"
 
 
 def test_a_metered_run_out_of_fuel_with_a_verified_solution_is_a_proxy_miss():
@@ -218,7 +223,7 @@ def test_a_metered_run_out_of_fuel_with_a_verified_solution_is_a_proxy_miss():
     native = vrows([110, 110, 110, 110])
     # mutation: detecting misses by `error == "out_of_fuel"` alone calls this
     # "nondeterministic" (108 vs 110), and the margin never adapts
-    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+    assert validation_failure(True, metered, native, VBASE, BAR0, VRULE)[0] == "fuel_proxy_miss"
     assert [(r.track, r.nonce) for r in fuel_proxy_misses(metered, native)] == [("t", 0)]
 
 
@@ -229,7 +234,7 @@ def test_an_out_of_fuel_row_without_limit_hit_is_still_a_proxy_miss():
     assert not metered[0].limit_hit
     # mutation: detecting misses by limit_hit alone reads this as an ordinary error, which
     # the 0.05 ceiling then reports as "error_ceiling" and the margin never adapts
-    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+    assert validation_failure(True, metered, native, VBASE, BAR0, VRULE)[0] == "fuel_proxy_miss"
 
 
 def test_a_native_timeout_is_a_cutoff_not_a_proxy_miss():
@@ -241,7 +246,7 @@ def test_a_native_timeout_is_a_cutoff_not_a_proxy_miss():
     # mutation: reading only native limit_hit charges this nonce as a miss against the
     # track's shared margin; the metered error is still counted, by the ceiling (1 in 4)
     assert fuel_proxy_misses(metered, native) == []
-    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "error_ceiling"
+    assert validation_failure(True, metered, native, VBASE, BAR0, VRULE)[0] == "error_ceiling"
 
 
 def test_a_proxy_miss_is_reported_before_a_quality_drift_on_another_nonce():
@@ -250,7 +255,7 @@ def test_a_proxy_miss_is_reported_before_a_quality_drift_on_another_nonce():
     native = vrows([110, 111, 110, 110])
     # mutation: checking quality before fuel reports "nondeterministic", which records no
     # miss, so the track's margin never drops
-    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] == "fuel_proxy_miss"
+    assert validation_failure(True, metered, native, VBASE, BAR0, VRULE)[0] == "fuel_proxy_miss"
 
 
 def test_a_nonce_where_both_runs_hit_their_limit_is_neither_a_miss_nor_a_mismatch():
@@ -259,7 +264,7 @@ def test_a_nonce_where_both_runs_hit_their_limit_is_neither_a_miss_nor_a_mismatc
     metered = vrows([112, 110, 110, 110], limit=(0,))
     native = vrows([109, 110, 110, 110], limit=(0,))
     # mutation: comparing qualities on a limit-truncated nonce demotes a valid candidate
-    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] is None
+    assert validation_failure(True, metered, native, VBASE, BAR0, VRULE)[0] is None
     assert quality_mismatches(metered, native) == []
 
 
@@ -268,14 +273,14 @@ def test_a_native_budget_exit_is_not_a_quality_mismatch():
     metered = vrows([112, 110, 110, 110])
     native = vrows([109, 110, 110, 110], limit=(0,))
     # mutation: ignoring native limit_hit demotes every candidate that uses 80-100% of its fuel
-    assert validation_failure(True, metered, native, VBASE, 0.0, VRULE)[0] is None
+    assert validation_failure(True, metered, native, VBASE, BAR0, VRULE)[0] is None
 
 
 def test_a_nonce_ok_on_only_one_path_is_not_a_quality_mismatch():
     native = vrows([110, None, 110, 110], error="no_solution")
     metered = vrows([110, 110, 110, 110])
     # mutation: comparing None to 110 calls a native error "nondeterministic"
-    reason, _ = validation_failure(True, metered, native, VBASE, 0.0, VRULE)
+    reason, _ = validation_failure(True, metered, native, VBASE, BAR0, VRULE)
     assert reason is None
 
 
@@ -283,11 +288,11 @@ def test_a_stepping_stone_must_also_beat_the_current_best():
     step = vrows([100, 100, 100, 101])  # +0.25%: not over a best of +0.3%, and no beats()
     # mutation: comparing against 0.0 instead of the current best keeps replacing the best
     # with worse stepping stones
-    assert validation_failure(True, step, step, VBASE, 0.003, VRULE)[0] == "not_improved"
+    assert validation_failure(True, step, step, VBASE, Bar(0.003, 0.003), VRULE)[0] == "not_improved"
     # the loop's rule is mean-over-best OR beats: +2% beats the baseline and passes even
     # under a +3% best (tests/test_loop.py::test_win_with_lower_delta_than_a_false_positive_best)
     big = vrows([102, 102, 102, 102])
-    assert validation_failure(True, big, big, VBASE, 0.03, VRULE)[0] is None
+    assert validation_failure(True, big, big, VBASE, Bar(0.03, 0.03), VRULE)[0] is None
 
 
 def test_quality_mismatches_lists_each_differing_nonce():
@@ -297,3 +302,99 @@ def test_quality_mismatches_lists_each_differing_nonce():
     assert quality_mismatches(metered, native) == [
         {"track": "t", "nonce": 1, "native": 110, "metered": 111},
         {"track": "t", "nonce": 3, "native": 110, "metered": 109}]
+
+
+# Issue #32: which candidate becomes the best, the code every later iteration edits.
+# Five tracks at a baseline quality of 10000, so a quality of 9813 is exactly -1.87%.
+ISSUE_TRACKS = ("10k", "20k", "50k", "100k", "200k")
+IBASE = [NonceResult(t, 0, True, 10000, 1) for t in ISSUE_TRACKS]
+
+
+def irows(*qs):
+    return [NonceResult(t, 0, True, q, 1) for t, q in zip(ISSUE_TRACKS, qs)]
+
+
+# run 20260928-093637-hypergraph: the best after iterations 1-5 (+0.37 +0.04 +0.07 +0.10 +0.18)
+ISSUE_BEST = bundle_delta(IBASE, irows(10037, 10004, 10007, 10010, 10018))
+# iteration 7: -1.87 -4.72 +8.81 -7.59 +14.53, mean +1.83%
+ISSUE_SEVEN = bundle_delta(IBASE, irows(9813, 9528, 10881, 9241, 11453))
+# no candidate here beats the baseline, so only the stepping-stone path can pass
+NO_WIN = BeatRule(margin=0.5, track_tolerance=0.0, error_ceiling=0.05)
+
+
+def test_a_higher_mean_bought_with_a_regressed_track_is_not_an_improvement():
+    bar = Bar(ISSUE_BEST.mean_rel_delta, ISSUE_BEST.worst_rel_delta)
+    assert ISSUE_SEVEN.mean_rel_delta == pytest.approx(0.01832)
+    assert ISSUE_SEVEN.mean_rel_delta > bar.mean  # the old mean-only rule took it
+    # mutation: dropping the worst-track clause from improves() makes iteration 7 the best
+    assert not improves(ISSUE_SEVEN, bar, BeatRule())
+    assert not improves(ISSUE_SEVEN, bar, NO_WIN)
+
+
+def test_a_stepping_stone_whose_worst_track_holds_is_an_improvement():
+    # every track +0.20% except 20k, which stays at the best's worst (+0.04%) exactly
+    step = bundle_delta(IBASE, irows(10020, 10004, 10020, 10020, 10020))
+    bar = Bar(ISSUE_BEST.mean_rel_delta, ISSUE_BEST.worst_rel_delta)
+    assert step.worst_rel_delta == bar.worst
+    # mutation: `>` instead of `>=` on the worst track rejects a candidate that only ties it
+    # mutation: requiring beats() (spec §5.3) rejects every stepping stone under NO_WIN
+    assert improves(step, bar, NO_WIN)
+
+
+def test_track_tolerance_lets_the_worst_track_drop_that_far_below_the_best():
+    # binary-exact values: worst -0.5 against a best's worst of -0.25, tolerance 0.25
+    base = [NonceResult("t", 0, True, 100, 1), NonceResult("u", 0, True, 100, 1)]
+    cand = [NonceResult("t", 0, True, 175, 1), NonceResult("u", 0, True, 50, 1)]
+    d = bundle_delta(base, cand)
+    assert d.worst_rel_delta == -0.5 and d.mean_rel_delta == 0.125
+    tolerant = BeatRule(margin=0.5, track_tolerance=0.25, error_ceiling=0.05)
+    # mutation: ignoring track_tolerance in improves() rejects this candidate
+    assert improves(d, Bar(0.0, -0.25), tolerant)
+    assert not improves(d, Bar(0.0, -0.2), tolerant)
+
+
+def test_a_win_is_an_improvement_even_under_a_higher_best():
+    # tests/test_loop.py::test_win_with_lower_delta_than_a_false_positive_best relies on this:
+    # a candidate that beats the baseline becomes best so that confirming it confirms best
+    win = bundle_delta(IBASE, irows(10100, 10100, 10100, 10100, 10100))
+    # mutation: dropping the beats() disjunct rejects it, so a confirmed win is not the best
+    assert improves(win, Bar(0.05, 0.05), BeatRule())
+
+
+def test_no_improvement_over_the_error_ceiling():
+    base = [NonceResult("t", n, True, 100, 1) for n in range(4)]
+    cand = [NonceResult("t", 0, False, None, 1, "panic")] + [
+        NonceResult("t", n, True, 200, 1) for n in (1, 2, 3)]
+    d = bundle_delta(base, cand)
+    assert d.error_rate == 0.25 and d.mean_rel_delta > 0
+    # mutation: dropping the error ceiling from the stepping-stone path accepts it
+    assert not improves(d, Bar(0.0, 0.0), NO_WIN)
+
+
+def test_on_a_template_start_any_scored_candidate_improves_on_no_best():
+    far_below = bundle_delta(IBASE, irows(1000, 500, 2000, 100, 3000))
+    assert far_below.worst_rel_delta < -0.9
+    # mutation: a no-best bar of (0.0, 0.0) on a template start keeps every candidate out
+    assert improves(far_below, Bar(-math.inf, -math.inf), NO_WIN)
+
+
+def test_the_shortfall_names_the_track_that_kept_a_candidate_out():
+    bar = Bar(ISSUE_BEST.mean_rel_delta, ISSUE_BEST.worst_rel_delta)
+    why = worst_track_shortfall(ISSUE_SEVEN, bar, BeatRule())
+    # the recall prompt shows this text, so the model learns which track it broke
+    assert why is not None and "100k" in why and "-7.59%" in why and "+0.04%" in why
+    # mutation: a shortfall reported when the mean did not clear the best either
+    worse = bundle_delta(IBASE, irows(9000, 9000, 9000, 9000, 9000))
+    assert worst_track_shortfall(worse, bar, BeatRule()) is None
+    # mutation: a shortfall reported for a candidate that does improve
+    win = bundle_delta(IBASE, irows(10100, 10100, 10100, 10100, 10100))
+    assert worst_track_shortfall(win, bar, BeatRule()) is None
+
+
+def test_validation_demotes_a_metered_worst_track_regression():
+    base = vrows([100, 100]) + vrows([100, 100], track="u")
+    metered = vrows([110, 110]) + vrows([99, 99], track="u")  # t +10%, u -1%: mean +4.5%
+    # the best is +1% mean with a worst of +0.5%; -1% < 0 so beats() fails too
+    # mutation: validation_failure keeping the mean-only rule validates it
+    assert validation_failure(True, metered, metered, base, Bar(0.01, 0.005),
+                              VRULE)[0] == "not_improved"
