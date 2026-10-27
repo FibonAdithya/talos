@@ -10,15 +10,31 @@ from talos.deploy_digest import DEPLOYED_FILES, digest, marker_name
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _module_files(sub: str) -> list[str]:
+    """The file a dotted module path names: its .py, or its package __init__.py."""
+    out = []
+    if (ROOT / f"{sub}.py").is_file():
+        out.append(f"{sub}.py")
+    if (ROOT / sub / "__init__.py").is_file():
+        out.append(f"{sub}/__init__.py")
+    return out
+
+
 def _imports(path: Path) -> set[str]:
     """Repo-relative files that `path` imports from `talos` or `modal_app`, function-level
-    imports included."""
+    imports included. Relative imports are resolved against the importing file's package."""
     found = set()
+    pkg = path.relative_to(ROOT).parent.parts
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             mods = [(a.name, []) for a in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            mods = [(node.module, [a.name for a in node.names])]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = list(pkg[:len(pkg) - (node.level - 1)])
+                mods = [(".".join(base + ([node.module] if node.module else [])),
+                         [a.name for a in node.names])]
+            else:
+                mods = [(node.module, [a.name for a in node.names])]
         else:
             continue
         for mod, names in mods:
@@ -26,12 +42,9 @@ def _imports(path: Path) -> set[str]:
             if parts[0] not in ("talos", "modal_app"):
                 continue
             found.add(f"{parts[0]}/__init__.py")
-            sub = "/".join(parts)
-            if (ROOT / f"{sub}.py").is_file():
-                found.add(f"{sub}.py")
+            found.update(_module_files("/".join(parts)))
             for n in names:  # `from talos import x`
-                if (ROOT / f"{sub}/{n}.py").is_file():
-                    found.add(f"{sub}/{n}.py")
+                found.update(_module_files("/".join(parts + [n])))
     return found
 
 
@@ -116,7 +129,6 @@ def test_the_marker_is_a_closure_not_a_module_level_function():
     _kw, fn = app.registered[marker_name()]
     # mutation: a module-level function is pickled by reference, and the probe image has no
     # talos source to import it from
-    assert fn.__closure__ is not None or fn.__qualname__.count(".") > 0
     assert "<locals>" in fn.__qualname__
     assert not hasattr(talos_bench, fn.__name__)
 
@@ -124,3 +136,19 @@ def test_the_marker_is_a_closure_not_a_module_level_function():
 def test_deployed_paths_are_under_the_two_packages_the_image_carries():
     # the compile/score image adds only these two packages (add_local_python_source)
     assert all(p.split("/")[0] in ("modal_app", "talos") for p in DEPLOYED_FILES)
+
+
+def test_the_walker_resolves_packages_and_relative_imports(tmp_path, monkeypatch):
+    import tests.test_deploy_digest as me
+    (tmp_path / "talos" / "providers").mkdir(parents=True)
+    for f in ("talos/__init__.py", "talos/providers/__init__.py", "talos/providers/x.py",
+              "talos/y.py"):
+        (tmp_path / f).write_text("")
+    mod = tmp_path / "talos" / "a.py"
+    mod.write_text("from talos import providers\nimport talos.providers.x\nfrom . import y\n"
+                   "def f():\n    from .providers import x\n")
+    monkeypatch.setattr(me, "ROOT", tmp_path)
+    # mutation: skipping packages or relative imports lets a deployed file import code the
+    # digest does not cover
+    assert me._imports(mod) == {"talos/__init__.py", "talos/providers/__init__.py",
+                                "talos/providers/x.py", "talos/y.py"}

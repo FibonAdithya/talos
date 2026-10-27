@@ -776,7 +776,9 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
     os.environ["TALOS_BACKEND"] = "modal" if fake else cfg.backend
     try:
         if cfg.backend == "modal" and not fake:
-            bench.check_deploy()  # before any probe: a stale app must not be billed
+            # Before any probe: a stale app must not be billed. Through the retry wrapper, so a
+            # network blip pauses the job (BenchUnavailable) instead of ending it in a traceback.
+            bench._with_retry(bench.check_deploy)
         freeze_hardware(bench, spec, state, store, "modal" if fake else cfg.backend)
     except BenchUnavailable as e:
         # Resumable: the GPUs may free up. A `failed` job could not be resumed at all.
@@ -1348,7 +1350,7 @@ def cmd_compile(args, ask) -> int:
     from talos.bench import BenchUnavailable
     try:
         if backend == "modal":
-            bench.check_deploy()
+            bench._with_retry(bench.check_deploy)
         # The job's GPU when run from the agentic sandbox (execute_job exports it); a probe of
         # its own for an ad hoc compile, which has no job to match.
         bench.select_hardware(args.challenge, chosen=os.environ.get("TALOS_HARDWARE") or None)
@@ -1519,7 +1521,7 @@ def cmd_check_updates(args, ask) -> int:
         print("To upgrade, review the TIG release and its matching source revision, then update "
               "DEV_IMAGE_TAG and MONOREPO_REF in talos/challenges.py. The image tag must be "
               "available for all challenges and required architectures. Run `make check`, "
-              "redeploy Modal with `talos setup` if used, then run `talos doctor --full`. "
+              "redeploy Modal with `talos deploy` if used, then run `talos doctor --full`. "
               "Start new jobs after upgrading. "
               "A newer published tag does not establish source compatibility.")
     return 1 if any(update is None for update in updates) else 0
@@ -1680,9 +1682,9 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"setup": cmd_setup, "deploy": cmd_deploy, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
-            "show": cmd_show, "diff": cmd_diff, "report": cmd_report, "check-updates": cmd_check_updates, "demo": cmd_demo,
-            "doctor": cmd_doctor}
+COMMANDS = {"setup": cmd_setup, "deploy": cmd_deploy, "run": cmd_run, "compile": cmd_compile,
+            "status": cmd_status, "show": cmd_show, "diff": cmd_diff, "report": cmd_report,
+            "check-updates": cmd_check_updates, "demo": cmd_demo, "doctor": cmd_doctor}
 
 
 def main(argv=None, ask=default_ask) -> int:

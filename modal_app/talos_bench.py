@@ -1,4 +1,5 @@
-"""Modal app `talos-bench`. Deployed once into the user's Modal account by `talos setup`.
+"""Modal app `talos-bench`. Deployed into the user's Modal account by `talos setup`, and
+redeployed by `talos deploy` after an upgrade.
 Every function runs inside the official TIG dev image for its challenge plus a pinned
 monorepo checkout at /app. Artifacts live on the `talos-artifacts` Volume keyed by the
 content hash of the submitted files."""

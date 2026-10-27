@@ -574,6 +574,9 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
             def check_deploy(self):
                 pass
 
+            def _with_retry(self, call):
+                return call()
+
             def select_hardware(self, challenge, chosen=None):
                 return None
 
@@ -1182,6 +1185,9 @@ class _RefusingBench:
 
     def check_deploy(self):
         pass
+
+    def _with_retry(self, call):
+        return call()
 
     def select_hardware(self, challenge, chosen=None):
         return None
@@ -2365,6 +2371,7 @@ def test_deploy_command_deploys_without_a_config(tmp_path, monkeypatch, capsys):
     from talos.deploy_digest import marker_name
     monkeypatch.chdir(tmp_path)
     calls = []
+    monkeypatch.setattr("talos.extras.importlib.util.find_spec", lambda name, *a, **k: object())
     monkeypatch.setattr(cli, "deploy_bench", lambda *a, **k: calls.append(a))
     assert cli.main(["deploy"]) == 0
     # mutation: passing a token re-sets the one `talos setup` stored; reading a config needs one
@@ -2484,6 +2491,32 @@ def test_execute_job_pauses_on_stale_deploy_before_any_spend(tmp_path, monkeypat
     # checking at all runs the whole job on old code
     assert rc == 1 and st["status"] == "paused" and "talos deploy" in st["stop_reason"]
     assert b.selections == [] and b.seen_env == []
+
+
+def test_execute_job_retries_a_transient_deploy_lookup_instead_of_crashing(tmp_path,
+                                                                          monkeypatch):
+    from talos.bench import ModalBench
+    from tests.test_bench import FakeClock, recording_sleep
+    clock, sleeps, lookups = FakeClock(), [], []
+
+    class Flaky(ModalBench):
+        def check_deploy(self):
+            lookups.append(1)
+            if len(lookups) == 1:
+                raise ConnectionError("connection reset")
+
+        def select_hardware(self, challenge, chosen=None):
+            self.reached = True
+            return None
+
+        def evaluate(self, request):
+            raise BenchCancelled("stop")
+
+    b = Flaky(clock=clock, sleep=recording_sleep(clock, sleeps))
+    b.reached = False
+    rc = _gpu_run(tmp_path, monkeypatch, b, challenge="knapsack")
+    # mutation: a bare check_deploy lets the ConnectionError end `talos run` in a traceback
+    assert len(lookups) == 2 and sleeps and b.reached and rc == 1
 
 
 def test_execute_job_pauses_when_no_gpu_is_available(tmp_path, monkeypatch, capsys):
@@ -2750,6 +2783,9 @@ def test_compile_is_metered_by_default_and_native_on_the_flag(tmp_path, monkeypa
     class Bench:
         def check_deploy(self):
             pass
+
+        def _with_retry(self, call):
+            return call()
 
         def select_hardware(self, challenge, chosen=None):
             return None
