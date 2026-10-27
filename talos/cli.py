@@ -929,6 +929,27 @@ def cmd_run(args, ask) -> int:
         return 130
 
 
+def _run_job(spec: JobSpec, store: JobStore, cfg: Config, **kw) -> int:
+    """execute_job, where a Ctrl-C after job.json exists but before the loop installs its own
+    handler (the image pull, the capacity probe) leaves the job `cancelled` and resumable
+    instead of `queued` for ever."""
+    try:
+        return execute_job(spec, store, cfg, **kw)
+    except KeyboardInterrupt:
+        try:
+            state = store.load()
+        except (OSError, ValueError, KeyError):
+            state = JobState.fresh(Spend(started_at=time.time()))
+        if state.status in ("won", "exhausted", "failed", "cancelled", "paused"):
+            print("interrupted", file=sys.stderr)  # already stopped: keep what it recorded
+        else:
+            state.status, state.stop_reason = "cancelled", "interrupted before the research loop"
+            store.save(state)
+            print(f"interrupted; continue with talos run --resume {spec.job_id}",
+                  file=sys.stderr)
+        return 130
+
+
 def _cmd_run(args, ask) -> int:
     root = Path.cwd()
     add = {d: v for d in ADD_DIMENSIONS
@@ -998,7 +1019,7 @@ def _cmd_run(args, ask) -> int:
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
         if _codex_refused(cfg, spec.start):
             return 2
-        return execute_job(spec, store, cfg, resume=True, add=add)
+        return _run_job(spec, store, cfg, resume=True, add=add)
     if args.mode:
         if args.mode == "agentic" and cfg.provider not in CLI_PROVIDERS:
             print(f"--mode agentic needs a CLI provider ({' or '.join(CLI_PROVIDERS)}), "
@@ -1205,7 +1226,7 @@ def _cmd_run(args, ask) -> int:
             (docs_dir / name).write_text(text, encoding="utf-8", newline="\n")
     (store.run_dir / "tacit.md").write_text(user_tacit(direction),
                                             encoding="utf-8", newline="\n")
-    return execute_job(spec, store, cfg, resume=False)
+    return _run_job(spec, store, cfg, resume=False)
 
 
 def cmd_demo(args, ask) -> int:

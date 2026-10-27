@@ -376,8 +376,8 @@ the mainnet challenge id no longer matches `talos/challenges.py`; mainnet gives 
 budget for the challenge; or, on C3, the challenge's dev image tag is not on GHCR.
 
 Exit code 0 when the job ends `won`, or when you decline the confirmation; 1 when it ends any other way, or when the mainnet or
-dev image check stops it; 2 for invalid arguments, a missing config, or a missing API key. 130 when it is interrupted before the job starts
-(nothing is written under `runs/`).
+dev image check stops it; 2 for invalid arguments, a missing config, or a missing API key. 130 when it is interrupted before the research
+loop starts: a job already written under `runs/` is left `cancelled`, and `--resume` continues it.
 
 ### `talos compile`
 

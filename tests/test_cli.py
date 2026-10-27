@@ -1193,6 +1193,70 @@ def test_early_interrupt_exits_130_without_traceback(tmp_path, monkeypatch, caps
     assert list(tmp_path.glob("runs/*/job.json")) == []
 
 
+def test_interrupt_after_the_job_exists_leaves_it_cancelled(tmp_path, monkeypatch, capsys):
+    # job.json is written before execute_job pulls images and probes capacity, and the loop's
+    # own handler comes after both. mutation: not marking the job leaves it `queued`, which
+    # `talos status` lists as live for ever; overwriting a stopped status would relabel a job
+    # that had already finished
+    monkeypatch.chdir(tmp_path)
+
+    def probe(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(cli, "freeze_hardware", probe)
+    try:
+        rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                       "--budget-iterations", "1", "--yes", "--fake"])
+    except KeyboardInterrupt:
+        pytest.fail("KeyboardInterrupt escaped talos run")
+    assert rc == 130
+    [run_dir] = [p.parent for p in tmp_path.glob("runs/*/job.json")]
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert (state["status"], state["stop_reason"]) == ("cancelled",
+                                                      "interrupted before the research loop")
+    err = capsys.readouterr().err
+    assert err.endswith(f"interrupted; continue with talos run --resume {run_dir.name}\n"), err
+
+
+def test_interrupted_resume_of_a_dead_job_leaves_it_cancelled(tmp_path, monkeypatch):
+    # A job whose process died stays `researching`; a resume interrupted during the probe
+    # must stop it too. mutation: the resume path calling execute_job directly leaves it live
+    monkeypatch.chdir(tmp_path)
+
+    def probe(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(cli, "freeze_hardware", probe)
+    args = ["run", "--challenge", "knapsack", "--direction", "go", "--budget-iterations", "1",
+            "--yes", "--fake"]
+    assert cli.main(args) == 130
+    [run_dir] = [p.parent for p in tmp_path.glob("runs/*/job.json")]
+    path = run_dir / "state.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["status"], state["stop_reason"] = "researching", None
+    path.write_text(json.dumps(state), encoding="utf-8")
+    assert cli.main(["run", "--resume", run_dir.name, "--yes", "--fake"]) == 130
+    state = json.loads(path.read_text(encoding="utf-8"))
+    assert state["status"] == "cancelled"
+
+
+def test_interrupt_keeps_a_stopped_status(tmp_path, monkeypatch):
+    # A Ctrl-C while the package is written after the loop must not relabel the finished job.
+    monkeypatch.chdir(tmp_path)
+
+    def late(*a, **k):
+        raise KeyboardInterrupt
+    import talos.package
+    monkeypatch.setattr(talos.package, "build_package", late)
+    try:
+        rc = cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                       "--budget-iterations", "1", "--yes", "--fake"])
+    except KeyboardInterrupt:
+        pytest.fail("KeyboardInterrupt escaped talos run")
+    assert rc == 130
+    [run_dir] = [p.parent for p in tmp_path.glob("runs/*/job.json")]
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "won"
+
+
 def test_a_cancelled_baseline_is_not_a_failed_run(tmp_path, monkeypatch, capsys):
     # mutation: letting BenchCancelled out of measure_baseline fall into execute_job's blanket
     # `except Exception` records a Ctrl-C during the C3 baseline job as a failed run

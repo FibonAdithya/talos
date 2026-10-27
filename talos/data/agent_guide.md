@@ -60,7 +60,7 @@ talos run --challenge knapsack --direction-file direction.md \
   user asks otherwise.
 - Exit codes: 0 when the job ends `won`; 1 when it ends any other way, or a mainnet or dev-image
   check stops it; 2 for bad arguments, a missing config or a missing API key; 130 when it is
-  interrupted before the job starts.
+  interrupted before the research loop starts.
 
 ### Writing the direction file
 
@@ -133,9 +133,11 @@ gone, has died; resume it.
 Send one SIGINT to the process id you recorded: `kill -INT <pid>` on Linux and macOS. Talos stops
 at the next safe point, writes the package with status `cancelled` and exits. On C3 and local it
 cancels the compute job in flight; on Modal, and for an LLM call in flight, it waits for that
-call to finish, which can take minutes. Send it once and wait for the process to exit. Never use `kill -9` or a plain `kill` (SIGTERM):
-the package is then not written. A SIGINT before the job starts exits with code 130 and leaves
-nothing under `runs/`. On Windows there is no tested way to interrupt a background job; run it
+call to finish, which can take minutes. Send it once and wait for the process to exit. Never use `kill -9` or a plain `kill`
+(SIGTERM): the package is then not written. A SIGINT before the research loop starts (during the
+image pull or the capacity probe, say) exits with code 130. If the job summary had already been
+printed, the job is left `cancelled` and `talos run --resume JOB_ID` continues it; before that,
+nothing is written. On Windows there is no tested way to interrupt a background job; run it
 in the foreground, or rely on the budgets to stop it.
 
 ### Resuming
