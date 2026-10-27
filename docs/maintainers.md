@@ -135,5 +135,7 @@ matching `v*` is pushed, using PyPI trusted publishing (no token is stored).
 
 One-time setup by the repository owner: create the `pypi` environment in the GitHub
 repository's settings, and add a trusted publisher for `talos-tig` on PyPI with owner
-`FibonAdithya`, repository `talos`, workflow filename publish.yml (in .github/workflows) and environment `pypi`. Until the
-first release exists, add it as a pending publisher.
+`FibonAdithya`, repository `talos`, workflow `.github/workflows/publish.yml` (PyPI asks
+for the file name only) and environment `pypi`. Until the first release exists,
+add it as a pending publisher. This follows PyPI's trusted-publishing documentation and has
+not yet been done for this project.

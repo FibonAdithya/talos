@@ -38,24 +38,25 @@ The extras are `modal` (the Modal backend) and `anthropic` (the `anthropic` prov
 `c3` and `local` backends and every other provider need none. Name every extra you use in one
 command: MEASURED 2026-10-27, `uv tool install 'talos-tig[anthropic]'` over an install made
 with `[modal]` removed the Modal client. A command that needs a missing extra exits with code
-2 and prints the install command. `pipx install 'talos-tig[modal,anthropic]'` works the same
-way; in a virtual environment, `pip install` does too (Python 3.10 or newer). On Windows, see
-[docs/windows.md](docs/windows.md); to work on Talos itself, see
-[docs/maintainers.md](docs/maintainers.md#development).
+2 and prints the install command. `pip install 'talos-tig[modal,anthropic]'` works
+in a virtual environment (Python 3.10 or newer); `pipx` has not been tried. On Windows, see [docs/windows.md](docs/windows.md).
 
 ### Workspace
 
 Talos keeps `talos.config.json`, `.talos/secrets.json` and `runs/` in one workspace
-directory: the one given by `talos --workspace DIR <command>` or `TALOS_WORKSPACE`, else the nearest directory at or above the current one that holds
-`talos.config.json`, else `~/.talos/workspace`. `talos setup` prints `Workspace: <path>`. In a
+directory: the one given by `talos --workspace DIR <command>` or `TALOS_WORKSPACE`, else the
+nearest directory at or above the current one that holds `talos.config.json`, else
+`~/.talos/workspace`. `talos setup` prints `Workspace: <path>`. In a
 fresh clone, `talos --workspace . setup` keeps everything in the clone, as before. See
 [Workspace](docs/usage.md#workspace).
 
 ### Upgrading
 
-`uv tool upgrade talos-tig`, then `talos deploy` if you use Modal: the deployed app must be
-built from the same Talos code as the client, so every new version needs a redeploy. Until
-then `talos run` pauses before spending anything and `talos doctor` reports a failure.
+Upgrade with `uv tool upgrade talos-tig` (not yet verified against a PyPI release), then run
+`talos deploy` if you use Modal: every new version needs a redeploy, and until then `talos
+run` pauses before spending and `talos doctor` fails. uv records the installed extras in the
+tool's receipt (MEASURED 2026-10-27, uv 0.11.26, local wheel). If `talos deploy` or `talos
+run` still reports a missing extra, reinstall naming every extra you use, as under Install.
 
 ## Try it with no accounts
 
@@ -81,7 +82,8 @@ You can find the code to submit at .../runs/demo-<timestamp>-knapsack/package/su
 ```
 
 followed by a guide to the files in the package. The demo job is written to
-`runs/demo-<timestamp>-<challenge>/` in the workspace; delete that folder if you do not want `talos status`
+`runs/demo-<timestamp>-<challenge>/` in the workspace; delete that folder if you do not want
+`talos status`
 to list it.
 
 ## Pick a compute backend
@@ -120,8 +122,8 @@ talos doctor
 `talos setup` asks for the backend, provider, model and credentials, checks each one (on Modal
 it also deploys the benchmark app to your account), and only then writes `talos.config.json`
 and `.talos/secrets.json` in the workspace. Run it again to change provider, model or backend;
-on Modal, `talos deploy` redeploys after upgrading Talos. Every prompt and check is listed under
-[`talos setup`](docs/usage.md#talos-setup).
+on Modal, `talos deploy` redeploys after upgrading Talos. Every prompt and check is listed
+under [`talos setup`](docs/usage.md#talos-setup).
 
 `talos doctor` spends no compute, but its provider check makes one small LLM test call. It
 checks the config, the LLM credential, the backend, mainnet and the dev images, and says what
