@@ -1449,6 +1449,14 @@ def recommend_image_update(challenge: str) -> None:
               f"This job will use the pinned image {update.current}.", file=sys.stderr)
 
 
+def cmd_guide(args, ask) -> int:
+    """Print the packaged agent guide (#71); read as package data so a wheel install works."""
+    from importlib import resources
+    print(resources.files("talos.data").joinpath("agent_guide.md").read_text(encoding="utf-8"),
+          end="")
+    return 0
+
+
 def cmd_doctor(args, ask) -> int:
     from talos import doctor
     return doctor.run(Path.cwd(), full=args.full, challenge=args.challenge, yes=args.yes,
@@ -1632,12 +1640,16 @@ def build_parser() -> argparse.ArgumentParser:
                      help="run --full without asking; with --json, --full needs it")
     doc.add_argument("--json", action="store_true",
                      help="print one JSON document instead of text lines")
+    sub.add_parser("guide", help="print the guide for coding agents driving Talos",
+                   description="Print the guide a coding agent follows to run Talos for a "
+                               "user: what spends money, how to start, watch and stop a job, "
+                               "and how to report back. Needs no config or network.")
     return p
 
 
 COMMANDS = {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
             "show": cmd_show, "diff": cmd_diff, "report": cmd_report, "check-updates": cmd_check_updates, "demo": cmd_demo,
-            "doctor": cmd_doctor}
+            "doctor": cmd_doctor, "guide": cmd_guide}
 
 
 def main(argv=None, ask=default_ask) -> int:

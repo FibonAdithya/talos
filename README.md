@@ -13,6 +13,10 @@ Only the `local` backend runs that container on your machine, with networking of
 capabilities dropped, and CPU and memory limits; the one opt-in exception is
 [agentic codex](docs/usage.md#agentic-mode).
 
+Driving Talos from a coding agent? Tell it: "Run `talos guide` and follow it." The
+[guide](talos/data/agent_guide.md) says which commands spend money, how to start, watch and
+stop a job, and how to report back.
+
 ## How it works
 
 `talos run` measures the current top-adoption mainnet algorithm once as the baseline. Then,
