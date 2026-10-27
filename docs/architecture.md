@@ -44,7 +44,7 @@ flowchart TD
     builds -- yes --> score --> errors
     errors -- no --> failed
     errors -- yes --> beats
-    beats -- "no (kept as best if its mean delta is the best so far)" --> failed
+    beats -- "no (kept as best if it improves on the best: mean up, worst track held)" --> failed
     beats -- yes --> confirm --> confirmed
     confirmed -- no --> failed
     confirmed -- yes --> won
