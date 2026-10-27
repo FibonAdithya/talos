@@ -105,10 +105,11 @@ lower there, and say so to the user.
 ## 4. Monitoring a job
 
 A job runs for minutes to hours. Run it in the background with its output in a log file, and
-record the process id:
+record the process id. `$!` is only set in the shell that started the job, so print it in the
+same command:
 
 ```
-talos run ... --yes > talos-run.log 2>&1 &
+talos run ... --yes > talos-run.log 2>&1 & echo $!
 ```
 
 Then poll, at most every minute or two:
@@ -134,26 +135,28 @@ every job, if you lost the id.
 | `failed` | an error stopped it; `stop_reason` says why |
 
 Talos writes no lock file. A `researching` job whose `last_event_ts` is old, and whose process is
-gone, has died; resume it.
+gone, has died. Tell the user, and resume it only if they agree (resuming spends money).
 
 ### Stopping
 
 Send one SIGINT to the process id you recorded: `kill -INT <pid>` on Linux and macOS. Talos stops
 at the next safe point, writes the package with status `cancelled` and exits. On C3 and local it
 cancels the compute job in flight; on Modal, and for an LLM call in flight, it waits for that
-call to finish, which can take minutes. Send it once and wait for the process to exit. Never use `kill -9` or a plain `kill`
-(SIGTERM): the package is then not written. A SIGINT before the research loop starts (during the
-image pull or the capacity probe, say) exits with code 130. If the job summary had already been
-printed, the job is left `cancelled` and `talos run --resume JOB_ID` continues it; before that,
-nothing is written. A SIGINT while the package is being written also exits 130, and the job
-keeps the status it stopped with. On Windows there is no tested way to interrupt a background job; run it
-in the foreground, or rely on the budgets to stop it.
+call to finish, which can take minutes. Send it once and wait for the process to exit. Never
+use `kill -9` or a plain `kill` (SIGTERM): the package is then not written. A SIGINT before the
+research loop starts (during the image pull or the capacity probe, say) exits with code 130. If
+the job summary had already been printed, the job is left `cancelled` and
+`talos run --resume JOB_ID` continues it; before that, nothing is written. A SIGINT while the
+package is being written also exits 130, and the job keeps the status it stopped with. On
+Windows there is no tested way to interrupt a background job; run it in the foreground, or rely
+on the budgets to stop it.
 
 ### Resuming
 
 `talos run --resume JOB_ID` continues a `cancelled`, `paused` or `failed` job, or a job whose
-process died. It keeps the job's settings and spend. An `exhausted` job continues only with an
-`--add-*` flag, and those need the user's agreement (section 2). A `won` job cannot be continued.
+process died. It keeps the job's settings and spend, and it spends money, so ask the user first
+(section 2). An `exhausted` job continues only with an `--add-*` flag, and those need the user's
+agreement too. A `won` job cannot be continued.
 
 ## 5. Reading results
 

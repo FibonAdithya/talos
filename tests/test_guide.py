@@ -96,7 +96,10 @@ def test_guide_names_only_real_commands_and_flags():
 def test_guide_keeps_its_spending_and_stop_rules():
     # A content guard only: it catches a deleted section, not wrong advice inside one.
     text = GUIDE.read_text(encoding="utf-8")
-    for needle in ("talos run", "talos doctor --full", "kill -INT"):
+    # `echo $!`: an agent's next tool call is a new shell, so the pid must be printed at launch.
+    # "resume it only if they agree": a dead job must not be resumed, and billed, unasked.
+    for needle in ("talos run", "talos doctor --full", "kill -INT", "2>&1 & echo $!",
+                   "resume it only if they agree"):
         assert needle in text, needle
 
 
