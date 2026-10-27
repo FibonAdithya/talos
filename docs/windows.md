@@ -24,6 +24,14 @@ uv tool install --python 3.12 'talos-tig[modal,anthropic]'
 uv tool update-shell
 ```
 
+Until v0.1.0 is published to PyPI, install from GitHub instead (MEASURED 2026-10-27 on Linux with a local `git+file://`
+URL; not run on Windows or against the GitHub URL):
+
+```powershell
+uv tool install --python 3.12 'talos-tig[modal,anthropic] @ git+https://github.com/FibonAdithya/talos'
+uv tool update-shell
+```
+
 Close PowerShell and open a new window, then check:
 
 ```powershell
