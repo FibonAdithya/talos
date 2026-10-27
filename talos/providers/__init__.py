@@ -7,7 +7,14 @@ from talos.types import Completion
 
 
 class ProviderError(RuntimeError):
-    pass
+    """A failed call. A CLI call can fail after it has already spent money: `cost_usd` is what
+    it reported spending, and `cost_unknown` says why a call that may have cost something has
+    no figure. The loop charges the one or records the other (talos/loop.py::Loop._llm)."""
+
+    def __init__(self, *args, cost_usd: float | None = None, cost_unknown: str | None = None):
+        super().__init__(*args)
+        self.cost_usd = cost_usd
+        self.cost_unknown = cost_unknown
 
 
 class ProviderAuthError(ProviderError):

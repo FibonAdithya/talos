@@ -623,7 +623,7 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
     elif kind == "false_positive":
         text = f"not confirmed: {_holdout_text(data)}"
     elif kind == "llm_cost_unknown":
-        text = f"LLM cost of this agent session not counted: {data['reason']}"
+        text = f"LLM cost not counted: {data['reason']}"
     elif kind == "rate_limited":
         text = f"rate limited, waiting {data['wait_s']}s"
     elif kind == "resumed_pending":
@@ -1329,8 +1329,16 @@ def cmd_status(args, ask) -> int:
     root = Path.cwd() / "runs"
     for job in sorted(root.glob("*/state.json")):
         st = json.loads(job.read_text(encoding="utf-8"))
+        llm_usd = st["spend"]["llm_usd"]
+        # The provider and model decide whether llm_usd is a measurement at all: codex-cli and
+        # unpriced models leave it at 0.00 (issue #75).
+        try:
+            spec = json.loads((job.parent / "job.json").read_text(encoding="utf-8"))
+            llm = _llm_spend_text(spec["provider"], spec["model"], llm_usd)
+        except (OSError, ValueError, KeyError, TypeError):
+            llm = f"${llm_usd:.2f} (provider unknown)"
         print(f"{job.parent.name}: {st['status']} it={st['iteration']} "
-              f"llm=${st['spend']['llm_usd']:.2f} compute=${st['spend']['compute_usd']:.2f}")
+              f"llm={llm} compute=${st['spend']['compute_usd']:.2f}")
     return 0
 
 

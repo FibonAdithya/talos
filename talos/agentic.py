@@ -4,7 +4,6 @@ The loop reads the files back and owns compile, score and publish as in single-s
 from __future__ import annotations
 
 import json
-import math
 import os
 import shutil
 import subprocess
@@ -14,6 +13,7 @@ from collections import Counter
 from pathlib import Path
 
 from talos.executables import argv0
+from talos.providers.claude_cli import NO_COST, session_cost
 from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, challenge_block,
                            focus_sentence, gap_block, hyperparameters_block, recall_block)
 
@@ -260,30 +260,13 @@ def _run_codex(wt: Path, model: str, prompt: str, timeout_s: int,
                        "--skip-git-repo-check", "-"], wt, prompt, timeout_s, run)
 
 
-def session_cost(stdout: str) -> float | None:
-    """total_cost_usd from `claude -p --output-format json`: the CLI's own estimate of the
-    session at API list prices, the same figure single-shot claude-cli charges
-    (talos/providers/claude_cli.py). None when stdout is not that result or the figure is not a
-    finite, non-negative number. Read from the CLI's full stdout, never the transcript file,
-    which _TRANSCRIPT_CAP may have cut."""
-    try:
-        cost = json.loads(stdout)["total_cost_usd"]
-    except (ValueError, KeyError, TypeError, IndexError):
-        return None
-    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
-        return None
-    if not math.isfinite(cost) or cost < 0:
-        return None
-    return float(cost)
-
-
 def _charge_session(loop, r: subprocess.CompletedProcess) -> None:
     """Charge one claude session to the job's LLM spend, or record that its cost is unknown so
     an uncounted session never reads as a free one. codex reports no cost and is not charged:
     the CLI reports such a run as "not tracked" (talos/cli.py::unpriced_reason)."""
     cost = session_cost(r.stdout or "")
     if cost is None:
-        loop._event("llm_cost_unknown", reason="claude printed no total_cost_usd")
+        loop._event("llm_cost_unknown", reason=NO_COST)
     else:
         loop._charge_llm(cost)
 

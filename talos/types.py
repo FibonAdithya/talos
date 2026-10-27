@@ -63,6 +63,9 @@ class Usage:
 class Completion:
     text: str
     usage: Usage
+    # Why a call that cost something reported no cost; None when the cost is known, or when it
+    # is None only because the model has no price-table entry (reported as "unpriced").
+    cost_unknown: str | None = None
 
 
 @dataclass
