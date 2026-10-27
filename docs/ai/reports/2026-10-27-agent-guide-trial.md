@@ -46,6 +46,13 @@ agent then runs `talos doctor` (d8cfeb9). Both agents' run-2 reports followed bo
   `talos guide && talos demo --delay 0` into one command. That was harmless because the demo is
   free, but it shows an agent may act on the prompt's wording before the guide's rules.
 
+## After the trial
+
+#70 (workspace lookup, `talos deploy`, extras) merged into `main` after both runs, and this branch
+merged it at 751961b. The guide's workspace and `talos deploy` text (ac976cc) was written after
+the trial and has not been through an agent run. With #70, a demo run in a directory with no
+`talos.config.json` writes to `~/.talos/workspace`, not the current directory.
+
 ## Not covered by this trial
 
 The demo finishes in under a second. The guide's background launch, polling, stop and resume
