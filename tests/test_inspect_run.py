@@ -157,6 +157,13 @@ def test_budget_left_never_negative(tmp_path):
     assert job_detail(run, now=T0)["budget"]["iterations"]["left"] == 0
 
 
+def test_overrun_hours_left_is_a_float_zero(tmp_path):
+    # docs/json-output.md types budget.hours.left as a float; max(0, ...) returned the int 0
+    run = _run(tmp_path, status="exhausted", timeline=[{"kind": "a"}] * 200)  # 199 min > 2 h
+    left = job_detail(run, now=T0)["budget"]["hours"]["left"]
+    assert left == 0 and isinstance(left, float)
+
+
 def test_budget_counts_extensions(tmp_path):
     # mutation: reading spec.budget instead of effective_budget(...)
     run_dir = tmp_path / "runs" / "J"
@@ -287,6 +294,10 @@ def test_format_iteration_template_parent_and_full_description(tmp_path):
     assert "parent: template" in text
     # mutation: cutting the description to one line, as the event lines do
     assert text.count("word") == 200
+    # the spec: the description is printed full and wrapped
+    lines = text.splitlines()
+    desc = lines[lines.index("description:") + 1:lines.index("training delta: n/a")]
+    assert len(desc) > 1 and max(len(line) for line in desc) <= 100
 
 
 # ── one iteration: diff ──────────────────────────────────────────────

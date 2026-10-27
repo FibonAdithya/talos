@@ -8,6 +8,7 @@ dicts as text, so the two forms cannot disagree.
 from __future__ import annotations
 
 import json
+import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,7 +159,11 @@ def status_rows(runs_root: Path) -> list[dict]:
 
 
 def _cap(cap, spent) -> dict:
-    left = None if cap is None or spent is None else max(0, cap - spent)
+    left = None
+    if cap is not None and spent is not None:
+        diff = cap - spent
+        # float(): an overrun hours cap is 0.0, not the int 0, as the schema types it
+        left = float(max(0, diff)) if isinstance(diff, float) else max(0, diff)
     return {"cap": cap, "spent": spent, "left": left}
 
 
@@ -416,7 +421,8 @@ def format_iteration(d: dict) -> str:
               f"strategy: {h['strategy_tag'] or '-'}",
               f"design family: {h['design_family'] or '-'}",
               "description:",
-              *(f"  {line}" for line in (h["description"] or "-").splitlines()),
+              *(textwrap.fill(para, 98, initial_indent="  ", subsequent_indent="  ") or ""
+                for para in (h["description"] or "-").splitlines()),
               f"training delta: {_pct(s['mean_rel_delta'])}"]
     if s["worst_track"] is not None:
         lines.append(f"worst track: {s['worst_track']} {_pct(s['worst_rel_delta'])}")
