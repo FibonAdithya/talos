@@ -601,60 +601,6 @@ def test_compile_ships_sources_and_returns_compiler_status(tmp_path, monkeypatch
     assert seen["backend"] == "c3"
 
 
-def test_status_lists_every_run(tmp_path, monkeypatch, capsys):
-    # mutation: printing only the newest run, or crashing on a run with no state.json, fails this
-    monkeypatch.chdir(tmp_path)
-    for name, status in (("20260101-000000-knapsack", "won"), ("20260102-000000-knapsack", "failed")):
-        d = tmp_path / "runs" / name
-        d.mkdir(parents=True)
-        (d / "state.json").write_text(json.dumps(
-            {"status": status, "iteration": 2, "spend": {"llm_usd": 1.5, "compute_usd": 0.25}}))
-        (d / "job.json").write_text(json.dumps({"provider": "claude-cli",
-                                                "model": "claude-opus-5"}))
-    (tmp_path / "runs" / "20260103-000000-knapsack").mkdir()  # started, nothing saved yet
-    assert cli.main(["status"]) == 0
-    out = capsys.readouterr().out
-    assert "20260101-000000-knapsack: won it=2 llm=$1.50 compute=$0.25" in out
-    assert "20260102-000000-knapsack: failed it=2" in out
-
-
-def _status_job(tmp_path, name, llm_usd, job_json):
-    d = tmp_path / "runs" / name
-    d.mkdir(parents=True)
-    (d / "state.json").write_text(json.dumps(
-        {"status": "running", "iteration": 3, "spend": {"llm_usd": llm_usd, "compute_usd": 0.12}}))
-    if job_json is not None:
-        (d / "job.json").write_text(job_json)
-
-
-def test_status_labels_untracked_and_unpriced_llm_spend(tmp_path, monkeypatch, capsys):
-    # issue #75: a codex job printed a measured-looking llm=$0.00.
-    # mutation: formatting llm_usd from state.json alone prints $0.00 for both jobs
-    monkeypatch.chdir(tmp_path)
-    _status_job(tmp_path, "20261026-codex-knapsack", 0.0,
-                json.dumps({"provider": "codex-cli", "model": "gpt-5.5"}))
-    _status_job(tmp_path, "20261026-openai-knapsack", 0.0,
-                json.dumps({"provider": "openai", "model": "gpt-5"}))
-    assert cli.main(["status"]) == 0
-    out = capsys.readouterr().out
-    assert "20261026-codex-knapsack: running it=3 llm=not tracked compute=$0.12" in out
-    assert "20261026-openai-knapsack: running it=3 llm=unpriced compute=$0.12" in out
-    assert "llm=$" not in out
-
-
-@pytest.mark.parametrize("job_json", [None, "{not json", json.dumps({"provider": "x"})])
-def test_status_without_a_readable_job_json_still_prints_the_job(tmp_path, monkeypatch, capsys,
-                                                                 job_json):
-    # issue #75: missing, corrupt, or incomplete job.json. mutation: letting the read error
-    # escape crashes `talos status` for every job; printing a bare $ hides that the provider
-    # is unknown
-    monkeypatch.chdir(tmp_path)
-    _status_job(tmp_path, "20261026-x-knapsack", 0.5, job_json)
-    assert cli.main(["status"]) == 0
-    out = capsys.readouterr().out
-    assert "20261026-x-knapsack: running it=3 llm=$0.50 (provider unknown) compute=$0.12" in out
-
-
 def test_unpriced_model_refuses_a_dollar_only_budget(tmp_path, monkeypatch, capsys):
     # mutation: a None cost silently disables the dollar cap. estimate_cost has no entry for
     # gpt-5, so every Completion carries cost_usd=None, spend.llm_usd stays 0.00 and a

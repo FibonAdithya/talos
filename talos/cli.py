@@ -1325,20 +1325,89 @@ def remove_compile_containers(run_dir: Path) -> None:
         print(f"could not remove the compile containers: {e}", file=sys.stderr)
 
 
+def parse_which(text: str) -> str | int:
+    """--iteration: "best" or a positive iteration number."""
+    if text == "best":
+        return text
+    # isascii: "²".isdigit() is True and int() rejects it.
+    if text.isascii() and text.isdigit() and int(text) >= 1:
+        return int(text)
+    raise argparse.ArgumentTypeError("expected a positive iteration number or 'best'")
+
+
+def _print_json(obj: dict) -> None:
+    print(json.dumps(obj, indent=1))
+
+
+def _utf8_stdout() -> None:
+    """Write stdout as UTF-8. On Windows a piped or redirected stdout uses the ANSI code page
+    (cp1252), which cannot encode ∞, LLM-written titles or source diffs."""
+    encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
+    if encoding != "utf8" and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
+
 def cmd_status(args, ask) -> int:
+    """Lists the jobs under runs/, or one job's detail. Reads runs/ only."""
+    from talos import inspect_run
+
+    _utf8_stdout()
     root = Path.cwd() / "runs"
-    for job in sorted(root.glob("*/state.json")):
-        st = json.loads(job.read_text(encoding="utf-8"))
-        llm_usd = st["spend"]["llm_usd"]
-        # The provider and model decide whether llm_usd is a measurement at all: codex-cli and
-        # unpriced models leave it at 0.00 (issue #75).
+    if args.job_id is not None:
         try:
-            spec = json.loads((job.parent / "job.json").read_text(encoding="utf-8"))
-            llm = _llm_spend_text(spec["provider"], spec["model"], llm_usd)
-        except (OSError, ValueError, KeyError, TypeError):
-            llm = f"${llm_usd:.2f} (provider unknown)"
-        print(f"{job.parent.name}: {st['status']} it={st['iteration']} "
-              f"llm={llm} compute=${st['spend']['compute_usd']:.2f}")
+            detail = inspect_run.job_detail(inspect_run.load_run(root, args.job_id), time.time())
+        except inspect_run.InspectError as e:
+            print(e, file=sys.stderr)
+            return 1
+        if args.json:
+            _print_json(detail)
+        else:
+            print(inspect_run.format_job_detail(detail))
+        return 0
+    rows = inspect_run.status_rows(root)
+    if args.json:
+        _print_json({"schema_version": inspect_run.SCHEMA_VERSION, "jobs": rows})
+        return 0
+    if not rows:
+        print("no jobs under runs/")
+        return 0
+    print(inspect_run.format_status_table(rows))
+    for row in rows:
+        if row["error"] is not None:
+            print(f"{row['job_id']}: {row['error']}", file=sys.stderr)
+    return 0
+
+
+def cmd_show(args, ask) -> int:
+    """One iteration's hypothesis, outcome, scores and files. Reads runs/ only."""
+    from talos import inspect_run
+
+    _utf8_stdout()
+    try:
+        run = inspect_run.load_run(Path.cwd() / "runs", args.job_id)
+        detail = inspect_run.iteration_detail(run, args.iteration)
+    except inspect_run.InspectError as e:
+        print(e, file=sys.stderr)
+        return 1
+    if args.json:
+        _print_json(detail)
+    else:
+        print(inspect_run.format_iteration(detail))
+    return 0
+
+
+def cmd_diff(args, ask) -> int:
+    """One iteration's unified diff against the baseline or its parent. Reads runs/ only."""
+    from talos import inspect_run
+
+    _utf8_stdout()
+    try:
+        run = inspect_run.load_run(Path.cwd() / "runs", args.job_id)
+        text = inspect_run.iteration_diff(run, args.iteration, args.against)
+    except inspect_run.InspectError as e:
+        print(e, file=sys.stderr)
+        return 1
+    sys.stdout.write(text)
     return 0
 
 
@@ -1496,9 +1565,34 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--native", action="store_true",
                    help="build the unmetered talos-native runner, as a --scoring native job "
                         "scores it")
-    sub.add_parser("status", help="list jobs under runs/ and their state",
-                   description="List the jobs under runs/ with their state, iteration count "
-                               "and spend.")
+    stat = sub.add_parser("status", help="list jobs under runs/, or show one job's detail",
+                          description="Without a job id, one row per job under runs/: status, "
+                                      "iterations, best delta, spend and the last event. With a "
+                                      "job id, that job's settings, best candidate, budget left "
+                                      "and current activity. Reads runs/ only.")
+    stat.add_argument("job_id", nargs="?", help="job id, the directory name under runs/")
+    stat.add_argument("--json", action="store_true",
+                      help="print one JSON object (schema: docs/json-output.md)")
+    show = sub.add_parser("show", help="show one iteration's hypothesis, scores and files",
+                          description="Show one iteration of a job: its hypothesis, outcome, "
+                                      "training and held-out scores, and the paths of its "
+                                      "files. Reads runs/ only.")
+    show.add_argument("job_id", help="job id, the directory name under runs/")
+    show.add_argument("--iteration", type=parse_which, default="best", metavar="N|best",
+                      help="the iteration to show (default: best)")
+    show.add_argument("--json", action="store_true",
+                      help="print one JSON object (schema: docs/json-output.md)")
+    diff = sub.add_parser("diff", help="print one iteration's diff as a unified patch",
+                          description="Print the unified diff of one iteration's files against "
+                                      "the baseline (or template) or against its parent in the "
+                                      "search tree. Reads runs/ only.")
+    diff.add_argument("job_id", help="job id, the directory name under runs/")
+    diff.add_argument("--iteration", type=parse_which, default="best", metavar="N|best",
+                      help="the iteration to diff (default: best)")
+    diff.add_argument("--against", choices=("parent", "baseline"), default="baseline",
+                      help="what to diff against: the root the job started from (baseline, or "
+                           "the template for --start template) or the iteration's parent "
+                           "(default: baseline)")
     rep = sub.add_parser("report", help="write runs/<job_id>/package/report.html from the run's "
                                         "files",
                          description="Write runs/<job_id>/package/report.html from the files "
@@ -1533,7 +1627,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
-            "report": cmd_report, "check-updates": cmd_check_updates, "demo": cmd_demo,
+            "show": cmd_show, "diff": cmd_diff, "report": cmd_report, "check-updates": cmd_check_updates, "demo": cmd_demo,
             "doctor": cmd_doctor}
 
 
