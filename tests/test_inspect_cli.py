@@ -1,10 +1,14 @@
 """`talos status`, `talos show` and `talos diff`: read-only views of runs/ (issue #68)."""
 import json
+import re
+from pathlib import Path
 
 import pytest
 
 from talos import cli
 from tests.run_fixture import make_run
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 def _runs(tmp_path):
@@ -135,3 +139,80 @@ def test_inspect_commands_need_no_config_or_network(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(cli.urllib.request, "urlopen", lambda *a, **k: pytest.fail("network"))
     for argv in (["status"], ["status", "J", "--json"], ["show", "J"], ["diff", "J"]):
         assert cli.main(argv) == 0, argv
+
+
+# ── the documented JSON schema ───────────────────────────────────────
+
+SECTIONS = {"## talos status --json": ["status", "--json"],
+            "## talos status JOB_ID --json": ["status", "J", "--json"],
+            "## talos show --json": ["show", "J", "--json"]}
+
+
+def documented_keys(text: str) -> dict[str, list[str]]:
+    """heading -> key paths from the first column of that section's table."""
+    out: dict[str, list[str]] = {}
+    current = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current = line.strip()
+            out[current] = []
+            continue
+        m = re.match(r"\|\s*`([^`]+)`\s*\|", line)
+        if current is not None and m:
+            out[current].append(m.group(1))
+    return {k: v for k, v in out.items() if v}
+
+
+def has_path(obj, path: str) -> bool:
+    """True if every segment exists as a key; a `[]` segment needs a non-empty list and is
+    checked on its first element. A null value at the end of the path counts as present."""
+    parts = path.split(".")
+    for i, part in enumerate(parts):
+        many = part.endswith("[]")
+        key = part[:-2] if many else part
+        if not isinstance(obj, dict) or key not in obj:
+            return False
+        obj = obj[key]
+        if many:
+            if not isinstance(obj, list) or not obj:
+                return False
+            obj = obj[0]
+        elif obj is None and i < len(parts) - 1:
+            return False
+    return True
+
+
+def test_has_path_is_strict():
+    # guards the checker itself: it must not accept everything
+    assert has_path({"a": {"b": None}}, "a.b")
+    assert not has_path({"a": {}}, "a.b")
+    assert not has_path({"a": []}, "a[].b")
+    assert has_path({"a": [{"b": 1}]}, "a[].b")
+    assert not has_path({"a": None}, "a.b")
+
+
+def test_every_documented_key_is_in_the_output(tmp_path, monkeypatch, capsys):
+    # mutation: renaming a key in inspect_run (e.g. best_mean_rel_delta) fails this
+    doc = (REPO / "docs" / "json-output.md").read_text(encoding="utf-8")
+    keys = documented_keys(doc)
+    assert set(keys) == set(SECTIONS)
+    assert all(len(v) >= 8 for v in keys.values())  # guards a parser that finds nothing
+    # J: best #2, confirmed by a `won` event with a held-out delta, nodes with per-track
+    # deltas, and still "researching" with a pending job, so every documented path has a
+    # non-null parent.
+    nodes = [{"id": i, "chain": 0, "parent": i - 1, "family": "f", "title": f"title {i}",
+              "outcome": "improved", "score": 0.1, "tracks": {"t": 0.1}} for i in (1, 2)]
+    make_run(tmp_path / "runs" / "J", [{"iteration": 1}, {"iteration": 2, "against": 1}],
+             nodes=nodes, best=2, confirmed=[2], status="researching",
+             pending_job={"purpose": 3, "hypothesis": {"title": "next"}, "files": {}},
+             timeline=[{"kind": "won", "iteration": 2,
+                        "holdout": {"mean_rel_delta": 0.04, "worst_rel_delta": 0.01}}])
+    monkeypatch.chdir(tmp_path)
+    for heading, argv in SECTIONS.items():
+        assert cli.main(argv) == 0
+        out = json.loads(capsys.readouterr().out)
+        missing = [k for k in keys[heading] if not has_path(out, k)]
+        assert not missing, (heading, missing)
+        # and the reverse at the top level: a new top-level key cannot ship undocumented
+        tops = {k.split(".")[0].split("[")[0] for k in keys[heading]}
+        assert set(out) <= tops, (heading, set(out) - tops)
