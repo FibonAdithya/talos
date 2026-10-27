@@ -159,3 +159,13 @@ def test_compile_dir_stays_relative_to_cwd(tmp_path, monkeypatch):
     assert cli.main(["compile", "--challenge", "knapsack", "--dir", "algorithm"]) == 0
     assert seen["files"] == {"mod.rs": "fn marker_in_sub(){}"}
     assert seen["run_dir"] == ws.resolve() / ".talos" / "compile"
+
+
+def test_write_commands_refuse_a_workspace_that_is_a_file(tmp_path, monkeypatch, capsys):
+    _home(monkeypatch, tmp_path)
+    f = tmp_path / "f"
+    f.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("TALOS_WORKSPACE", str(f))
+    assert cli.main(["demo", "--delay", "0"]) == 2
+    assert f"TALOS_WORKSPACE={f} is not a directory" in capsys.readouterr().err
+    assert f.is_file()

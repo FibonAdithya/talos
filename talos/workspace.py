@@ -46,5 +46,8 @@ def find_root_for_write(start: Path | None = None) -> Path:
     accepted, not refused. The caller makes the directory."""
     value = os.environ.get(ENV_VAR)
     if value:
-        return Path(value).expanduser().resolve()
+        p = Path(value).expanduser()
+        if p.exists() and not p.is_dir():
+            raise WorkspaceError(f"{ENV_VAR}={value} is not a directory")
+        return p.resolve()
     return _walk(start)
