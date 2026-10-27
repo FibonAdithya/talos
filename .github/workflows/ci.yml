@@ -48,7 +48,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
-          if grep -q '^\[project\]' pyproject.toml 2>/dev/null; then python -m pip install -e .; fi
+          if grep -q '^\[project\]' pyproject.toml 2>/dev/null; then python -m pip install -e ".[all]"; fi
 
       - name: Run the gate
         # setup-python provides `python` on every OS, but no `python3` on Windows.

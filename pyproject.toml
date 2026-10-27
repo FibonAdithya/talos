@@ -8,9 +8,12 @@ version = "0.1.0"
 description = "Single-user autoresearch loop for TIG challenges"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-or-later"}
-dependencies = ["modal>=1.5,<2", "anthropic>=1,<2"]
+dependencies = []
 
 [project.optional-dependencies]
+modal = ["modal>=1.5,<2"]
+anthropic = ["anthropic>=1,<2"]
+all = ["talos-tig[modal,anthropic]"]
 dev = ["pytest>=8", "ruff>=0.5"]
 
 [project.scripts]

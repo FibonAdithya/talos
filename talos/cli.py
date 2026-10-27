@@ -21,7 +21,7 @@ import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
-from talos import image_updates, workspace
+from talos import extras, image_updates, workspace
 from talos import mainnet as mainnet_api
 from talos.budget import (ADD_DIMENSIONS, Budget, BudgetExhausted, Spend, effective_budget,
                           exhausted)
@@ -345,11 +345,15 @@ def cmd_setup(args, ask) -> int:
              if root == workspace.default_root() else ""))
     try:
         backend = ask_choice(ask, "Compute backend", BACKEND_OPTIONS, "modal")
+        if backend == "modal":
+            extras.require("modal", "the modal backend")
         # "fake" is the in-process test double: it is in KINDS, but setting it up would write a
         # config whose runs never touch an LLM at all.
         kind = ask_choice(ask, "Provider",
                           [(k, PROVIDER_EXPLANATIONS.get(k, "")) for k in KINDS if k != "fake"],
                           "anthropic")
+        if kind == "anthropic":
+            extras.require("anthropic", "the anthropic provider")
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
@@ -949,6 +953,16 @@ def cmd_run(args, ask) -> int:
         print(f"unknown backend {cfg.backend!r} in talos.config.json; run `talos setup`",
               file=sys.stderr)
         return 2
+    # Before a job directory exists or anything is spent. --fake builds a modal Config but never
+    # reaches Modal, so it needs neither extra.
+    try:
+        if not args.fake and cfg.provider != "fake" and cfg.backend == "modal":
+            extras.require("modal", "the modal backend")
+        if not args.fake and not args.resume and cfg.provider == "anthropic":
+            extras.require("anthropic", "the anthropic provider")
+    except ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 2
     if args.resume:
         run_dir = root / "runs" / args.resume
         # A run that was refused before its first save (a bad credential, say) has job.json but
@@ -990,6 +1004,13 @@ def cmd_run(args, ask) -> int:
                       f"to change {flag}", file=sys.stderr)
                 return 2
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
+        # A resume keeps the provider it started with, whatever the config says today.
+        try:
+            if spec.provider == "anthropic":
+                extras.require("anthropic", "the anthropic provider")
+        except ConfigError as e:
+            print(str(e), file=sys.stderr)
+            return 2
         if _codex_refused(cfg, spec.start):
             return 2
         return execute_job(spec, store, cfg, resume=True, add=add)
@@ -1285,6 +1306,8 @@ def cmd_compile(args, ask) -> int:
     from talos.bench import EvalRequest, PendingJobStore
     try:
         backend = compile_backend(args, workspace.find_root())
+        if backend == "modal":
+            extras.require("modal", "the modal backend")
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2

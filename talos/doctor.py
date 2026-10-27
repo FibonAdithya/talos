@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
-from talos import cli, local_transport, mainnet
+from talos import cli, extras, local_transport, mainnet
 from talos.bench import CPU_USD_PER_CORE_SECOND, GPU_USD_PER_SECOND, MEM_USD_PER_GIB_SECOND
 from talos.c3_bench import GBP_PER_HOUR
 from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MODAL_GPUS, c3_hardware_options,
@@ -90,6 +90,11 @@ def check_credential(cfg: Config) -> Check:
 
 def check_provider(cfg: Config) -> Check:
     try:
+        if cfg.provider == "anthropic":
+            extras.require("anthropic", "the anthropic provider")
+    except ConfigError as e:
+        return Check("provider", FAIL, str(e))
+    try:
         p = cli.make_provider(cfg.provider, cfg.model, api_key=resolve_api_key(cfg),
                               api_base=cfg.api_base)
     except ValueError as e:
@@ -117,6 +122,10 @@ def _check_modal() -> Check:
 
 def check_backend(cfg: Config) -> Check:
     if cfg.backend == "modal":
+        try:
+            extras.require("modal", "the modal backend")
+        except ConfigError as e:
+            return Check("backend", FAIL, str(e))
         return _check_modal()
     if cfg.backend == "c3":
         try:
