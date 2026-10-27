@@ -208,8 +208,9 @@ def test_status_table_unreadable_row(tmp_path):
 
 
 def test_job_detail_text_prints_infinite_cap(tmp_path):
+    # mutation: printing the None cap as "None" (or a number) instead of ∞
     text = format_job_detail(job_detail(_run(tmp_path), now=T0))
-    assert "∞" in text and "compute" in text
+    assert "  compute: cap ∞, spent $0.00, left ∞" in text.splitlines()
 
 
 # ── one iteration: show ──────────────────────────────────────────────
