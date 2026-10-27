@@ -21,7 +21,7 @@ import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
-from talos import extras, image_updates, workspace
+from talos import __version__, extras, image_updates, workspace
 from talos import mainnet as mainnet_api
 from talos.budget import (ADD_DIMENSIONS, Budget, BudgetExhausted, Spend, effective_budget,
                           exhausted)
@@ -1533,6 +1533,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Talos researches better algorithms for a TIG challenge: it asks an LLM for "
                     "edits, scores each candidate on TIG's benchmark and keeps the "
                     "improvements.")
+    p.add_argument("--version", action="version", version=f"talos {__version__}")
     p.add_argument("--workspace", metavar="DIR",
                    help="the Talos workspace (default: nearest talos.config.json above the "
                         "current directory, else ~/.talos/workspace)")

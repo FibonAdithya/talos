@@ -3439,3 +3439,14 @@ def test_summary_shows_the_challenge_warning(tmp_path, monkeypatch, capsys):
                      "--budget-iterations", "1", "--hyperparameters", "none", "--yes"]) == 0
     out = capsys.readouterr().out
     assert "untested" in out and "never been run end to end" in out
+
+
+def test_version_flag_prints_the_package_version(capsys):
+    import importlib.metadata
+
+    import talos
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == f"talos {talos.__version__}\n"
+    assert importlib.metadata.version("talos-tig") == talos.__version__
