@@ -44,7 +44,7 @@ flowchart TD
     builds -- yes --> score --> errors
     errors -- no --> failed
     errors -- yes --> beats
-    beats -- "no (kept as best if its mean delta is the best so far)" --> failed
+    beats -- "no (kept as best if it improves on the best: mean up, worst track held)" --> failed
     beats -- yes --> confirm --> confirmed
     confirmed -- no --> failed
     confirmed -- yes --> won
@@ -74,6 +74,15 @@ is above the challenge's `BeatRule.margin`, no track is worse than the baseline,
 rate is under the challenge's ceiling. The default margin is 0, so any improvement wins and a
 tie does not; per-challenge rules live in `talos/challenges.py`. With `--track`, the focus
 track must be above the margin and no other track may get worse (`beats_focused`).
+
+"Becomes the best" (`talos/scoring.py::improves`) is a separate, looser rule, because the best is
+the code every later iteration edits. A candidate becomes the best when it beats the baseline, or
+when its mean delta is above the current best's and its worst track is no lower than the best's
+worst track less `BeatRule.track_tolerance`, under the error ceiling. With no best yet, the bar is
+the baseline itself (0 for both) on a mainnet start, and nothing on a template start. A stepping
+stone that improves on the best without beating the baseline is kept; a higher mean bought by
+regressing one track is not (issue #32). Such a candidate is recorded as `failed:score`, with an
+`error` naming the track, which the next prompt's recall block shows.
 
 ## From-scratch start and annealing search
 
@@ -108,8 +117,11 @@ A candidate that improves on the job's best always becomes the chain's best. Oth
 least its parent's, and when it is lower by `drop`, with probability `exp(-drop / T)`
 (`talos/lineage.py::decide`). The draw is seeded from the job id, the chain and the iteration
 (`talos/lineage.py::draw`), never from `rand_hash`, so a resumed job decides as the original
-did. Under greedy with several chains or a template start, a candidate better than its own
-chain's best is accepted into the chain without being a job-wide improvement.
+did. Under greedy with several chains or a template start, a candidate that improves on its
+own chain's best, by the same rule measured against that node's score and worst track
+(`talos/loop.py::Loop._chain_bar`), is accepted into the chain without being a job-wide
+improvement. Under either search a node becomes its chain's best only by that rule, so a reheat
+never returns to a node accepted with a regressed track.
 
 In a `--scoring native` job the comparisons between nodes use the score a candidate was produced
 with, which is the native score. A candidate that improves on the job's best is still validated
@@ -201,11 +213,11 @@ timeout (`fuel_proxy_miss`,
 has the same quality (`nondeterministic`, `talos/scoring.py::quality_mismatches`; a row
 carries `limit_hit` when the solver exited 87, and a limit-cut nonce is never a quality
 mismatch); the metered result is scoreable (`unscoreable`); its error rate is under the
-challenge's ceiling (`error_ceiling`); and the loop's own improvement rule holds, meaning
-its mean delta exceeds the current best's or it beats the baseline (`not_improved`). The
-last check is not `beats` alone, so a stepping stone that improves on the best without yet
-beating the baseline is kept. A pass makes the candidate the best with its metered results,
-and held-out confirmation (`talos/loop.py::Loop._confirm`) runs on the metered path only. A
+challenge's ceiling (`error_ceiling`); and the loop's own rule for becoming the best,
+`talos/scoring.py::improves`, holds against the current best (`not_improved`). That rule is not
+`beats` alone, so a stepping stone that improves on the best without yet beating the baseline
+is kept, and not the mean alone, so a metered regression on one track is demoted. A pass makes
+the candidate the best with its metered results, and held-out confirmation (`talos/loop.py::Loop._confirm`) runs on the metered path only. A
 failure leaves the previous best in place, appends a `demoted` entry to `state.json`'s
 `validations`, and counts in the calibration record. In native mode the recall record
 carries no native-versus-metered runtime ratio; a validated best gets the metered one.

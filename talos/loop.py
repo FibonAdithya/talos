@@ -26,9 +26,9 @@ from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
                            parse_distillation, parse_hypothesis)
 from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
                              ProviderTimeout)
-from talos.scoring import (ScoringError, beats, beats_focused, bundle_delta, focus_sets,
-                           fuel_proxy_misses, quality_mismatches, runtime_ratio, select,
-                           validation_failure)
+from talos.scoring import (Bar, ScoringError, beats, beats_focused, bundle_delta, clears,
+                           focus_sets, fuel_proxy_misses, improves, quality_mismatches,
+                           runtime_ratio, select, validation_failure, worst_track_shortfall)
 from talos.search_replace import format_misses
 from talos.state import Candidate, JobSpec, JobState, JobStore, TERMINAL, user_tacit
 from talos.types import Completion, NonceResult
@@ -374,12 +374,32 @@ class Loop:
         return self.state.best.training if self.state.best else self.state.baseline.training
 
     def _best_delta(self) -> float:
-        """The score a candidate must exceed to become the best. With no best yet that is the
-        baseline's 0.0 on a mainnet start, and minus infinity on a template start, so the first
-        scored candidate becomes the best however far below mainnet it is."""
+        """The best's mean delta: the mean a candidate must exceed to become the best."""
+        return self._best_bar().mean
+
+    def _best_bar(self) -> Bar:
+        """What a candidate must clear to become the best (talos/scoring.py::improves). With no
+        best yet that is the baseline against itself on a mainnet start, and minus infinity on a
+        template start, so the first scored candidate becomes the best however far below
+        mainnet it is."""
         if self.state.best:
-            return self.state.best.delta["mean_rel_delta"]
-        return -math.inf if self.spec.start == "template" else 0.0
+            return Bar.of(self.state.best.delta)
+        return self._root_bar()
+
+    def _root_bar(self) -> Bar:
+        if self.spec.start == "template":
+            return Bar(-math.inf, -math.inf)
+        return Bar(0.0, 0.0)
+
+    def _chain_bar(self, chain: Chain) -> Bar:
+        """What a candidate must clear to become its chain's best: that node's score and worst
+        track, as it was produced (native in a native job)."""
+        if chain.best == ROOT:
+            return self._root_bar()
+        node = self._node(chain.best)
+        if node is None or node.score is None or not node.tracks:
+            return self._best_bar()  # a best kept from before the lineage tree has no Node
+        return Bar(node.score, min(node.tracks.values()))
 
     # ── lineage tree ──────────────────────────────────────────────────
 
@@ -507,8 +527,9 @@ class Loop:
         if node.accepted:
             chain.current = n
             score = node.score
-            if improved or (self._chain_scores_apart() and score is not None
-                            and (chain.best_score is None or score > chain.best_score)):
+            if improved or (self._chain_scores_apart() and score is not None and node.tracks
+                            and clears(score, min(node.tracks.values()),
+                                       self._chain_bar(chain), self.rule)):
                 chain.best, chain.best_score, chain.stall = n, score, 0
                 return
         chain.stall += 1
@@ -707,7 +728,7 @@ class Loop:
         # not the held-out set goes on to confirm it. Confirming a candidate that is not best would
         # report "won" with different code in state.best.
         wins = beats(base_tr, results, self.rule)
-        improved = delta.mean_rel_delta > self._best_delta() or wins
+        improved = improves(delta, self._best_bar(), self.rule)
         if improved and self._scoring() == "native":
             self._validate_and_finish(n, record, cand, base_tr)
             return
@@ -718,12 +739,15 @@ class Loop:
             record.update(outcome="improved", accepted=True)
         elif self.spec.search == "anneal":
             self._anneal_step(n, record, delta.mean_rel_delta)
-        elif self._chain_scores_apart() and (chain.best_score is None
-                                              or delta.mean_rel_delta > chain.best_score):
+        elif self._chain_scores_apart() and improves(delta, self._chain_bar(chain), self.rule):
             # Greedy, per chain: not a job-wide improvement, but better than this chain's best.
             record.update(outcome="accepted", accepted=True)
         else:
             record["outcome"] = "failed:score"
+            bar = self._chain_bar(chain) if self._chain_scores_apart() else self._best_bar()
+            shortfall = worst_track_shortfall(delta, bar, self.rule)
+            if shortfall:
+                record["error"] = shortfall
         # The record and the iteration bump are persisted BEFORE the confirmation is read out of
         # the result, so a kill between the two never loses the iteration.
         self._finish_iteration(n, record, improved=improved, scored=cand.delta)
@@ -750,7 +774,7 @@ class Loop:
         self._event("validating")
         res = self._bench_evaluate(cand.files, "metered", validation=True)
         reason, d = validation_failure(res.compile.ok, res.training, cand.training, base_tr,
-                                       self._best_delta(), self.rule)
+                                       self._best_bar(), self.rule)
         entry = {"iteration": n, "outcome": "demoted" if reason else "validated",
                  "reason": reason}
         if reason == "nondeterministic":
