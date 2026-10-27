@@ -86,22 +86,23 @@ jobs:
       - name: Default workspace under a fresh home
         # Temporary directories come from Python: on Windows, Git Bash's `mktemp` returns a /tmp/...
         # path that is not translated when it reaches USERPROFILE, which Path.home() reads there.
+        # end="" because Windows python prints \r\n and $(...) strips only the \n, which would
+        # leave a stray \r in the path.
         run: |
-          fake_home="$(python -c "import tempfile; print(tempfile.mkdtemp())")"
-          empty_dir="$(python -c "import tempfile; print(tempfile.mkdtemp())")"
+          fake_home="$(python -c "import tempfile; print(tempfile.mkdtemp(), end=\"\")")"
+          empty_dir="$(python -c "import tempfile; print(tempfile.mkdtemp(), end=\"\")")"
           export HOME="$fake_home" USERPROFILE="$fake_home"
           cd "$empty_dir"
           talos --version
           talos demo --delay 0
-          talos status --json | python -c "import json,sys; jobs=json.load(sys.stdin)['jobs']; assert len(jobs)==1 and jobs[0]['status']=='won', jobs"
-          python -c "from pathlib import Path; p=Path.home()/'.talos'/'workspace'/'runs'; assert p.is_dir(), p"
+          talos status --json | python -c "import json,sys; from pathlib import Path; jobs=json.load(sys.stdin)['jobs']; assert len(jobs)==1 and jobs[0]['status']=='won', jobs; d=Path.home()/'.talos'/'workspace'/'runs'/jobs[0]['job_id']; assert d.is_dir(), d"
 
       - name: TALOS_WORKSPACE overrides the default
         run: |
-          fake_home="$(python -c "import tempfile; print(tempfile.mkdtemp())")"
-          empty_dir="$(python -c "import tempfile; print(tempfile.mkdtemp())")"
-          workspace="$(python -c "import tempfile; print(tempfile.mkdtemp())")"
+          fake_home="$(python -c "import tempfile; print(tempfile.mkdtemp(), end=\"\")")"
+          empty_dir="$(python -c "import tempfile; print(tempfile.mkdtemp(), end=\"\")")"
+          workspace="$(python -c "import tempfile; print(tempfile.mkdtemp(), end=\"\")")"
           export HOME="$fake_home" USERPROFILE="$fake_home" TALOS_WORKSPACE="$workspace"
           cd "$empty_dir"
           talos demo --delay 0
-          python -c "import os; from pathlib import Path; p=Path(os.environ['TALOS_WORKSPACE'])/'runs'; assert p.is_dir(), p"
+          python -c "import os; from pathlib import Path; r=Path(os.environ['TALOS_WORKSPACE'])/'runs'; n=[p for p in r.iterdir() if p.is_dir()]; assert len(n)==1, n; d=Path.home()/'.talos'/'workspace'; assert not d.exists(), d"
