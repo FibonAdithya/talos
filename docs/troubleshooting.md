@@ -42,9 +42,11 @@ code 2.
 ### C3 balance is low
 
 **Symptom:** `talos setup` prints ``warning: C3 credit balance is low (£<balance>); run `c3 topup` ``,
-or `talos doctor` prints `backend: warn: £<balance> left; c3 topup`.
+or `talos doctor` prints `backend: warn: £<balance> left; c3 topup`. On a new account, or when
+the balance cannot be read, `talos doctor` prints
+`backend: warn: could not read the balance, or it is £0.00; c3 topup` instead.
 
-**Cause:** the C3 account has less than £1 of credit.
+**Cause:** the C3 account has less than £1 of credit, or none.
 
 **Fix:** `c3 topup`.
 
@@ -119,10 +121,20 @@ baseline and candidates cannot be compared with scores from the new build.
 **Symptom:** the run ends with `paused: <error>` or `Status: paused (bench: <error>)`, and
 `talos status` lists the job as `paused`.
 
-**Cause:** the compute backend could not be reached, or had no hardware free, for longer than
-Talos retries.
+**Cause:** a compute call could not complete. The text after `bench:` says which case it is,
+and is also in `state.json` (`stop_reason`) under `runs/<job_id>/`. It is one of:
 
-**Fix:** run `talos doctor` to check the backend, then `talos run --resume <job_id>`.
+- the backend could not be reached, or had no hardware free, for longer than Talos retries;
+- the Modal app is missing or older than the client (see
+  [that entry](#the-modal-app-is-missing-or-older-than-the-client));
+- a C3 deploy failed, or a C3 job `failed twice`, `timed out before writing results`,
+  `succeeded without results.json` or wrote unreadable results.
+
+**Fix:** read the reason first. If the backend was unreachable or out of capacity, run
+`talos doctor` to check it, then `talos run --resume <job_id>`. If a C3 job timed out or
+failed twice, resuming submits the same work again and is likely to fail and bill again: a
+timeout comes from the files being built and scored, not from the infrastructure. Look at
+the job's files under `runs/<job_id>/c3/` before resuming, or start a new job.
 
 ### Job `failed`
 

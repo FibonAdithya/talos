@@ -77,7 +77,7 @@ to list it.
 | Backend | What you need before setup | Cost per iteration |
 |---|---|---|
 | `modal` (default) | A [Modal](https://modal.com) account (the free tier works) and an API token from modal.com/settings/tokens. | Container seconds only; no fixed per-job overhead. |
-| `c3` | A C3 API key (`c3 apikey create`), or the `c3` CLI ([cthree.cloud](https://cthree.cloud)) 0.20.0 or newer, logged in with `c3 login`. Credit on the account (`c3 topup`). | One batch job with about 12 minutes of fixed overhead. |
+| `c3` | A C3 API key (`c3 apikey create`), or the `c3` CLI ([cthree.cloud](https://cthree.cloud)) 0.20.0 or newer, logged in with `c3 login` (older releases refuse the GHCR dev image before it reaches C3; check with `c3 version`). Credit on the account (`c3 topup`). | One batch job with about 12 minutes of fixed overhead (MEASURED 2026-09-14). |
 | `local` | Docker running on this machine. The first run per challenge pulls a 13 GB image. GPU challenges need the NVIDIA container toolkit and are unverified. | Nothing. |
 
 Timings and details per backend are in [docs/compute-backends.md](docs/compute-backends.md).
@@ -137,7 +137,7 @@ stopping, resuming and submitting are covered in [Running a job](docs/usage.md#r
 | Backend | Time per iteration | Compute cost per iteration |
 |---|---|---|
 | `c3` | About 12 minutes of fixed overhead before the first nonce is scored, plus the nonces (MEASURED 2026-09-14; see [C3 timings](docs/compute-backends.md#c3-timings)). | Not measured per iteration. The closest measured figure is £0.02 for one knapsack baseline on 2 training and 2 held-out nonces (MEASURED 2026-09-15). |
-| `local` | About 3 minutes for one knapsack build and 4 nonces; 16.5 minutes for job_scheduling (MEASURED 2026-09-25; see [Local timings](docs/compute-backends.md#local-timings)). The first run per challenge also pulls the image and does a 90 s warm-up build. | £0: it runs on your machine. |
+| `local` | About 3 minutes for one knapsack build and 4 nonces (MEASURED 2026-09-25 on a 16-core, 30 GB machine; see [Local timings](docs/compute-backends.md#local-timings)). The first run per challenge also pulls the image, clones the pin and does a warm-up build: 90 s for knapsack with the image already pulled (MEASURED 2026-09-25, same machine). | £0: it runs on your machine. |
 | `modal` | not measured | not measured |
 
 Most jobs end `exhausted`: a budget ran out before a candidate beat the baseline on both

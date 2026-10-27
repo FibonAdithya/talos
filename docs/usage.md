@@ -295,7 +295,7 @@ that is not tested.
 | `--direction-file PATH` | The same, read from a file. Pass one of `--direction` or `--direction-file`, not both. |
 | `--track NAME` | Optimise one active track of the challenge instead of all of them (`all` is the default; the prompt lists the tracks). See **`--track`** below. |
 | `--nonces N` | Nonces per track in each of the training and held-out sets (8 is the default; the prompt asks). It sets the cost of every evaluation; see **`--nonces`** below. |
-| `--hyperparameters mainnet\|none` | `mainnet` (the default) runs the baseline and every candidate with the baseline algorithm's mainnet hyperparameters per track, fixed at job start. `none` runs every nonce without hyperparameters. See **`--hyperparameters`** below. |
+| `--hyperparameters mainnet\|none` | `mainnet` (the default) runs the baseline and every candidate with the baseline algorithm's mainnet hyperparameters per track, fixed at job start; with `--start template` only the baseline uses them. `none` runs every nonce without hyperparameters. See **`--hyperparameters`** below. |
 | `--mode single-shot\|agentic` | Overrides the configured mode for this job. `agentic` needs a CLI provider and uses roughly 5 to 20 times the tokens of `single-shot`. |
 | `--scoring native\|metered` | `native` (the default) scores research candidates with a faster unmetered runner and scores an improvement again on the metered runtime before it can become the best. `metered` scores every candidate with TIG's own `tig-runtime`. See **`--scoring`** below. |
 | `--start mainnet\|template` | `mainnet` (the default) starts from the top-adoption mainnet algorithm. `template` starts from TIG's empty template, for `energy_arbitrage` only. See **`--start`** below. |
