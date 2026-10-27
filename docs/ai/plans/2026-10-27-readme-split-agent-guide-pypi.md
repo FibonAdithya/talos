@@ -25,7 +25,7 @@
 1. **A user who runs `talos` from a subdirectory of a clone** (Part C) expects the clone's config and `runs/`. Test: `test_status_from_a_subdirectory_lists_the_workspace_jobs` in Task C1.
 2. **`TALOS_WORKSPACE` set to a directory that does not exist** (Part C). A silent fallback to the current directory would write `runs/` in the wrong place. Expect exit 2 with `TALOS_WORKSPACE=<path> is not a directory`. Test: `test_find_root_rejects_a_missing_workspace` in Task C1.
 3. **User-supplied relative paths (`--dir`, `--direction-file`) from a subdirectory** (Part C). They must stay relative to the current directory, not the workspace root. Test: `test_compile_dir_stays_relative_to_cwd` in Task C1.
-4. **An agent polling `status --json` while the job writes** (Part B). `state.json` is atomic, but `timeline.jsonl` can have a half-written last line. Expect the partial line to be skipped, not an exception. Test: `test_heldout_ignores_a_truncated_last_timeline_line` in Task B1.
+4. *(Dropped with Task B1; #83 owns `status --json`.)* **An agent polling `status --json` while the job writes** (Part B). `state.json` is atomic, but `timeline.jsonl` can have a half-written last line. Expect the partial line to be skipped, not an exception. Test: `test_heldout_ignores_a_truncated_last_timeline_line` in Task B1.
 5. **A `kill -INT` sent to a background `talos run` before its loop starts** (Part B). Expect it to stop the command, not be ignored. Test: `test_run_restores_the_default_sigint_handler_on_entry` in Task B2.
 
 ---
@@ -125,128 +125,174 @@ EOF
 
 ---
 
-# Part B: `talos status --json`, `talos guide` (#71), branch `agent-guide`
+# Part B: `talos guide` (#71), branch `agent-guide`
 
-### Task B1: job summaries and `talos status [JOB_ID] [--json]`
+**Revised 2026-10-27, before implementation.** PR #83 (#68) merged `talos status [JOB_ID] --json`,
+`talos show [--json]` and `talos diff` with a versioned schema (`docs/json-output.md`) after this
+plan was written. Task B1 is dropped; the guide uses those commands and that schema. The owner
+approved the revised scope on 2026-10-27. Work happens in the worktree
+`/home/fibonadithya/TIG/Talos-guide71` (branch `agent-guide` from `origin/main` 16468f2), because
+other sessions switch branches in the main checkout.
 
-**Files:**
-- Create: `talos/status.py`, `tests/test_status.py`
-- Modify: `talos/cli.py` (`cmd_status`; the `status` subparser in `build_parser`)
+Gate at the branch point (MEASURED 2026-10-27, `make check PYTHON=.venv/bin/python` in the
+worktree): ruff clean, `1143 passed, 7 deselected`, agentify level 1 PASS.
 
-**Interfaces:**
-- Consumes: `talos/state.py::JobState`, `JobSpec`; `talos/budget.py::effective_budget`; `talos/cli.py::_llm_spend_text` (move its label logic into `talos/status.py::llm_tracking(provider, model) -> str`, returning `"tracked"`, `"unpriced"` or `"not tracked"`, and make `_llm_spend_text` call it).
-- Produces: `talos/status.py::job_summary(run_dir: Path) -> dict` returning exactly these keys:
-  `job_id: str`, `status: str`, `stop_reason: str|None`, `iteration: int`, `challenge: str|None`,
-  `spend: {"llm_usd": float, "compute_usd": float, "llm_tracking": str|None}`,
-  `budget: {"usd", "hours", "iterations", "compute_usd"}|None` (the effective budget, or `None` when `job.json` is unreadable),
-  `best: {"iteration": int, "delta": float}|None` (`delta` = `state.best.delta["mean_rel_delta"]`),
-  `heldout: {"result": "won"|"false_positive"|"not_run", "delta": float|None}|None` (`None` when `best` is `None`),
-  `package: str|None` (absolute path of `run_dir/"package"` if it is a directory).
-  `heldout.result`: `won` if the best iteration is in `state.confirmed`, `false_positive` if it is in `state.false_positives`, otherwise `not_run`. `heldout.delta` is `holdout["mean_rel_delta"]` from the **last** `timeline.jsonl` row whose `kind` is `won` or `false_positive` and whose `iteration` equals the best iteration. If there is no such row, or the row has no `holdout` (a `false_positive` from a `ScoringError` carries `error` instead), it is `None`.
-
-Test fixture: `demo_job(tmp_path, monkeypatch) -> Path`. It chdirs to `tmp_path`, runs `cli.main(["demo", "--delay", "0"])` and returns the one `runs/demo-*` directory. Tests then edit that directory's `state.json` / `timeline.jsonl` / `job.json` to set controlled values. Expected values are always the literals the test wrote, never values read back through `talos/status.py`.
-
-- [ ] **Step 1: Write the failing tests** in `tests/test_status.py`:
-  - `test_heldout_delta_comes_from_the_matching_timeline_event`: append `{"kind": "won", "iteration": <best>, "holdout": {"mean_rel_delta": 0.0421}}` and an earlier-iteration `won` row with `0.9`. Assert `job_summary(d)["heldout"] == {"result": "won", "delta": 0.0421}`. Catches reading the first event, or the wrong iteration.
-  - `test_false_positive_reports_its_heldout_delta`: set `confirmed=[]`, `false_positives=[best]`, `status="exhausted"`, and append a `false_positive` row with `-0.0123`. Assert `{"result": "false_positive", "delta": -0.0123}`.
-  - `test_unscored_best_is_not_run`: `confirmed=[]`, `false_positives=[]`. Assert `{"result": "not_run", "delta": None}`.
-  - `test_scoring_error_false_positive_has_no_delta`: a `false_positive` row with `error` and no `holdout`. Assert `delta is None`.
-  - `test_no_best_means_no_heldout`: `best=None`. Assert `best is None and heldout is None`.
-  - `test_heldout_ignores_a_truncated_last_timeline_line`: append a complete `won` row for the best iteration with `0.0421`, then `'{"kind": "won", "iter'` with no newline. Assert no exception, and `heldout["delta"] == 0.0421`.
-  - `test_budget_includes_extensions`: set `job.json` budget iterations to 5 and add `budget_extensions=[{"add": {"iterations": 7}}]` (plus whatever keys `effective_budget` reads). Assert `budget["iterations"] == 12`.
-  - `test_codex_job_spend_is_not_tracked`: set `job.json` `provider="codex-cli"`. Assert `spend["llm_tracking"] == "not tracked"`.
-  - `test_unreadable_job_json_still_listed`: write `{` to `job.json`. Assert `challenge is None`, `budget is None`, `spend["llm_tracking"] is None`, and that `status` is still read.
-  - `test_package_path_is_absolute_or_null`: after the demo it equals `str((d / "package").resolve())`; after `shutil.rmtree(d / "package")` it is `None`.
-  - `test_status_json_lists_every_job_sorted` (through `cli.main`): two demo jobs. `json.loads(capsys out)["jobs"]` gives their `job_id`s in sorted order, and stdout holds nothing else.
-  - `test_status_job_id_json_prints_one_object`: `cli.main(["status", id, "--json"])` gives an object whose `job_id == id`.
-  - `test_status_unknown_job_exits_1`: `cli.main(["status", "nope"]) == 1`, and stderr contains `no job nope under runs/`.
-  - `test_status_text_line_unchanged`: `cli.main(["status"])` prints exactly `f"{id}: won it={it} llm=$0.00 compute=$0.00\n"`, where `it` is the integer the test wrote into `state.json`.
-- [ ] **Step 2: Run** `.venv/bin/pytest tests/test_status.py -q`. Expected: FAIL (`ModuleNotFoundError: talos.status`).
-- [ ] **Step 3: Implement** `talos/status.py` (`job_summary`, `llm_tracking`, a private timeline reader that skips lines failing `json.loads`). Add `status` arguments: `job_id` (`nargs="?"`) and `--json` (`action="store_true"`). `cmd_status` text mode keeps today's line, built from `job_summary`.
-- [ ] **Step 4: Run** `tests/test_status.py` and `tests/test_cli.py`. Expected: PASS.
-- [ ] **Step 5: Mutation check.** Apply each mutation, run `tests/test_status.py` and confirm it fails, then restore: (a) take the first matching event instead of the last; (b) ignore `iteration` when matching; (c) drop `effective_budget`, using the raw budget; (d) map `false_positives` to `not_run`; (e) `json.loads` without try. Record the results in the commit message body.
-- [ ] **Step 6: Commit** `talos/status.py talos/cli.py tests/test_status.py`, message `feat: talos status [JOB_ID] [--json] for agents polling a job (#71)`.
+### Task B1: dropped (done by #83)
 
 ### Task B2: a background `talos run` stops on SIGINT from its first line
 
 **Files:**
-- Modify: `talos/cli.py` (`cmd_run`, first statement)
+- Modify: `talos/cli.py` (`cmd_run`)
 - Test: `tests/test_cli.py`
 
+The loop's own handler is installed in `talos/cli.py::execute_job`, after the mainnet fetch, the
+dev-image check, the job summary and `freeze_hardware`. Before it, a process started with `&` from
+a non-interactive shell has SIGINT ignored (POSIX: no job control, so `&` children ignore SIGINT),
+and Python keeps an inherited `SIG_IGN`.
+
 - [ ] **Step 1: Write the failing test** `test_run_restores_the_default_sigint_handler_on_entry`:
-  - Set `signal.signal(signal.SIGINT, signal.SIG_IGN)`, and restore it in `finally`.
-  - Monkeypatch `cli.fetch_challenge_info` with a function that records `signal.getsignal(signal.SIGINT)` and then raises `MainnetError("stop")`.
-  - Run `cli.main(["run", "--challenge", "knapsack", "--direction", "go", "--budget-iterations", "1", "--yes"])` in a tmp workspace with a fake config, as in `test_run_requires_budget_and_creates_job`.
+  - Set `signal.signal(signal.SIGINT, signal.SIG_IGN)`; restore the previous handler in `finally`.
+  - Save a fake config as in `test_run_requires_budget_and_creates_job`. Monkeypatch
+    `cli.fetch_challenge_info` with a function that records `signal.getsignal(signal.SIGINT)` and
+    raises `MainnetError("stop")`.
+  - `cli.main(["run", "--challenge", "knapsack", "--direction", "go", "--budget-iterations", "1", "--yes"]) == 1`.
   - Assert the recorded handler `is signal.default_int_handler`.
-- [ ] **Step 2: Run it.** Expected: FAIL (the recorded handler is `SIG_IGN`).
+  - Catches: no handler reset (recorded `SIG_IGN`); a reset placed after the mainnet fetch.
+- [ ] **Step 2: Run it.** Expected: FAIL (recorded handler is `SIG_IGN`).
 - [ ] **Step 3: Implement.**
-  - The first line of `cmd_run` is `signal.signal(signal.SIGINT, signal.default_int_handler)`, with a one-line comment: a shell's `&` launch inherits SIGINT ignored.
-  - Rename today's body to `_cmd_run(args, ask)`. The new `cmd_run` sets the handler, then calls `_cmd_run` inside `try/except KeyboardInterrupt`; the except prints `interrupted` to stderr and returns 130.
-  - Scope the catch to `run` only, not `main()`: `tests/test_cli.py::test_compile_local_removes_its_containers_when_evaluate_raises` asserts that a `KeyboardInterrupt` escapes `talos compile`, and must keep passing unchanged.
-  - Add the test `test_early_interrupt_exits_130_without_traceback`: `cli.fetch_challenge_info` raises `KeyboardInterrupt`. `cli.main(["run", …]) == 130` with the same args as the Step 1 test, stderr is `interrupted\n`, and no `runs/*/job.json` exists.
-  - **Existing test to update:** `tests/test_cli.py::test_sigint_stops_the_bench_too` patches `cli.signal.signal` with `handlers.setdefault(sig, h)`, which keeps the *first* SIGINT handler set. After this change that handler is `default_int_handler`, so the test would call it and raise. Change it to record a list (`handlers.setdefault(sig, []).append(h)`). Assert `handlers[signal.SIGINT][0] is signal.default_int_handler`, then call `handlers[signal.SIGINT][1](None, None)`, which is the loop's stop handler. Keep `stops == ["bench"]`.
+  - Rename today's body to `_cmd_run(args, ask)`. New `cmd_run` sets
+    `signal.signal(signal.SIGINT, signal.default_int_handler)` with a one-line comment, then calls
+    `_cmd_run` inside `try/except KeyboardInterrupt`; the except prints `interrupted` to stderr and
+    returns 130.
+  - The catch is scoped to `run`, not `main()`:
+    `test_compile_local_removes_its_containers_when_evaluate_raises` asserts a `KeyboardInterrupt`
+    escapes `talos compile`, and must pass unchanged.
+  - Add `test_early_interrupt_exits_130_without_traceback`: `cli.fetch_challenge_info` raises
+    `KeyboardInterrupt`; `cli.main([... same args ...]) == 130`, stderr is exactly
+    `interrupted\n`, and `list(tmp_path.glob("runs/*/job.json")) == []`. Catches: no catch
+    (KeyboardInterrupt escapes the test), a catch returning 1, a catch that prints a traceback.
+  - Update `test_sigint_stops_the_bench_too`: it records the *first* SIGINT handler with
+    `setdefault`, which becomes `default_int_handler`. Record a list per signal instead
+    (`handlers.setdefault(sig, []).append(h)`), assert
+    `handlers[signal.SIGINT][0] is signal.default_int_handler`, call
+    `handlers[signal.SIGINT][1](None, None)` (the loop's stop handler), keep `stops == ["bench"]`.
 - [ ] **Step 4: Run** `tests/test_cli.py`. Expected: PASS.
-- [ ] **Step 5: Real-process check (Linux).** `--fake` needs no config and no network (`cmd_run`), so both cases use it in an empty scratch directory.
-  - **Early stop:** without `--yes`, `talos run` blocks at `Start this job?` before the loop. Give it a stdin that never closes: `mkfifo in; (sleep 30 > in &); bash -c '.venv/bin/talos run --fake --challenge knapsack --direction go --budget-iterations 1 < in > early.log 2>&1 & pid=$!; sleep 2; kill -INT $pid; wait $pid; echo rc=$?'`. Expected: `rc=130`, `early.log` ends with `interrupted`, and no `runs/` directory exists.
-  - **Late stop:** run `bash -c '.venv/bin/talos run --fake --challenge knapsack --direction go --budget-iterations 100000 --yes > late.log 2>&1 & pid=$!; sleep 5; kill -INT $pid; wait $pid; echo rc=$?'`. Expected: `late.log` has `Status: cancelled`, and the package path is printed.
-  - If the fake loop finishes 100000 iterations within 5 s, raise the count and record it.
-  - Record both outputs (MEASURED). The guide's stop instructions in B3 are written from them.
-- [ ] **Step 6: Commit** `talos/cli.py tests/test_cli.py`, message `fix: a background talos run honours SIGINT before its loop starts (#71)`.
+- [ ] **Step 5: Real-process check (Linux),** in an empty scratch directory with the worktree's
+  `.venv/bin/talos`. `--fake` needs no config or network.
+  - **Early stop:** without `--yes`, `talos run` blocks at `Start this job?`. Give it a stdin that
+    stays open: `mkfifo in; (sleep 30 > in &); bash -c 'talos run --fake --challenge knapsack --direction go --budget-iterations 1 < in > early.log 2>&1 & pid=$!; sleep 2; kill -INT $pid; wait $pid; echo rc=$?'`.
+    Expected `rc=130`, `early.log` ends `interrupted`, no `runs/` directory. Run the same against
+    `origin/main`'s code first to show the bug (expected: the process does not stop at the
+    `kill -INT`).
+  - **Late stop:** `bash -c 'talos run --fake --challenge knapsack --direction go --budget-iterations 100000 --yes > late.log 2>&1 & pid=$!; sleep 5; kill -INT $pid; wait $pid; echo rc=$?'`.
+    Expected `Status: cancelled` and a package path in `late.log`. If 100000 fake iterations finish
+    in 5 s, raise the count and record it.
+  - Record both outputs (MEASURED); the guide's stop text is written from them.
+- [ ] **Step 6: Commit** `talos/cli.py tests/test_cli.py`, message
+  `fix: a background talos run honours SIGINT before its loop starts (#71)`.
 
 ### Task B3: `talos guide`, the guide, and its drift test
 
 **Files:**
 - Create: `talos/data/agent_guide.md`, `tests/test_guide.py`
-- Modify: `talos/cli.py` (`guide` subparser, `cmd_guide`, `COMMANDS`), `README.md` (one line), `docs/usage.md` (`### talos guide` and the `status` flags)
+- Modify: `talos/cli.py` (`guide` subparser, `cmd_guide`, `COMMANDS`), `README.md` (one line),
+  `docs/usage.md` (command table row and `### talos guide`)
 
-**Interfaces:**
-- Produces: `talos/cli.py::cmd_guide(args, ask) -> int`, which prints `resources.files("talos.data").joinpath("agent_guide.md").read_text(encoding="utf-8")` with `end=""` and returns 0.
+**Interfaces:** `talos/cli.py::cmd_guide(args, ask) -> int` prints
+`resources.files("talos.data").joinpath("agent_guide.md").read_text(encoding="utf-8")` with
+`end=""` and returns 0.
 
-- [ ] **Step 1: Write the failing tests** in `tests/test_guide.py`. The helper `unknown_references(text: str, parser: argparse.ArgumentParser) -> list[str]` lives in the test file:
-  - Collect code from fenced blocks and from inline backtick spans.
-  - In each code line, find every `talos <word>` (regex `\btalos ([a-z][a-z-]*)`), skipping `talos-` names.
-  - The subcommand must be in the parser's subparser choices, or the result gets `"talos <word>"`.
-  - Every `--flag` token after it on the same line, up to the first `|`, `;`, `&&`, `>` or `&`, must be in that subparser's `_option_string_actions`, or the result gets `"talos <word> --flag"`.
+- [ ] **Step 1: Write the failing tests** in `tests/test_guide.py`. Helper
+  `unknown_references(text, parser) -> list[str]`, in the test file:
+  - Collect code from fenced blocks and inline backtick spans. In fenced blocks, join a line ending
+    in `\` with the next line first.
+  - In each code line, find every `talos <word>` (regex `(?<![\w/.-])talos ([a-z][a-z-]*)`). The
+    word must be a subparser choice, else add `"talos <word>"`.
+  - Every `--flag` token after it on the same line, up to the first `|`, `;`, `&&`, `>` or a bare
+    `&`, must be in that subparser's `_option_string_actions`, else add `"talos <word> --flag"`.
+  - An inline span that is a bare flag (`--name` or `--name VALUE`, no `talos` before it, no `*`
+    in it) must be an option of some subparser, else add `"--name"`.
 
-  Tests:
-  - `test_checker_flags_unknown_subcommands_and_flags`: `unknown_references("`talos shw`\n```\ntalos run --budget-dollars 3 --yes\n```", build_parser())` `sorted(...) == ["talos run --budget-dollars", "talos shw"]`. The comparison is sorted because the order of collection (fenced blocks or inline spans first) is the implementer's choice. This proves the checker is not vacuous. It catches a checker that skips inline spans, skips fenced blocks or skips flags.
-  - `test_checker_ignores_flags_after_a_pipe`: `"`talos status --json | jq --raw`"` returns `[]`.
-  - `test_guide_names_only_real_commands_and_flags`: `unknown_references(<packaged guide>, build_parser()) == []`.
-  - `test_guide_mentions_every_spending_command`: the guide contains `talos run`, `talos doctor --full` and `talos compile`, plus the stop instruction `kill -INT`. This is a content guard only: it catches deleting the spending or stop section, not wrong advice in it. Accepted as such.
-  - `test_talos_guide_prints_the_packaged_file`: `cli.main(["guide"]) == 0`, and the captured stdout equals the packaged file's text.
+  Tests (the guide file is read in tests as `Path(talos.__file__).parent / "data" / "agent_guide.md"`,
+  not through `cmd_guide`'s code path):
+  - `test_checker_flags_unknown_subcommands_and_flags`: input with `` `talos shw` ``, a fenced
+    `talos run --budget-dollars 3 --yes`, and inline `` `--add-hourz 2` ``; `sorted(result) ==
+    ["--add-hourz", "talos run --budget-dollars", "talos shw"]`. Catches a checker that skips
+    inline spans, fenced blocks, flags or bare flags.
+  - `test_checker_follows_line_continuations`: fenced `talos run --challenge knapsack \` then
+    `  --budget-dollars 3`; result `== ["talos run --budget-dollars"]`. Catches per-line scanning
+    that drops continued flags.
+  - `test_checker_ignores_flags_after_a_pipe_and_wildcards`: `` `talos status --json | jq --raw` ``
+    and `` `--add-*` `` give `[]`. Catches false positives on piped tools and flag families.
+  - `test_guide_names_only_real_commands_and_flags`: `unknown_references(guide, build_parser()) == []`.
+  - `test_guide_keeps_its_spending_and_stop_rules`: the guide contains `talos run`,
+    `talos doctor --full` and `kill -INT`. A content guard only: catches deleting the spending or
+    stop section, not wrong advice in it. Accepted as such.
+  - `test_talos_guide_prints_the_packaged_file`: `cli.main(["guide"]) == 0` and stdout equals the
+    file text read by path. Catches printing another data file, or adding/stripping text.
 - [ ] **Step 2: Run** them. Expected: FAIL (no `guide` subcommand, no file).
-- [ ] **Step 3: Write `talos/data/agent_guide.md`** with the seven sections of spec "Guide content". Points that must be exact:
-  - **Free:** `talos guide`, `talos demo`, `talos status`, `talos report`, `talos check-updates`, `talos compile --backend local`.
-  - **No compute, one small LLM call:** `talos doctor`.
-  - **Spends:** `talos run`, `talos doctor --full`, `talos compile` on modal or c3.
-  - **Stop:** one `kill -INT <pid>`, worded from the B2 Step 5 outputs. Never `kill -9`.
-  - **Windows:** state what was verified, or say it is unverified.
-  - **Status values:** today's list from `docs/usage.md#talos-status`.
-  - **Report template:** fields outcome, best training delta, held-out result and delta, spend with its `llm_tracking`, package path, next step.
-  - **Troubleshooting link:** `https://github.com/FibonAdithya/talos/blob/main/docs/troubleshooting.md`.
-  - **Direction file:** one worked example, under 15 lines.
-  - **Budget presets:** each labelled MEASURED or `ESTIMATE (unverified)`.
-- [ ] **Step 4: Add** the `guide` subparser (help: `print the guide for coding agents driving Talos`), `cmd_guide`, and the `COMMANDS` entry. Add a line to `README.md` under the intro: `Driving Talos from a coding agent? Tell it: "Run \`talos guide\` and follow it."` Add `### talos guide` and the new `status` arguments to `docs/usage.md`.
+- [ ] **Step 3: Write `talos/data/agent_guide.md`**, sections in this order:
+  1. What Talos does and does not do: never submits; spends the user's LLM and compute money;
+     state lives in the current directory (`talos.config.json`, `.talos/`, `runs/`).
+  2. Spending rules. **Free:** `talos guide`, `talos demo`, `talos status`, `talos show`,
+     `talos diff`, `talos report`, `talos check-updates` (network to GHCR only),
+     `talos compile --backend local`. **No compute, one small LLM call:** `talos doctor`.
+     **Spends:** `talos run`, `talos doctor --full`, `talos compile` on modal or c3. **The user's
+     job:** `talos setup` (interactive, stores credentials). Confirm every budget with the user
+     before a spending command; never pass an `--add-*` flag without asking.
+  3. Starting a job: the minimal `talos run --challenge ... --direction-file ... --budget-... --yes`;
+     the README challenge table by GitHub URL; how to write a direction file with one worked example
+     under 15 lines; budget presets per backend, each MEASURED (with date) or
+     `ESTIMATE (unverified)`, taken from figures already in README/docs; exit codes 0/1/2.
+  4. Monitoring: background launch with output to a log, poll `talos status JOB_ID --json`; the
+     fields to read (`status`, `stop_reason`, `iteration`, `best`, `budget.*.left`,
+     `last_event_ts`); the status values from `docs/json-output.md`, including the
+     no-lock-file caveat for `researching`; stop with one `kill -INT <pid>`, worded from the B2
+     Step 5 outputs; never `kill -9` or a bare `kill`; Windows stop stated as unverified;
+     resume with `talos run --resume JOB_ID`.
+  5. Reading results: `talos show JOB_ID --json`, `talos diff JOB_ID`, the package
+     (`runs/<job_id>/package/`: `README.md`, `scores.md`, `hypotheses.md`, `report.html`,
+     `submission/`); `won` vs `exhausted` for submission; held-out status and worst-track delta.
+     No "noise ratio".
+  6. Reporting back: template with outcome, best training delta, worst track, held-out status and
+     delta, LLM spend with whether it is measured (`llm_priced`), estimated compute spend, package
+     path, suggested next step.
+  7. Troubleshooting: `talos doctor` first, then
+     `https://github.com/FibonAdithya/talos/blob/main/docs/troubleshooting.md`; JSON schema at
+     `https://github.com/FibonAdithya/talos/blob/main/docs/json-output.md`.
+- [ ] **Step 4: Add** the `guide` subparser (help `print the guide for coding agents driving
+  Talos`), `cmd_guide`, the `COMMANDS` entry. README line under the intro:
+  `Driving Talos from a coding agent? Tell it: "Run \`talos guide\` and follow it."`
+  `docs/usage.md`: command table row and `### talos guide`.
 - [ ] **Step 5: Run** `make check PYTHON=.venv/bin/python`. Expected: PASS.
-- [ ] **Step 6: Mutation check.** (a) Rename `--budget-iterations` to `--budget-iters` in the parser: `test_guide_names_only_real_commands_and_flags` fails. (b) Make `cmd_guide` read `rust_rules.md`: the print test fails. (c) Make the checker return `[]` always: the checker test fails. Restore each one.
-- [ ] **Step 7: Commit** `talos/data/agent_guide.md tests/test_guide.py talos/cli.py README.md docs/usage.md`, message `feat: talos guide prints a guide for any coding agent (#71)`.
+- [ ] **Step 6: Mutation check** (`PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=$(mktemp -d)`):
+  (a) rename `--budget-iterations` to `--budget-iters` in the parser →
+  `test_guide_names_only_real_commands_and_flags` fails; (b) `cmd_guide` reads `rust_rules.md` →
+  the print test fails; (c) the checker returns `[]` → the checker tests fail; (d) the checker
+  scans line by line without joining continuations → the continuation test fails. Restore each.
+- [ ] **Step 7: Commit** `talos/data/agent_guide.md tests/test_guide.py talos/cli.py README.md docs/usage.md`,
+  message `feat: talos guide prints a guide for any coding agent (#71)`.
 
 ### Task B4: two-agent trial
 
-**Files:**
-- Create: `docs/ai/reports/2026-10-27-agent-guide-trial.md`. Stage this file only: `docs/ai/reports/` holds other untracked work that must stay out of the commit.
+**Files:** Create `docs/ai/reports/2026-10-27-agent-guide-trial.md`. Stage this file only.
 
-- [ ] **Step 1: Throwaway clone.**
-  - Run `git clone <repo path> $SCRATCH/trial && cd $SCRATCH/trial && git switch agent-guide && uv venv && uv pip install -e .`.
-  - Confirm it has no `talos.config.json` and no `.talos/`.
-  - Each agent gets its own fresh clone (`trial-claude`, `trial-codex`), so one agent's `runs/` does not affect the other.
-- [ ] **Step 2: Claude Code.** Run it in the background with a 900 s timeout, output to `$SCRATCH/trial-claude.log`:
-  `cd $SCRATCH/trial-claude && PATH=$PWD/.venv/bin:$PATH timeout 900 claude -p "Run \`talos guide\` and follow it to run the Talos demo, then report back to me as the guide says." --allowedTools "Bash(talos:*)" Read Grep Glob`.
-- [ ] **Step 3: Codex.** Same setup, in `trial-codex`:
-  `timeout 900 codex exec --sandbox workspace-write -C $SCRATCH/trial-codex "<same prompt>"`.
-- [ ] **Step 4: Write the report.** Caveat for the report: both CLIs also load the owner's global instructions (`~/.claude/CLAUDE.md`, `~/.codex/`), so this is not a clean-room agent. Say so. For each agent: the commands it ran, where it got stuck or guessed, whether its final report followed the template, and its wall time (MEASURED). Fix the guide for each problem found. Re-run both once, then append the re-run results.
-- [ ] **Step 5: Commit** the report and any guide fix, message `docs: two-agent trial of talos guide against the demo (#71)`.
-- [ ] **Step 6: PR.** Push and open the PR (closes #71), with the trial summary in the body. Follow the `review-pr` loop to merge.
+- [ ] **Step 1: Throwaway clones.** For each agent: `git clone /home/fibonadithya/TIG/Talos-guide71
+  $SCRATCH/trial-<agent>`, check out `agent-guide`, `uv venv` and `uv pip install -e .`. Confirm no
+  `talos.config.json` and no `.talos/`.
+- [ ] **Step 2: Claude Code,** background, 900 s timeout, stdin from `/dev/null`, output to
+  `$SCRATCH/trial-claude.log`:
+  `cd $SCRATCH/trial-claude && PATH=$PWD/.venv/bin:$PATH timeout 900 claude -p "<prompt>" --allowedTools "Bash(talos:*)" Read Grep Glob < /dev/null`.
+- [ ] **Step 3: Codex,** same setup in `trial-codex`:
+  `PATH=$SCRATCH/trial-codex/.venv/bin:$PATH timeout 900 codex exec --sandbox workspace-write -C $SCRATCH/trial-codex "<prompt>" < /dev/null`.
+- Prompt for both: "Run `talos guide` and follow it to run the Talos demo, then report back to me as
+  the guide says."
+- [ ] **Step 4: Report.** Both CLIs load the owner's global instructions, so this is not a
+  clean-room agent; say so. Per agent: commands run, where it got stuck or guessed, whether the
+  report followed the template, wall time (MEASURED). Fix the guide, re-run both once, append.
+- [ ] **Step 5: Commit** the report and any guide fix:
+  `docs: two-agent trial of talos guide against the demo (#71)`.
+- [ ] **Step 6: PR** (closes #71) with the trial summary; `review-pr` loop to merge.
 
 ---
 
