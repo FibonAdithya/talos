@@ -1,6 +1,8 @@
 """`talos status`, `talos show` and `talos diff`: read-only views of runs/ (issue #68)."""
+import io
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -128,6 +130,23 @@ def test_inspect_commands_write_nothing(tmp_path, monkeypatch):
         cli.main(argv)
     assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before
     assert all(p.stat().st_mtime_ns == m for p, m in mtimes.items())
+
+
+@pytest.mark.parametrize("argv, expected", [(["status", "J"], "cap ∞"),
+                                            (["show", "J"], "title: keep w ≤ cap"),
+                                            (["diff", "J"], "+// w ≤ cap")])
+def test_inspect_text_survives_a_cp1252_stdout(argv, expected, tmp_path, monkeypatch):
+    # On Windows a piped or redirected stdout (a coding agent reading the output) is cp1252,
+    # which has no ∞ or ≤. mutation: dropping the UTF-8 reconfigure raises UnicodeEncodeError
+    make_run(tmp_path / "runs" / "J", [{"iteration": 1, "title": "keep w ≤ cap"}], best=1,
+             iteration_files={1: {"mod.rs": "// w ≤ cap\n"}})
+    monkeypatch.chdir(tmp_path)
+    buf = io.BytesIO()
+    out = io.TextIOWrapper(buf, encoding="cp1252", newline="\n")
+    monkeypatch.setattr(sys, "stdout", out)
+    assert cli.main(argv) == 0
+    out.flush()
+    assert expected in buf.getvalue().decode("utf-8")
 
 
 def test_inspect_commands_need_no_config_or_network(tmp_path, monkeypatch, capsys):

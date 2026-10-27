@@ -1339,10 +1339,19 @@ def _print_json(obj: dict) -> None:
     print(json.dumps(obj, indent=1))
 
 
+def _utf8_stdout() -> None:
+    """Write stdout as UTF-8. On Windows a piped or redirected stdout uses the ANSI code page
+    (cp1252), which cannot encode ∞, LLM-written titles or source diffs."""
+    encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
+    if encoding != "utf8" and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
+
 def cmd_status(args, ask) -> int:
     """Lists the jobs under runs/, or one job's detail. Reads runs/ only."""
     from talos import inspect_run
 
+    _utf8_stdout()
     root = Path.cwd() / "runs"
     if args.job_id is not None:
         try:
@@ -1373,6 +1382,7 @@ def cmd_show(args, ask) -> int:
     """One iteration's hypothesis, outcome, scores and files. Reads runs/ only."""
     from talos import inspect_run
 
+    _utf8_stdout()
     try:
         run = inspect_run.load_run(Path.cwd() / "runs", args.job_id)
         detail = inspect_run.iteration_detail(run, args.iteration)
@@ -1390,6 +1400,7 @@ def cmd_diff(args, ask) -> int:
     """One iteration's unified diff against the baseline or its parent. Reads runs/ only."""
     from talos import inspect_run
 
+    _utf8_stdout()
     try:
         run = inspect_run.load_run(Path.cwd() / "runs", args.job_id)
         text = inspect_run.iteration_diff(run, args.iteration, args.against)
