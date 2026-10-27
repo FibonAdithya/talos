@@ -147,8 +147,20 @@ class Loop:
                 self._event("rate_limited", wait_s=self.t.rate_limit_wait_s)
                 self.sleep(self.t.rate_limit_wait_s)
                 self._check_budget()  # a stop or an hours cap must land during a rate-limit storm
-        self._charge_llm(c.usage.cost_usd)
+            except ProviderError as e:
+                # A failed CLI call can still have spent money; count it before the error goes
+                # on to whichever caller fails the iteration or stops the run.
+                self._charge_call(e.cost_usd, e.cost_unknown)
+                raise
+        self._charge_call(c.usage.cost_usd, c.cost_unknown)
         return c
+
+    def _charge_call(self, cost_usd: float | None, cost_unknown: str | None) -> None:
+        """Charge one single-shot call, or record that a call which may have cost something
+        has no figure, so an uncounted call never reads as a free one."""
+        if cost_unknown is not None:
+            self._event("llm_cost_unknown", reason=cost_unknown)
+        self._charge_llm(cost_usd)
 
     def _charge_llm(self, cost_usd: float | None) -> None:
         """Add one LLM call's cost to the job's spend and persist it. Single-shot calls come

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import tempfile
 from pathlib import Path
@@ -9,6 +10,26 @@ from pathlib import Path
 from talos.executables import argv0
 from talos.providers import ProviderAuthError, ProviderError, ProviderTimeout
 from talos.types import Completion, Usage
+
+
+NO_COST = "claude printed no total_cost_usd"
+
+
+def session_cost(stdout: str) -> float | None:
+    """total_cost_usd from `claude -p --output-format json`: the CLI's own estimate of the call
+    or session at API list prices. Single-shot calls (ClaudeCli.complete) and agentic sessions
+    (talos/agentic.py) both charge it. None when stdout is not that result or the figure is not
+    a finite, non-negative number. The agentic path reads it from the CLI's full stdout, never
+    the transcript file, which _TRANSCRIPT_CAP may have cut."""
+    try:
+        cost = json.loads(stdout)["total_cost_usd"]
+    except (ValueError, KeyError, TypeError, IndexError):
+        return None
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    if not math.isfinite(cost) or cost < 0:
+        return None
+    return float(cost)
 
 
 class ClaudeCli:
@@ -35,17 +56,23 @@ class ClaudeCli:
             except FileNotFoundError:
                 raise ProviderAuthError("claude CLI not found on PATH; install Claude Code") from None
             except subprocess.TimeoutExpired:
-                raise ProviderTimeout(f"claude CLI timed out after {self.timeout_s}s") from None
+                # The json format prints its result only at the end, so the cost is lost.
+                msg = f"claude CLI timed out after {self.timeout_s}s"
+                raise ProviderTimeout(msg, cost_unknown=msg) from None
+        # Read before the exit code: a call that fails can still have cost money.
+        cost = session_cost(r.stdout or "")
+        unknown = NO_COST if cost is None else None
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "")[-500:]
             if "login" in err.lower() or "auth" in err.lower():
-                raise ProviderAuthError(f"claude CLI not logged in: {err}")
-            raise ProviderError(f"claude CLI failed: {err}")
+                raise ProviderAuthError(f"claude CLI not logged in: {err}", cost_usd=cost,
+                                        cost_unknown=unknown)
+            raise ProviderError(f"claude CLI failed: {err}", cost_usd=cost, cost_unknown=unknown)
         try:
             data = json.loads(r.stdout)
         except json.JSONDecodeError:
-            return Completion(text=r.stdout, usage=Usage())
+            return Completion(text=r.stdout, usage=Usage(), cost_unknown=unknown)
         u = data.get("usage") or {}
         usage = Usage(int(u.get("input_tokens", 0)), int(u.get("output_tokens", 0)),
-                      cost_usd=data.get("total_cost_usd"))
-        return Completion(text=data.get("result", ""), usage=usage)
+                      cost_usd=cost)
+        return Completion(text=data.get("result", ""), usage=usage, cost_unknown=unknown)

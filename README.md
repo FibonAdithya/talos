@@ -683,6 +683,10 @@ One line per job under `runs/`:
 20260917-101006-knapsack: won it=1 llm=$0.02 compute=$1.28
 ```
 
+LLM spend reads `llm=not tracked` for a `codex-cli` job and `llm=unpriced` for a model with
+no price-table entry, as in the status line during a run. A job whose `job.json` cannot be
+read shows the dollar figure followed by `(provider unknown)`.
+
 Status is one of `queued`, `measuring_baseline`, `researching`, `confirming`, `won`,
 `exhausted` (a budget ran out; resumable with `--add-*`), `cancelled` (Ctrl-C), `paused`
 (the compute backend was unreachable) or `failed` (the reason is in `state.json` and the last
@@ -794,9 +798,10 @@ table is shown as `unpriced`, and `--budget-usd` cannot be enforced for it: add
 cost at all and is shown as `not tracked`.
 
 `--budget-usd` is checked before each LLM call or agentic session, so the call that crosses
-the cap still finishes; the run stops before the next one. An agentic `claude` session killed
-at its 30-minute timeout prints no cost, so it is not counted; the timeline records it as an
-`llm_cost_unknown` event.
+the cap still finishes; the run stops before the next one. A `claude-cli` call that fails is
+still charged the cost it printed. A call or agentic session killed at its 30-minute timeout
+prints no cost, so it is not counted; the timeline records it, and any other call that ends
+without a cost, as an `llm_cost_unknown` event.
 
 Compute spent by `talos compile` from the agentic sandbox is not counted against
 `--budget-compute-usd`. On C3 each of those is one job with the fixed overhead described

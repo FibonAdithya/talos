@@ -269,3 +269,78 @@ def test_codex_cli_sends_the_prompt_on_stdin_not_argv(tmp_path):
     CodexCli(model="gpt-5.5", run=run).complete("SYS", big)
     assert max(len(a) for a in seen["cmd"]) < 131072
     assert seen["cmd"][-1] == "-" and "SYS" in seen["input"] and big in seen["input"]
+
+
+def _claude_run(returncode, stdout="", stderr=""):
+    def run(cmd, **kw):
+        class R:
+            pass
+        r = R()
+        r.returncode, r.stdout, r.stderr = returncode, stdout, stderr
+        return r
+    return run
+
+
+def test_claude_cli_failed_call_carries_the_cost_it_printed():
+    # issue #74. mutation: checking returncode before reading stdout drops the 0.75
+    run = _claude_run(1, stdout=json.dumps({"is_error": True, "result": "overloaded",
+                                            "total_cost_usd": 0.75}), stderr="overloaded")
+    with pytest.raises(ProviderError, match="claude CLI failed") as ei:
+        ClaudeCli(model="m", run=run).complete("SYS", "USER")
+    assert ei.value.cost_usd == 0.75 and ei.value.cost_unknown is None
+
+
+def test_claude_cli_failed_call_without_a_cost_says_so():
+    # issue #74. mutation: leaving cost_unknown unset on a failure hides the uncounted call
+    run = _claude_run(1, stdout="", stderr="overloaded")
+    with pytest.raises(ProviderError) as ei:
+        ClaudeCli(model="m", run=run).complete("SYS", "USER")
+    assert ei.value.cost_usd is None
+    assert "no total_cost_usd" in ei.value.cost_unknown
+
+
+def test_claude_cli_timeout_marks_the_cost_unknown():
+    # issue #74. mutation: a bare ProviderTimeout leaves no trace of the spend
+    import subprocess
+
+    def run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    with pytest.raises(ProviderTimeout) as ei:
+        ClaudeCli(model="m", run=run, timeout_s=7).complete("SYS", "USER")
+    assert ei.value.cost_usd is None and "timed out after 7s" in ei.value.cost_unknown
+
+
+def test_codex_cli_timeout_does_not_claim_an_unknown_cost():
+    # codex reports no cost at all; the CLI shows its spend as "not tracked" instead.
+    # mutation: marking codex timeouts as cost-unknown floods the timeline with noise
+    import subprocess
+
+    def run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+    with pytest.raises(ProviderTimeout) as ei:
+        CodexCli(model="m", run=run, timeout_s=7).complete("SYS", "USER")
+    assert ei.value.cost_usd is None and ei.value.cost_unknown is None
+
+
+def test_claude_cli_missing_binary_is_not_an_unknown_cost():
+    # no process ran, so nothing was spent. mutation: marking every failure cost-unknown
+    def run(cmd, **kw):
+        raise FileNotFoundError("claude")
+    with pytest.raises(ProviderAuthError) as ei:
+        ClaudeCli(model="m", run=run).complete("SYS", "USER")
+    assert ei.value.cost_unknown is None
+
+
+@pytest.mark.parametrize("stdout", [json.dumps({"result": "the code"}), "plain text",
+                                    json.dumps({"result": "x", "total_cost_usd": float("nan")})])
+def test_claude_cli_success_without_a_cost_says_so(stdout):
+    # issue #74. mutation: returning cost_usd=None with no marker reads as a free call
+    c = ClaudeCli(model="m", run=_claude_run(0, stdout=stdout)).complete("SYS", "USER")
+    assert c.usage.cost_usd is None and "no total_cost_usd" in c.cost_unknown
+
+
+def test_claude_cli_success_with_a_cost_is_not_unknown():
+    # mutation: setting cost_unknown unconditionally records a spurious event per call
+    stdout = json.dumps({"result": "x", "total_cost_usd": 0.0})
+    c = ClaudeCli(model="m", run=_claude_run(0, stdout=stdout)).complete("SYS", "USER")
+    assert c.usage.cost_usd == 0.0 and c.cost_unknown is None

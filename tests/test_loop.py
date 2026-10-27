@@ -2089,3 +2089,59 @@ def test_charge_llm_persists_before_the_iteration_ends(tmp_path):
     loop._charge_llm(0.0)
     loop._charge_llm(None)
     assert json.loads((tmp_path / "state.json").read_text())["spend"]["llm_usd"] == 0.5
+
+
+def _timeline(tmp_path):
+    return [json.loads(ln) for ln in (tmp_path / "timeline.jsonl").read_text().splitlines()]
+
+
+def test_failed_call_that_printed_a_cost_is_charged(tmp_path):
+    # issue #74: a claude-cli call that exits non-zero still cost money. The run stops on the
+    # error, and the cost is in state.json. mutation: charging only on success leaves 0.0
+    loop, fp, fb, store = make(tmp_path, raising(ProviderError("claude CLI failed: x",
+                                                               cost_usd=0.75)))
+    st = loop.run()
+    assert st.status == "failed" and st.stop_reason == "provider: claude CLI failed: x"
+    assert json.loads((tmp_path / "state.json").read_text())["spend"]["llm_usd"] == 0.75
+
+
+def test_timed_out_call_records_an_unknown_cost_and_the_run_carries_on(tmp_path):
+    # issue #74. mutation: not recording the event on a raised ProviderTimeout leaves no trace
+    loop, fp, fb, store = make(tmp_path, raising(
+        hyp("a"), ProviderTimeout("claude CLI timed out after 7s",
+                                  cost_unknown="claude CLI timed out after 7s"),
+        hyp("b"), edit(5)))
+    st = loop.run()
+    assert st.status == "won"
+    unknown = [e for e in _timeline(tmp_path) if e["kind"] == "llm_cost_unknown"]
+    assert [e["reason"] for e in unknown] == ["claude CLI timed out after 7s"]
+
+
+def test_completion_without_a_cost_records_an_unknown_cost(tmp_path):
+    # issue #74: exit 0 with no total_cost_usd. mutation: skipping a None cost silently
+    from talos.types import Completion, Usage
+
+    def script(system, user):
+        return Completion(text="not json", usage=Usage(), cost_unknown="no total_cost_usd")
+
+    class Once(FakeProvider):
+        def complete(self, system, user):
+            self.calls.append((system, user))
+            return script(system, user)
+
+    b = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, ["unused"], budget=b)
+    loop.provider = Once([])
+    loop.run()
+    unknown = [e for e in _timeline(tmp_path) if e["kind"] == "llm_cost_unknown"]
+    assert unknown and all(e["reason"] == "no total_cost_usd" for e in unknown)
+    assert len(unknown) == len(loop.provider.calls)
+
+
+def test_provider_error_without_cost_fields_records_nothing(tmp_path):
+    # an HTTP provider's error carries neither field. mutation: recording an unknown cost for
+    # every error (cost_unknown or "...") puts a spurious event on the timeline
+    loop, fp, fb, store = make(tmp_path, raising(ProviderError("boom")))
+    loop.run()
+    assert not [e for e in _timeline(tmp_path) if e["kind"] == "llm_cost_unknown"]
+    assert json.loads((tmp_path / "state.json").read_text())["spend"]["llm_usd"] == 0.0
