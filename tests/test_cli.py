@@ -2389,6 +2389,21 @@ def test_deploy_without_the_modal_extra_names_the_install_command(tmp_path, monk
     assert rc == 2 and "talos deploy needs the modal extra" in err
 
 
+def test_deploy_command_reports_a_failed_modal_deploy(tmp_path, monkeypatch, capsys):
+    from talos.deploy_digest import marker_name
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("talos.extras.importlib.util.find_spec", lambda name, *a, **k: object())
+
+    def fail(*a, **k):
+        raise ConfigError("modal deploy failed: boom")
+    monkeypatch.setattr(cli, "deploy_bench", fail)
+    rc = cli.main(["deploy"])
+    out, err = capsys.readouterr()
+    # mutation: not catching the failure ends in a traceback; printing "Deployed" anyway hides it
+    assert rc == 2 and "modal deploy failed: boom" in err
+    assert marker_name() not in out
+
+
 def test_deploy_uses_the_running_interpreters_modal(monkeypatch):
     import shutil
     import sys
