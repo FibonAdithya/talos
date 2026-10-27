@@ -69,7 +69,7 @@ Talos writes no lock file, so compare `last_event_ts` with the current time.
 | `best` | object or null | the current best candidate; null with no candidate |
 | `best.iteration` | int | its iteration |
 | `best.title` | string | its hypothesis title |
-| `best.mean_rel_delta` | float | its mean training delta vs the baseline |
+| `best.mean_rel_delta` | float or null | its mean training delta vs the baseline; null only for a state.json whose best has no recorded delta (Talos always writes one) |
 | `best.holdout_status` | string | `confirmed`, `false_positive` (its held-out run failed; the best is not cleared) or `not_scored` |
 | `best.holdout_mean_rel_delta` | float or null | its held-out mean delta, whether it passed or failed; null when not scored |
 | `budget` | object | the caps after any `--add-*` extensions, and spend |
