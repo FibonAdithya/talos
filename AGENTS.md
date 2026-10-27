@@ -134,7 +134,7 @@ progress.
    (`modal_app/talos_bench.py::content_hash`) and the baseline cache key. The
    exit codes in `talos/inside.py` were read from `tig-runtime` at that
    commit. Bumping either pin silently changes what every cached baseline
-   meant, and the Modal app must be redeployed (`talos setup`) before any run.
+   meant, and the Modal app must be redeployed (`talos deploy`) before any run.
    The baseline cache key also includes the hyperparameter map
    (`talos/baseline.py::effective_hyperparameters`); a key computed without one
    is unchanged from before the map existed.
@@ -267,6 +267,7 @@ nobody.
 | Wizard menus and the yes/no confirmation | `talos/wizard.py`; the `run` wizard and job summary in `talos/cli.py::cmd_run` |
 | `talos demo`: scripted provider, scores, package guide | `talos/demo.py`, `talos/cli.py::cmd_demo` |
 | `talos doctor`: health checks and `--full` | `talos/doctor.py` |
+| Where config, secrets and runs live (the workspace); `--workspace`; optional extras | `talos/workspace.py`, `talos/extras.py`, `docs/usage.md#workspace` |
 | Per-challenge pins, beat rules, hardware | `talos/challenges.py::CHALLENGES` |
 | One iteration of the research loop | `talos/loop.py::Loop.iterate`, confirmation in `talos/loop.py::Loop._confirm` |
 | Lineage tree, chains, annealing accept rule and temperature | `talos/lineage.py::decide`, `talos/lineage.py::temperature`, `talos/loop.py::Loop._anneal_step` |

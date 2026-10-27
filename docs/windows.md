@@ -5,39 +5,42 @@ in the [README](../README.md) instead.) CI runs the full test suite on `windows-
 every pull request. No maintainer has run a real job end to end on a Windows machine yet, so
 if something fails there, please open an issue with the command and its output.
 
-Every block below is for PowerShell and can be pasted whole. The commands call
-`.venv\Scripts\talos.exe` directly, so they work without activating the virtualenv and
-without changing PowerShell's script execution policy.
+Every block below is for PowerShell and can be pasted whole.
 
-## 1. Install Git and Python
+## 1. Install uv
 
 ```powershell
-winget install --id Git.Git -e --source winget
-winget install --id Python.Python.3.12 -e --source winget
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Close PowerShell and open a new window, so that `git` and `python` are on `PATH`.
-
-If `winget` is not available, install [Git for Windows](https://git-scm.com/download/win)
-and [Python](https://www.python.org/downloads/windows/) from their installers. In the
-Python installer, tick "Add python.exe to PATH".
+Close PowerShell and open a new window, so that `uv` is on `PATH`. uv downloads the Python
+it needs, so you do not install Python separately. Other ways to install uv are on
+[its installation page](https://docs.astral.sh/uv/getting-started/installation/).
 
 ## 2. Install Talos
 
 ```powershell
-git clone https://github.com/FibonAdithya/talos.git
-cd talos
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -e .
-.venv\Scripts\talos.exe --help
+uv tool install --python 3.12 'talos-tig[modal,anthropic]'
+uv tool update-shell
 ```
 
-Run every later block from this `talos` folder.
+Close PowerShell and open a new window, then check:
+
+```powershell
+talos --version
+```
+
+`uv tool update-shell` puts uv's tool directory on `PATH`.
+The `modal` extra is for the Modal backend and the `anthropic` extra is for the `anthropic`
+provider; the [README](../README.md#install) says which extras you need and why to name them
+all in one command. Talos keeps its config, secrets and runs in `%USERPROFILE%\.talos\workspace`
+unless you pass `--workspace` (see [Workspace](usage.md#workspace)). This install command has not
+been verified on Windows.
 
 ## 3. Try it with no accounts
 
 ```powershell
-.venv\Scripts\talos.exe demo
+talos demo
 ```
 
 See [Try it with no accounts](../README.md#try-it-with-no-accounts) for what it prints.
@@ -48,7 +51,7 @@ Pick a [compute backend](../README.md#pick-a-compute-backend) and an
 [LLM provider](../README.md#pick-an-llm-provider), then:
 
 ```powershell
-.venv\Scripts\talos.exe setup
+talos setup
 ```
 
 It asks the same questions on every OS; they are listed under
@@ -58,8 +61,8 @@ It asks the same questions on every OS; they are listed under
 ## 5. Check the setup, then run the smoke check once
 
 ```powershell
-.venv\Scripts\talos.exe doctor
-.venv\Scripts\talos.exe doctor --full
+talos doctor
+talos doctor --full
 ```
 
 `doctor` spends no compute; its provider check makes one small LLM test call. `doctor --full`
@@ -72,40 +75,29 @@ on C3 only (MEASURED 2026-09-15: £0.02 and 12 min 20 s); see [`talos doctor`](u
 Interactively:
 
 ```powershell
-.venv\Scripts\talos.exe run
+talos run
 ```
 
 Or with every answer given as a flag:
 
 ```powershell
-.venv\Scripts\talos.exe run --challenge knapsack --direction "Try a tighter upper bound in the branch-and-bound pruning" --budget-usd 20 --budget-hours 4 --budget-compute-usd 10 --yes
+talos run --challenge knapsack --direction "Try a tighter upper bound in the branch-and-bound pruning" --budget-usd 20 --budget-hours 4 --budget-compute-usd 10 --yes
 ```
 
 List jobs, and resume one by its id:
 
 ```powershell
-.venv\Scripts\talos.exe status
-.venv\Scripts\talos.exe run --resume 20260917-101006-knapsack
+talos status
+talos run --resume 20260917-101006-knapsack
 ```
 
 [Running a job](usage.md#running-a-job) and the [command reference](usage.md#command-reference)
 apply unchanged.
 
-## Optional: activate the virtualenv
-
-Activation lets you type `talos` instead of `.venv\Scripts\talos.exe`. The first line allows
-the activation script to run in this window only:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
-.venv\Scripts\activate
-talos --help
-```
-
 ## What differs on Windows
 
-- **Modal backend**: nothing extra. `talos setup` runs the `modal` client that was installed
-  into the virtualenv, whether or not the virtualenv is activated.
+- **Modal backend**: the `modal` extra (step 2). `talos setup` and `talos deploy` run the
+  `modal` client that was installed with Talos.
 - **C3 backend**: use a C3 API key. Create one on the
   [C3 dashboard settings page](https://cthree.cloud/dashboard/settings) and paste it at the
   **C3 API key** prompt in `talos setup`. With a key, Talos talks to C3 over HTTPS and nothing
@@ -124,19 +116,19 @@ talos --help
   $env:TALOS_ALLOW_CODEX_AGENTIC = "1"
   ```
 
-- **Secrets**: Windows has no owner-only file permissions, so `.talos\secrets.json` is not
-  restricted to your user the way it is on Linux and macOS (mode `0600`). Keep the repository
-  in a folder only you can read.
+- **Secrets**: Windows has no owner-only file permissions, so `.talos\secrets.json` in the
+  workspace is not restricted to your user the way it is on Linux and macOS (mode `0600`).
+  The default workspace is `%USERPROFILE%\.talos\workspace`, inside your user folder; if you
+  use `--workspace` elsewhere, choose a folder only you can read.
 - **Baseline cache**: `~/.talos/baselines/` is `$env:USERPROFILE\.talos\baselines\`.
 
 ## Using `cmd.exe` instead of PowerShell
 
-The `.venv\Scripts\...` commands are the same. Two things differ:
+The `talos` commands are the same. Setting an environment variable differs:
 
 | PowerShell | `cmd.exe` |
 |---|---|
 | `$env:VAR = "value"` | `set VAR=value` |
-| `.venv\Scripts\activate` | `.venv\Scripts\activate.bat` (no execution policy step) |
 
 For development on Windows, see
 [Development on Windows](maintainers.md#development-on-windows).

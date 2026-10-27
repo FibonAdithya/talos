@@ -26,25 +26,36 @@ three backends.
 
 ## Install
 
-You need Linux, macOS or Windows, Python 3.10 or newer with `pip` and `venv` (on Debian and
-Ubuntu: `sudo apt install python3-venv`), and Git. Nothing Rust- or CUDA-related is needed
-locally: compiling and scoring happen on the compute backend.
+You need Linux, macOS or Windows and [uv](https://docs.astral.sh/uv/). Nothing Rust- or
+CUDA-related is needed locally: compiling and scoring happen on the compute backend.
 
 ```bash
-git clone https://github.com/FibonAdithya/talos.git
-cd talos
-python3 -m venv .venv
-.venv/bin/pip install -e .
-source .venv/bin/activate      # puts `talos` on PATH for this shell
-talos --help
+uv tool install --python 3.12 'talos-tig[modal,anthropic]'
+talos --version
 ```
 
-These commands are for bash or zsh. On Windows, follow [docs/windows.md](docs/windows.md),
-which has every step as PowerShell commands.
+The extras are `modal` (the Modal backend) and `anthropic` (the `anthropic` provider). The
+`c3` and `local` backends and every other provider need none. Name every extra you use in one
+command: MEASURED 2026-10-27, `uv tool install 'talos-tig[anthropic]'` over an install made
+with `[modal]` removed the Modal client. A command that needs a missing extra exits with code
+2 and prints the install command. `pipx install 'talos-tig[modal,anthropic]'` works the same
+way; in a virtual environment, `pip install` does too (Python 3.10 or newer). On Windows, see
+[docs/windows.md](docs/windows.md); to work on Talos itself, see
+[docs/maintainers.md](docs/maintainers.md#development).
 
-`talos setup` and `talos run` read and write `talos.config.json`, `.talos/secrets.json` and
-`runs/` in the **current directory**. Always run Talos from the same directory, normally
-the repository root.
+### Workspace
+
+Talos keeps `talos.config.json`, `.talos/secrets.json` and `runs/` in one workspace
+directory: the one given by `talos --workspace DIR <command>` or `TALOS_WORKSPACE`, else the nearest directory at or above the current one that holds
+`talos.config.json`, else `~/.talos/workspace`. `talos setup` prints `Workspace: <path>`. In a
+fresh clone, `talos --workspace . setup` keeps everything in the clone, as before. See
+[Workspace](docs/usage.md#workspace).
+
+### Upgrading
+
+`uv tool upgrade talos-tig`, then `talos deploy` if you use Modal: the deployed app must be
+built from the same Talos code as the client, so every new version needs a redeploy. Until
+then `talos run` pauses before spending anything and `talos doctor` reports a failure.
 
 ## Try it with no accounts
 
@@ -70,7 +81,7 @@ You can find the code to submit at .../runs/demo-<timestamp>-knapsack/package/su
 ```
 
 followed by a guide to the files in the package. The demo job is written to
-`runs/demo-<timestamp>-<challenge>/`; delete that folder if you do not want `talos status`
+`runs/demo-<timestamp>-<challenge>/` in the workspace; delete that folder if you do not want `talos status`
 to list it.
 
 ## Pick a compute backend
@@ -108,8 +119,8 @@ talos doctor
 
 `talos setup` asks for the backend, provider, model and credentials, checks each one (on Modal
 it also deploys the benchmark app to your account), and only then writes `talos.config.json`
-and `.talos/secrets.json`. Run it again to change provider, model or backend, and on Modal
-after pulling a new version of Talos. Every prompt and check is listed under
+and `.talos/secrets.json` in the workspace. Run it again to change provider, model or backend;
+on Modal, `talos deploy` redeploys after upgrading Talos. Every prompt and check is listed under
 [`talos setup`](docs/usage.md#talos-setup).
 
 `talos doctor` spends no compute, but its provider check makes one small LLM test call. It
@@ -163,7 +174,7 @@ warns before it starts a job on a challenge that is not tested.
 
 ## Where results land
 
-Each job writes to `runs/<job_id>/`. When it stops, `runs/<job_id>/package/` holds the
+Each job writes to `runs/<job_id>/` in the workspace. When it stops, `runs/<job_id>/package/` holds the
 hand-back package: the code to submit in its `submission` folder, per-nonce `scores.md`, the
 `hypotheses.md` log, a one-page `report.html` and a `README.md` with the submission steps.
 You submit it yourself. The full layout is in

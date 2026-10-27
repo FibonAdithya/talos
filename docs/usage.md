@@ -5,11 +5,33 @@ quickstart.
 
 ## Contents
 
+- [Workspace](#workspace)
 - [Running a job](#running-a-job)
 - [Command reference](#command-reference)
 - [Agentic mode](#agentic-mode)
 - [Where results land](#where-results-land)
 - [Budget](#budget)
+
+## Workspace
+
+Talos keeps `talos.config.json`, `.talos/secrets.json` and `runs/` (and `.talos/` caches) in
+one workspace directory. It picks the directory in this order:
+
+1. `TALOS_WORKSPACE`, if set. Except for the three commands named below, it must name an
+   existing directory, else the command exits 2 with `TALOS_WORKSPACE=<value> is not a
+   directory`.
+2. The nearest directory at or above the current directory that holds `talos.config.json`.
+3. `~/.talos/workspace`.
+
+The global flag `talos --workspace DIR <command>` sets `TALOS_WORKSPACE` for that command, so it
+wins over the variable and the other rules. `talos setup`, `talos demo` and `talos run --fake`
+create the workspace if it does not exist; every other command does not, and one that finds no
+`talos.config.json` there says to run `talos setup`. `talos setup` prints `Workspace: <path>`, and
+`talos run` and `talos demo` print absolute paths for the results.
+
+Paths you pass as `--dir` or `--direction-file` are relative to the current directory, not the
+workspace. To keep state in a clone, as earlier versions did, run `talos --workspace . setup`
+there; from then on, any directory inside the clone finds it by rule 2.
 
 ## Running a job
 
@@ -46,7 +68,7 @@ Job summary
   hyperparameters: 1/1 tracks from mainnet
   budget:    1 iterations, compute $20.00
   backend:   fake (in-process, no charge)
-  results:   runs/20261026-142231-knapsack/
+  results:   /home/you/.talos/workspace/runs/20261026-142231-knapsack
 ```
 
 It then asks `Start this job?` (default yes). Answering no prints `Not started.`, exits 0 and
@@ -136,7 +158,8 @@ same instead of telling you to submit it.
 
 | Command | What it does |
 |---|---|
-| `talos setup` | One-time configuration: backend, LLM provider, credentials. Validates them and deploys the Modal app. |
+| `talos setup` | One-time configuration: backend, LLM provider, credentials. Validates them and deploys the Modal app. Prints the workspace it uses. |
+| `talos deploy` | Redeploys the Modal app from the installed Talos code. Run it after upgrading Talos. |
 | `talos run` | Starts or resumes a research job and writes its package when it stops. |
 | `talos compile` | Compiles a directory of algorithm files on the configured backend and prints the compiler output. Scores nothing. |
 | `talos status [JOB_ID]` | Lists every job under `runs/`, or one job's detail with `JOB_ID`; `--json` for scripts. |
@@ -193,14 +216,30 @@ On success it prints ``Setup complete. Run `talos run` to start a job.`` and wri
 
 If any check fails it prints the reason, exits non-zero, and writes neither file.
 
-Run `talos setup` again to change provider, model or backend. On the Modal backend, also
-run it again after pulling a new version of Talos: the deployed app must match the client,
-because the score function's arguments change between versions. A client that reaches an
-older deploy stops with a message naming `talos setup`. The C3 backend ships its code with
+Run `talos setup` again to change provider, model or backend. After upgrading Talos on the
+Modal backend, run [`talos deploy`](#talos-deploy) instead. The C3 backend ships its code with
 each job, so it needs no redeploy.
 
 Exit code 0 on success, 1 when a credential or backend check fails, 2 for an unknown
-backend or provider.
+backend or provider, or for a backend or provider whose extra is not installed.
+
+### `talos deploy`
+
+```bash
+talos deploy
+```
+
+No flags. It deploys the `talos-bench` app to your Modal account from the installed Talos
+code and prints `Deployed talos-bench (deployed_<12 hex digits>)`. It needs the `modal` extra,
+reads no config, and keeps the Modal token that `talos setup` set. The function name ends in
+a digest of the code the app was built from. With the Modal backend, `talos run` pauses before
+any spend, and `talos compile` refuses, when the deployed digest differs from the client's;
+the message says `the deployed talos-bench app was built from different Talos code than this
+client; run `talos deploy``. `talos doctor` reports the same as `backend: FAIL`. Every Talos
+version needs its own deploy, so run `talos deploy` after each upgrade. The C3 and local
+backends need no deploy.
+
+Exit code 0 on success, 2 when the `modal` extra is missing.
 
 ### `talos demo`
 
@@ -249,7 +288,7 @@ The free checks run in this order and print one line each, `name: ok (detail)` o
   `talos/challenges.py`.
 - `images`: the pinned dev image is on GHCR for every challenge.
 
-Most `FAIL` lines name the command that fixes it (such as `talos setup`); the rest say what to check, such as your network, or pass on the backend's own error text. With `--full` a last line, `full`, reports
+Most `FAIL` lines name the command that fixes it (such as `talos setup` or `talos deploy`); the rest say what to check, such as your network, or pass on the backend's own error text. With `--full` a last line, `full`, reports
 the compile and the nonces scored. If a free check failed, `full` is `skip` and does not run.
 The cost it prints is MEASURED 2026-09-15: £0.02 and 12 min 20 s for knapsack on C3;
 for every other challenge and backend it is labelled `ESTIMATE (unverified)` and says
@@ -515,7 +554,7 @@ on to its own time limit and bills for it, which bounds the cost but does not av
 
 ## Where results land
 
-Each job gets a directory under `runs/`:
+Each job gets a directory under `runs/` in the workspace:
 
 | Path | Contents |
 |---|---|
