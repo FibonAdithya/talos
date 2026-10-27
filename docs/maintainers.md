@@ -86,7 +86,9 @@ make check PYTHON=.venv/bin/python
 ```
 
 `make check` runs ruff, pytest without the `live` marker, and the agentify contract check.
-It is the same command CI runs. See `AGENTS.md` for the invariants a change must keep.
+It is what CI's `check` job runs. CI also runs a `wheel` job (build, `scripts/check_wheel.py`,
+install with no extras) that `make check` does not cover. See `AGENTS.md` for the invariants a
+change must keep.
 
 `".[all]"` installs the `modal` and `anthropic` extras, as CI does, because some tests
 import those packages. Run `talos` from the clone with `talos --workspace . <command>` to
