@@ -139,4 +139,4 @@ Talos writes no lock file, so compare `last_event_ts` with the current time.
 | `scores.tables[].mean_rel_delta` | float or null | mean delta over the tracks |
 | `scores.tables[].error_rate` | float or null | fraction of nonces the best failed |
 | `scores.tables[].error` | string or null | why the table could not be computed |
-| `files` | list | paths, relative to the current directory, of the iteration's saved files under `runs/<job_id>/iterations/NNNN/`, plus `runs/<job_id>/best/` for the best; empty when nothing was saved |
+| `files` | list | paths of the iteration's saved files under `runs/<job_id>/iterations/NNNN/`, plus `runs/<job_id>/best/` for the best, relative to the current directory when the workspace is under it and absolute otherwise; empty when nothing was saved |

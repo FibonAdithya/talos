@@ -197,6 +197,9 @@ the PR body. Fix the guide for what the trial shows, then re-run once.
 
 ## PR 3: install from PyPI, state found by walking up (#70)
 
+> Superseded in part by `2026-10-27-pypi-workspace-design.md` (owner's decisions of 2026-10-27:
+> default workspace, optional extras, stale-deploy check, #70 before #71).
+
 ### Workspace resolution
 
 New `talos/workspace.py::find_root(start: Path | None = None) -> Path`:

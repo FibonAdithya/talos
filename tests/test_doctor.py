@@ -149,8 +149,8 @@ def _image_missing(mp, tmp_path):
 
 
 # Worked by hand from talos/challenges.py: 5 CPU challenges x 2 functions, 3 GPU challenges x 3
-# GPUs x 2 functions, and one probe per GPU: 10 + 18 + 3.
-N_MODAL = 31
+# GPUs x 2 functions, one probe per GPU and the deploy marker: 10 + 18 + 3 + 1.
+N_MODAL = 32
 
 
 @pytest.mark.parametrize("backend,provider,breaks,name,needles", [
@@ -161,7 +161,7 @@ N_MODAL = 31
     ("modal", "anthropic", _provider_rejects, "provider",
      ["credential rejected: zz-bad-key", "talos setup"]),
     ("modal", "anthropic", _modal_all_missing, "backend",
-     [str(N_MODAL), "compile_satisfiability", "talos setup"]),
+     [str(N_MODAL), "compile_satisfiability", "talos deploy"]),
     ("modal", "anthropic", _modal_import_error, "backend", ["No module named", "talos setup"]),
     ("c3", "anthropic", _c3_fails, "backend", ["zz-c3", "c3 login"]),
     ("local", "anthropic", _local_fails, "backend", ["zz-docker", "install and start Docker"]),
@@ -228,6 +228,18 @@ def test_modal_function_names_match_register():
     assert set(seen) == set(doctor.modal_function_names())
 
 
+def test_modal_missing_marker_says_stale(tmp_path, monkeypatch, capsys):
+    from talos.deploy_digest import marker_name
+    all_ok(monkeypatch, tmp_path)
+    monkeypatch.setattr(doctor, "modal_lookup", lambda app, name: name != marker_name())
+    rc = cli.main(["doctor"], ask=no_ask)
+    ln = line_for(capsys.readouterr().out, "backend")
+    # mutation: reporting a missing marker as one more missing function hides that the app is
+    # built from other code, or drops the fix
+    assert rc == 1 and ln.startswith("backend: FAIL: ")
+    assert "talos deploy" in ln and "different Talos code" in ln
+
+
 def test_modal_missing_function_fails(tmp_path, monkeypatch, capsys):
     # mutation: ignoring the lookup result (or saying "up to date") passes a stale deploy
     all_ok(monkeypatch, tmp_path)
@@ -236,7 +248,7 @@ def test_modal_missing_function_fails(tmp_path, monkeypatch, capsys):
     rc = cli.main(["doctor"], ask=no_ask)
     ln = line_for(capsys.readouterr().out, "backend")
     assert rc == 1
-    assert ln.startswith("backend: FAIL: ") and gone in ln
+    assert ln.startswith("backend: FAIL: ") and gone in ln and "talos deploy" in ln
     assert "up to date" not in ln
 
 

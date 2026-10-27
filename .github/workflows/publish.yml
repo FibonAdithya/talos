@@ -1,0 +1,57 @@
+# Publishes talos-tig to PyPI when a v* tag is pushed. PyPI trusted publishing: no token is stored.
+# The `pypi` environment and the PyPI-side trusted publisher (repo FibonAdithya/talos, workflow
+# publish.yml, environment pypi) are set up once by the owner.
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v6.8.0
+
+      - name: The tag must equal v + talos.__version__
+        run: |
+          version="$(python -c "import ast; print(ast.literal_eval(next(n.value for n in ast.parse(open('talos/__init__.py').read()).body if isinstance(n, ast.Assign) and n.targets[0].id == '__version__')))")"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match v$version from talos/__init__.py" >&2
+            exit 1
+          fi
+
+      - name: Build and check the wheel
+        run: |
+          uv build
+          python scripts/check_wheel.py dist/*.whl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

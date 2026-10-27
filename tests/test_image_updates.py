@@ -131,7 +131,7 @@ def test_manual_check_needs_no_config_and_reports_each_challenge(tmp_path, monke
     for name in CHALLENGES:
         assert f"{name}: configured 0.0.8," in out
     assert "newest published 0.0.10 (update available)" in out
-    assert "MONOREPO_REF" in out and "talos setup" in out
+    assert "MONOREPO_REF" in out and "redeploy Modal with `talos deploy` if used" in out
     assert not list(tmp_path.iterdir())
 
 

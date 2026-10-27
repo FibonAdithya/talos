@@ -237,8 +237,8 @@ def _label(run: Run, node_id: int) -> str:
 
 def _rel(path: Path) -> str:
     try:
-        return path.relative_to(Path.cwd()).as_posix()
-    except ValueError:
+        return path.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:  # the workspace is not under the current directory
         return path.as_posix()
 
 
