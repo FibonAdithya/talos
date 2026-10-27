@@ -32,7 +32,9 @@ When two documents disagree, the one higher in this list wins.
    code does not have, the document is wrong. The per-challenge facts (pinned
    monorepo commit, dev image tag, beat rule, hardware class) are code:
    `talos/challenges.py`.
-2. **`README.md`** — setup and the commands you run day to day.
+2. **`README.md`** (quickstart), **`docs/usage.md`** (full command reference),
+   **`docs/troubleshooting.md`**, **`docs/windows.md`** and **`docs/maintainers.md`** —
+   setup and the commands you run day to day.
 3. **`docs/architecture.md`**, **`docs/compute-backends.md`** and
    **`docs/json-output.md`** — the research loop, the guards between build and
    scoring, the agentic sandbox, the baseline cache, how Modal, C3 and local
@@ -199,7 +201,7 @@ executable definition of a valid change.
 
 `make check` is ruff lint, pytest with the `live` marker excluded, and the
 agentify contract self-check. `tests/test_live.py` spends real Modal budget, real
-C3 credit or LLM tokens and is run by hand (see `README.md#live-smoke-tests-maintainers`).
+C3 credit or LLM tokens and is run by hand (see `docs/maintainers.md#live-smoke-tests`).
 
 ## What requires a human
 
@@ -250,7 +252,7 @@ nobody.
 
 | Task | Start here |
 |---|---|
-| Set up and run day-to-day commands | `README.md` |
+| Set up and run day-to-day commands | `README.md`, `docs/usage.md` |
 | Run the gate | `Makefile` |
 | The research loop, its guards, the agentic sandbox, the baseline cache | `docs/architecture.md` |
 | Modal, C3 and local transports, job directories, timings, the dev images | `docs/compute-backends.md` |
@@ -265,7 +267,7 @@ nobody.
 | One iteration of the research loop | `talos/loop.py::Loop.iterate`, confirmation in `talos/loop.py::Loop._confirm` |
 | Lineage tree, chains, annealing accept rule and temperature | `talos/lineage.py::decide`, `talos/lineage.py::temperature`, `talos/loop.py::Loop._anneal_step` |
 | How a candidate is compared to the baseline | `talos/scoring.py::bundle_delta`, `talos/scoring.py::beats` |
-| What a job persists, and the run directory layout | `talos/state.py::JobStore`, `README.md#where-results-land` |
+| What a job persists, and the run directory layout | `talos/state.py::JobStore`, `docs/usage.md#where-results-land` |
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |
 | Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `talos/inside.py` |
 | Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
@@ -277,6 +279,6 @@ nobody.
 | LLM providers and prices | `talos/providers/__init__.py`, `talos/providers/pricing.py::PRICES` |
 | Agentic mode: sandbox and scope check | `talos/agentic.py::sandbox_settings`, `talos/agentic.py::read_back` |
 | Native research scoring: runner, calibration, validation | `talos/native_runner.py::render`, `talos/calibration.py::budgets_us`, `talos/scoring.py::validation_failure`, `talos/loop.py::Loop.calibrate` |
-| Budget rules | `talos/budget.py::exhausted`, `README.md#budget` |
-| Hand-back package contents | `talos/package.py`, `README.md#where-results-land` |
+| Budget rules | `talos/budget.py::exhausted`, `docs/usage.md#budget` |
+| Hand-back package contents | `talos/package.py`, `docs/usage.md#where-results-land` |
 | Tests | `tests/`, one file per module; the manual live smoke test is `tests/test_live.py` |
