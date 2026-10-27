@@ -2,7 +2,7 @@
 
 What a job does from `talos run` to the hand-back package, and the rules that keep a
 candidate's score comparable with the baseline's. For setup and the commands, see
-[README.md](../README.md). For the three compute backends, see
+[README.md](../README.md) and [usage.md](usage.md). For the three compute backends, see
 [compute-backends.md](compute-backends.md).
 
 The design reasoning is in
@@ -271,7 +271,7 @@ disables it.
 ## The agentic sandbox
 
 `--mode agentic` hands each iteration to a headless `claude` or `codex` session in a
-throwaway worktree outside `runs/`. See [Agentic mode](../README.md#agentic-mode) for when to
+throwaway worktree outside `runs/`. See [Agentic mode](usage.md#agentic-mode) for when to
 use it.
 
 With `claude-cli`, Talos writes `.talos/claude-settings.json` in the worktree and passes it
@@ -299,7 +299,7 @@ with `--settings`; the CLI enforces it:
 The `claude-cli` session runs with `--output-format json`, so the agent's standard output kept
 in the iteration directory is the CLI's JSON result. Talos charges the result's `total_cost_usd`
 to the job's LLM spend, reading it from the CLI's full output rather than that saved copy, which
-may be truncated; see the README's budget section. When an iteration fails because the agent
+may be truncated; see [Budget](usage.md#budget). When an iteration fails because the agent
 left nothing to read back, the error names the tool calls the CLI refused, for example
 `agent did not fill in .talos/hypothesis.json; the CLI refused 3 tool calls (Edit x2, Read x1)`.
 

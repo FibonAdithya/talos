@@ -2,7 +2,7 @@
 
 How Talos uses Modal, C3 and local Docker, what a C3 job and a local job cost in time, and
 what maintainers do to keep the C3 and local backends working. For choosing and configuring a backend, see
-[README.md](../README.md#2-pick-a-compute-backend).
+[README.md](../README.md#pick-a-compute-backend).
 
 ## Transports
 
@@ -126,7 +126,7 @@ on the wording seen on 2026-09-23.
 ## C3 job directories
 
 On the C3 backend, each iteration gets `runs/<job_id>/c3/<n>/` in the
-[run directory](../README.md#where-results-land), and the baseline measurement gets
+[run directory](usage.md#where-results-land), and the baseline measurement gets
 `runs/<job_id>/c3/baseline/`. Each holds the files submitted to C3 for that job (a .c3
 config, a job.sh entrypoint, a payload.json, and copies of the modules the container needs)
 and the pulled artifacts, under `<c3-job-id>/artifacts/`. `<c3-job-id>` is C3's own job id,
