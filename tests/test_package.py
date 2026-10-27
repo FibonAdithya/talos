@@ -440,7 +440,9 @@ def test_diff_applies_with_git_and_reproduces_the_candidate(tmp_path, base, cand
     from talos.package import _diff
     (tmp_path / "mod.rs").write_bytes(base.encode())
     (tmp_path / "p.patch").write_bytes(_diff({"mod.rs": base}, {"mod.rs": cand}).encode())
-    r = subprocess.run(["git", "apply", "-p1", "p.patch"], cwd=tmp_path, capture_output=True,
+    # autocrlf off: the Windows runner sets it globally, and git apply would write CRLF
+    r = subprocess.run(["git", "-c", "core.autocrlf=false", "apply", "-p1", "p.patch"],
+                       cwd=tmp_path, capture_output=True,
                        text=True)
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "mod.rs").read_bytes() == cand.encode()
