@@ -441,7 +441,8 @@ to a process that has died.
 credentials or network. Exit code 0, or 1 with a message on stderr for an unknown job id.
 
 Status is one of `queued`, `measuring_baseline`, `researching`, `confirming`, `won`,
-`exhausted` (a budget ran out; resumable with `--add-*`), `cancelled` (Ctrl-C), `paused`
+`exhausted` (a budget ran out; resumable with `--add-*`), `cancelled` (Ctrl-C or one SIGINT, at any
+point; resumable), `paused`
 (the compute backend was unreachable) or `failed` (the reason is in `state.json` and the last
 lines of `timeline.jsonl`).
 
