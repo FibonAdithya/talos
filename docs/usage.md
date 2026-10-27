@@ -256,8 +256,8 @@ talos demo --delay 0               # no pause between event lines
 | `--delay SECONDS` | Pause after each event line (default 0.4; 0 disables). |
 
 Needs no config, account, network or compute backend, and spends nothing: every figure is
-scripted and priced at $0.00. It writes a job to `runs/demo-<timestamp>-<challenge>/`, runs
-the real research loop on it, and prints the event stream, the final status (`won`), the
+scripted and priced at $0.00. It writes a job to `runs/demo-<timestamp>-<challenge>/` in the
+[workspace](#workspace), runs the real research loop on it, and prints the event stream, the final status (`won`), the
 package path, a one-line description of each package file, `talos report <job_id>` and
 `Next: talos setup, then talos doctor`. Exit code 0 on success.
 

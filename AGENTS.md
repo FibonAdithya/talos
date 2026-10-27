@@ -278,6 +278,7 @@ nobody.
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |
 | Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `talos/inside.py` |
 | Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
+| Stale-deploy check before spend; `talos deploy` | `talos/deploy_digest.py`, `talos/bench.py::ModalBench.check_deploy`, `talos/cli.py::cmd_deploy` |
 | C3 client: deploy, poll, pull, cost estimate | `talos/c3_bench.py::C3Bench` |
 | C3 job directory: .c3 config, job.sh, payload.json | `talos/c3_jobdir.py::write_job_dir` |
 | C3 in-container runner: build, score, write results (the local backend runs it too) | `talos/c3_job.py::main` |
