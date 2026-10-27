@@ -66,6 +66,7 @@ Status: won (beat baseline on training and held-out nonces)
 Best delta vs baseline: +4.000%
 LLM spend: $0.00   Compute spend (estimated): $0.00
 Package: .../runs/demo-<timestamp>-knapsack/package
+You can find the code to submit at .../runs/demo-<timestamp>-knapsack/package/submission, fill out the template README.md to make it ready to submit to The Innovation Game!
 ```
 
 followed by a guide to the files in the package. The demo job is written to
