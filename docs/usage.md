@@ -239,7 +239,8 @@ client; run `talos deploy``. `talos doctor` reports the same as `backend: FAIL`.
 version needs its own deploy, so run `talos deploy` after each upgrade. The C3 and local
 backends need no deploy.
 
-Exit code 0 on success, 2 when the `modal` extra is missing.
+Exit code 0 on success. Exit code 2 when the `modal` extra is missing, and also when
+`modal deploy` itself fails (the last part of its output is printed to stderr).
 
 ### `talos demo`
 
