@@ -781,6 +781,14 @@ def test_event_line_scored_prints_percentages():
         "scored -0.020% vs baseline (worst track -0.099%, errors 0.0%)"
 
 
+def test_event_line_scored_says_how_many_nonces_were_not_run():
+    data = {"mean_rel_delta": -0.5, "worst_rel_delta": -0.5, "error_rate": 0.95,
+            "runtime_ratio": None, "not_run": 37}
+    # mutation: without it, "errors 95.0%" reads as 38 measured failures
+    assert cli._event_line("scored", data) == \
+        "scored -50.000% vs baseline (worst track -50.000%, errors 95.0%, 37 not run)"
+
+
 def test_event_line_compile_failed_is_one_line_with_the_first_error():
     # mutation: printing the output as it is spills rustc's multi-line diagnostic over the
     # terminal; taking the last line instead of the first error prints "error: aborting due to"

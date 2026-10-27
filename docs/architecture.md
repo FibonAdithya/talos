@@ -60,7 +60,9 @@ the job's original budget plus its extensions. `job.json` is not rewritten.
 
 Baseline and candidates are always scored on the same nonces, fuel and hardware class, and
 on the same hyperparameters except in a `--start template` job, so the delta between them
-measures the edit and nothing else. In a template job the candidates run without
+measures the edit and nothing else. The one shortfall is a candidate that has already failed
+the error ceiling on the C3 or local backend: its job stops, and the nonces it skipped count
+as errors (see [Guards between build and scoring](#guards-between-build-and-scoring)). In a template job the candidates run without
 hyperparameters while the baseline keeps the mainnet map (see
 [Template start](#template-start)), so the delta there also includes the effect of those
 values on the baseline. The
@@ -267,6 +269,17 @@ under. A nonce over it is a `timeout` error, and enough of them fail the candida
 the error ceiling. TIG caps fuel, not seconds, so this is a limit on research cost, not a
 TIG rule: `Thresholds.runtime_ceiling` in `talos/loop.py` sets the multiplier, and 0
 disables it.
+
+On the C3 and local backends a candidate's job also stops scoring training nonces as soon as
+its errors so far, over the training nonce count, exceed the error ceiling
+(`talos/c3_job.py::_score`). Errors only grow, so no later nonce could change the
+`failed:runtime` verdict. The job kills the solver processes still running
+(`talos/inside.py::run_nonces`), and the nonces it never started come back as `not_run`
+errors; the iteration's error text gives the counts, and its runtime ratio covers only the
+nonces that ran. Only research candidates stop early (`EvalRequest.stop_at_error_ceiling` in
+`talos/bench.py`): the baseline, calibration and native validation always score every
+nonce, because their rows are used nonce by nonce afterwards. Modal ignores the flag, since
+all of a call's batches run at once.
 
 ## The agentic sandbox
 

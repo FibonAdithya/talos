@@ -81,13 +81,18 @@ def c3_env(api_key: str | None) -> dict[str, str] | None:
     return {**os.environ, "C3_API_KEY": api_key} if api_key else None
 
 
-def fill_timeouts(rows: list[NonceResult], nonce_sets: list[NonceSet]) -> list[NonceResult]:
+def fill_missing(rows: list[NonceResult], nonce_sets: list[NonceSet],
+                 error: str = "timeout") -> list[NonceResult]:
+    """Every nonce of `nonce_sets` in order, with a filler row where the job wrote none: a
+    `timeout` charged the full NONCE_TIMEOUT_S for a job cut off at its time limit, or a
+    `not_run` with no runtime for one that stopped at the error ceiling and never started it."""
+    runtime_ms = NONCE_TIMEOUT_S * 1000 if error == "timeout" else 0
     have = {(r.track, r.nonce): r for r in rows}
     out = []
     for ns in nonce_sets:
         for n in ns.nonces():
             out.append(have.get((ns.track, n)) or
-                       NonceResult(ns.track, n, False, None, NONCE_TIMEOUT_S * 1000, "timeout"))
+                       NonceResult(ns.track, n, False, None, runtime_ms, error))
     return out
 
 
@@ -308,13 +313,14 @@ class C3Bench:
         started = data.get("started", {})
         tr = [NonceResult.from_dict(r) for r in data.get("training", [])]
         if started.get("training"):
-            tr = fill_timeouts(tr, request.training)
+            tr = fill_missing(tr, request.training,
+                              "not_run" if data.get("stopped_early") else "timeout")
         reason = data.get("holdout_reason", "not_won")
         if data.get("holdout") is not None:
-            ho = fill_timeouts([NonceResult.from_dict(r) for r in data["holdout"]],
-                               request.holdout)
+            ho = fill_missing([NonceResult.from_dict(r) for r in data["holdout"]],
+                              request.holdout)
         elif started.get("holdout"):
-            ho = fill_timeouts([], request.holdout)
+            ho = fill_missing([], request.holdout)
         elif status not in DONE and reason == "won":
             ho, reason = None, "timeout"  # the job decided to score held-out but was cut off
         else:

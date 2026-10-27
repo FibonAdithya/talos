@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 
-ERROR_KINDS = (None, "no_solution", "invalid", "out_of_fuel", "panic", "timeout", "compile")
+# "not_run": a nonce a candidate's job never started, because it had already failed the error
+# ceiling and stopped (talos/c3_job.py::_score). It counts as an error, as an unscored nonce must.
+ERROR_KINDS = (None, "no_solution", "invalid", "out_of_fuel", "panic", "timeout", "compile",
+               "not_run")
 
 SCORING_MODES = ("metered", "native")
 

@@ -180,6 +180,18 @@ def test_request_hash_is_unchanged_from_before_hyperparameters_existed(monkeypat
     assert c3_jobdir.request_hash(r) == "8360658c78306a4f"
 
 
+def test_the_stop_flag_is_in_the_payload_only_when_set_and_never_in_the_hash():
+    # Issue #84. Absent by default, so a request without it is byte-for-byte what it was
+    assert "stop_at_error_ceiling" not in c3_jobdir.payload(req())
+    stop = req()
+    stop.stop_at_error_ceiling = True
+    # mutation: dropping it from the payload, and the job never stops
+    assert c3_jobdir.payload(stop)["stop_at_error_ceiling"] is True
+    # mutation: hashing it makes a resume after the upgrade miss the job the old version
+    # submitted for the same files and nonces, and submit a second, still-billing one
+    assert c3_jobdir.request_hash(stop) == c3_jobdir.request_hash(req())
+
+
 def test_request_hash_changes_with_the_hyperparameters():
     # mutation: a hash that ignores the map lets a resume reattach to a job run without it
     with_hp = req()

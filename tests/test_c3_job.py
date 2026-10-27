@@ -15,21 +15,23 @@ class Result:
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
-def setup(tmp_path, n=2, baseline_q=100, baseline=True):
+def setup(tmp_path, n=2, baseline_q=100, baseline=True, stop=False):
     mono = tmp_path / "mono"
     (mono / "tig-algorithms" / "src" / "knapsack").mkdir(parents=True)
     (mono / "tig-algorithms" / "src" / "knapsack" / "mod.rs").write_text("// c003\n")
     base = [NonceResult("t", i, True, baseline_q, 1) for i in range(n)] if baseline else None
     req = EvalRequest("knapsack", {"mod.rs": "fn x(){}"}, [NonceSet("t", HASH, 0, n)],
                       [NonceSet("t", HASH, 1_000_000, n)], 7, base, CHALLENGES["knapsack"].beat)
+    req.stop_at_error_ceiling = stop
     work = write_job_dir(tmp_path / "work", req, "1", hardware="cpu-d3-4vcpu-16gb")
     art = tmp_path / "art"
     art.mkdir()
     return mono, work, art
 
 
-def fake_run(quality=120, build_rc=0):
-    """A subprocess stand-in that builds a .so and answers every nonce with `quality`."""
+def fake_run(quality=120, build_rc=0, fails=lambda nonce: False):
+    """A subprocess stand-in that builds a .so and answers every nonce with `quality`, except
+    that tig-runtime panics (exit 101, nothing saved) on each nonce `fails` picks."""
     calls = []
 
     def run(cmd, **kw):
@@ -44,6 +46,8 @@ def fake_run(quality=120, build_rc=0):
             err = "" if build_rc == 0 else "error[E0308]"
             return Result(build_rc, "Linking talos_cand.so\n", err)
         if cmd[0] == "tig-runtime":
+            if fails(int(cmd[3])):
+                return Result(101)
             out_dir = Path(cmd[cmd.index("--output") + 1])
             (out_dir / f"{cmd[3]}.json").write_text("{}")
             return Result(0)
@@ -415,3 +419,73 @@ def test_native_pool_tasks_carry_the_mode_and_each_tracks_budget(tmp_path, monke
     assert {t[3]: t for t in seen}[0] == ("c003", "t", HASH, 0, str(binary), 7,
                                           inside.NONCE_TIMEOUT_S, None, str(mono), None,
                                           "native", 1_500_000)
+
+
+def _runtime_calls(run) -> int:
+    """tig-runtime calls on training nonces; held-out nonces start at 1_000_000 in setup()."""
+    return sum(1 for c in run.calls if c[0] == "tig-runtime" and int(c[3]) < 1_000_000)
+
+
+def test_a_candidate_job_stops_at_the_first_error_over_the_ceiling(tmp_path):
+    # Issue #84. 40 nonces under knapsack's ceiling of 0.05: two errors are 0.05, not over it;
+    # the third is 0.075 and fixes the verdict, so nothing after it can change the result.
+    assert CHALLENGES["knapsack"].beat.error_ceiling == 0.05
+    mono, work, art = setup(tmp_path, n=40, stop=True)
+    run = fake_run(fails=lambda nonce: True)
+    assert c3_job.main(workdir=work, artifacts_dir=art, run=run, monorepo=mono,
+                       log=lambda *a: None) == 0
+    # mutation: no stop runs 40; stopping at errors >= ceiling x n stops after 2
+    assert _runtime_calls(run) == 3
+    r = json.loads((art / "results.json").read_text())
+    assert r["stopped_early"] is True and [x["nonce"] for x in r["training"]] == [0, 1, 2]
+    # mutation: going on to the held-out decision with 3 of 40 rows
+    assert r["holdout"] is None and r["holdout_reason"] == "not_won"
+    assert r["started"] == {"training": True, "holdout": False}
+
+
+def test_a_candidate_job_at_the_ceiling_but_not_over_it_runs_every_nonce(tmp_path):
+    mono, work, art = setup(tmp_path, n=40, stop=True)
+    run = fake_run(fails=lambda nonce: nonce < 2)  # 2 / 40 = 0.05, which the loop accepts
+    c3_job.main(workdir=work, artifacts_dir=art, run=run, monorepo=mono, log=lambda *a: None)
+    # mutation: comparing with >= stops a candidate the loop would still score
+    assert _runtime_calls(run) == 40
+    r = json.loads((art / "results.json").read_text())
+    assert "stopped_early" not in r and len(r["training"]) == 40
+
+
+def test_a_job_without_the_flag_runs_every_nonce_however_many_fail(tmp_path):
+    # the baseline, calibration and validation rows are used nonce by nonce afterwards
+    mono, work, art = setup(tmp_path, n=40, stop=False)
+    run = fake_run(fails=lambda nonce: True)
+    c3_job.main(workdir=work, artifacts_dir=art, run=run, monorepo=mono, log=lambda *a: None)
+    # mutation: stopping whatever the request asked for cuts the baseline short
+    assert _runtime_calls(run) == 40
+    assert "stopped_early" not in json.loads((art / "results.json").read_text())
+
+
+def test_the_nonce_stream_is_closed_even_when_recording_a_row_raises(tmp_path, monkeypatch):
+    # Closing the pool branch's generator is what kills the workers' solver processes
+    # (tests/test_inside.py). A plain return lets CPython close it anyway; an exception does
+    # not, because the traceback keeps the generator alive while the error propagates.
+    import pytest
+    closed = []
+
+    def rows(tasks, workers, run=None, pool_factory=None):
+        try:
+            for t in tasks:
+                yield {"track": t[1], "nonce": t[3], "ok": False, "quality": None,
+                       "runtime_ms": 1, "error": "panic"}
+        finally:
+            closed.append(True)
+    monkeypatch.setattr(inside, "run_nonces", rows)
+
+    def on_row(r):
+        raise OSError("disk full")
+    payload = {"challenge_id": "c003", "fuel": 7, "nonce_timeout_s": 600, "workers": 4}
+    sets = [{"track": "t", "rand_hash": HASH, "start": 0, "count": 40}]
+    with pytest.raises(OSError) as raised:
+        c3_job._score(payload, sets, tmp_path / "x.so", None, tmp_path, None,
+                      lambda *a: None, lambda: 0.0, 0.0, on_row, None, 0.05)
+    # mutation: dropping the close in `finally` leaves the stream (and a real pool) open
+    # for as long as the exception and its traceback live
+    assert closed == [True] and raised.value.args == ("disk full",)

@@ -184,6 +184,8 @@ def payload(request: EvalRequest, workers: int | None = None) -> dict:
         # Only for native, so every metered request hashes exactly as before (see above).
         p["mode"] = request.mode
         p["fuel_budgets_us"] = request.fuel_budgets_us
+    if request.stop_at_error_ceiling:
+        p["stop_at_error_ceiling"] = True
     return p
 
 
@@ -193,6 +195,10 @@ def request_hash(request: EvalRequest) -> str:
     never the rand_hash itself, because it lands in state.json."""
     p = payload(request)
     p["baseline_training"] = None
+    # Not part of the job's identity: a job that runs every nonce answers the same request.
+    # Hashing it would make a resume after an upgrade miss the job an older version submitted
+    # and submit a second one, still billing.
+    p.pop("stop_at_error_ceiling", None)
     for key in ("training", "holdout"):
         p[key] = [{**n, "rand_hash": hashlib.sha256(n["rand_hash"].encode()).hexdigest()}
                   for n in p[key]]

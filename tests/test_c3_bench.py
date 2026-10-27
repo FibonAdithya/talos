@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from talos.bench import BenchCancelled, BenchUnavailable, EvalRequest, PendingJobStore
-from talos.c3_bench import C3Bench, C3CommandError, fill_timeouts, parse_json_stdout
+from talos.c3_bench import C3Bench, C3CommandError, fill_missing, parse_json_stdout
 from talos.c3_jobdir import LocalSettings
 from talos.challenges import CHALLENGES
 from talos.types import NonceResult, NonceSet
@@ -141,6 +141,21 @@ def test_timed_out_job_fills_missing_nonces_as_timeouts(tmp_path):
     assert [x.nonce for x in r.training] == [0, 1]
     # mutation: dropping the missing nonce makes bundle_delta raise "nonce mismatch" every time
     assert r.training[1].error == "timeout" and not r.training[1].ok
+    assert r.holdout is None and r.holdout_reason == "not_won"
+
+
+def test_a_job_stopped_at_the_error_ceiling_fills_the_rest_as_not_run(tmp_path):
+    # Issue #84: the job ran 2 of 4 nonces, both errors, and stopped. The other two never
+    # started, so calling them timeouts would record failures that did not happen.
+    doc = results_doc(n=4, holdout=False)
+    doc["training"] = [{**row, "ok": False, "quality": None, "error": "panic"}
+                       for row in doc["training"][:2]]
+    doc["stopped_early"] = True
+    r = bench(tmp_path, FakeC3(["RUNNING", "COMPLETED"], doc))[0].evaluate(req(n=4))
+    assert [(x.nonce, x.error) for x in r.training] == [(0, "panic"), (1, "panic"),
+                                                       (2, "not_run"), (3, "not_run")]
+    # mutation: filling them as timeouts charges each the full 600 s and calls it a timeout
+    assert [x.runtime_ms for x in r.training[2:]] == [0, 0]
     assert r.holdout is None and r.holdout_reason == "not_won"
 
 
@@ -341,9 +356,9 @@ def test_error_messages_never_carry_the_rand_hash(tmp_path):
     assert HASH not in str(ei.value) and "<hash>" in str(ei.value)
 
 
-def test_fill_timeouts_orders_by_track_and_nonce():
+def test_fill_missing_orders_by_track_and_nonce():
     rows = [NonceResult("t", 1, True, 5, 1)]
-    out = fill_timeouts(rows, [NonceSet("t", HASH, 0, 3)])
+    out = fill_missing(rows, [NonceSet("t", HASH, 0, 3)])
     # mutation: appending real rows before filled timeouts (instead of walking the nonce
     # range in order) would put nonce 1 first instead of in its slot
     assert [(r.nonce, r.error) for r in out] == [(0, "timeout"), (1, None), (2, "timeout")]

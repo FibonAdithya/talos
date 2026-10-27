@@ -2145,3 +2145,68 @@ def test_provider_error_without_cost_fields_records_nothing(tmp_path):
     loop.run()
     assert not [e for e in _timeline(tmp_path) if e["kind"] == "llm_cost_unknown"]
     assert json.loads((tmp_path / "state.json").read_text())["spend"]["llm_usd"] == 0.0
+
+
+# ── issue #84: stopping a candidate's scoring at the error ceiling ─────────
+
+def test_only_research_candidates_ask_the_job_to_stop_at_the_error_ceiling(tmp_path):
+    one = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path / "m", [hyp("bump k"), edit(5)], budget=one)
+    loop.run()
+    # mutation: never setting it leaves every rejected candidate running to the end
+    assert [c.stop_at_error_ceiling for c in fb.calls] == [True]
+    loop, fp, fb, store = native(tmp_path / "n", [hyp("bump k"), edit(5)], budget=one)
+    loop.run()
+    # mutation: setting it on validation too; a stopped validation could hide the
+    # fuel_proxy_miss that lowers the calibration margin
+    assert [(c.mode, c.stop_at_error_ceiling) for c in fb.calls] == [("native", True),
+                                                                     ("metered", False)]
+    loop, fp, fb, store = native(tmp_path / "c", [], fuel=10_000_000)
+    loop.state.scoring = None
+    loop.calibrate(tmp_path / "cal", "hw")
+    # the calibration rows become the native budgets nonce by nonce
+    assert [c.stop_at_error_ceiling for c in fb.calls] == [False, False]
+
+
+class StoppedBench(FakeBench):
+    """Answers a candidate as the C3 client does for a job stopped at the ceiling: nonce 0
+    panicked after 6 ms, nonce 1 solved in 2 ms, nonces 2 and 3 never ran."""
+
+    def evaluate(self, request):
+        from talos.bench import EvalResult
+        from talos.types import CompileResult
+        self.calls.append(request)
+        rows = [NonceResult("t", 0, False, None, 6, "panic"), NonceResult("t", 1, True, 100, 2),
+                NonceResult("t", 2, False, None, 0, "not_run"),
+                NonceResult("t", 3, False, None, 0, "not_run")]
+        return EvalResult(CompileResult(ok=True, artifact_id="a", output="ok"), rows, None,
+                          "not_won")
+
+
+def test_a_candidate_stopped_at_the_ceiling_says_so_in_its_record(tmp_path):
+    one = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("bump k"), edit(5)], budget=one,
+                               bench=StoppedBench(quality_from_files))
+    st = loop.run()
+    h = st.hypotheses[0]
+    assert h["outcome"] == "failed:runtime" and st.best is None
+    # mutation: no note, and the recall line shows the not-run filler as if it were measured
+    assert h["error"] == ("stopped early at the error ceiling: 1 of the 2 nonces run "
+                          "failed; 2 of 4 not run")
+    # mean candidate runtime over the nonces that ran, (6 + 2) / 2 = 4 ms, against the
+    # baseline's 1 ms on those same nonces. mutation: counting the 0 ms filler gives 2.0
+    assert h["runtime_ratio"] == 4.0
+    scored = [json.loads(x) for x in (store.run_dir / "timeline.jsonl").read_text().splitlines()
+              if json.loads(x)["kind"] == "scored"]
+    assert scored[0]["not_run"] == 2
+
+
+def test_a_candidate_that_ran_every_nonce_has_no_stop_note(tmp_path):
+    one = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("bump k"), edit(5)], budget=one)
+    st = loop.run()
+    # mutation: writing the note (or a not_run count of 0) on every scored candidate
+    assert "error" not in st.hypotheses[0]
+    scored = [json.loads(x) for x in (store.run_dir / "timeline.jsonl").read_text().splitlines()
+              if json.loads(x)["kind"] == "scored"]
+    assert "not_run" not in scored[0]

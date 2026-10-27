@@ -25,7 +25,12 @@ def _atomic(path: Path, data: dict) -> None:
 
 
 def _score(payload: dict, sets: list[dict], so: Path, ptx: Path | None, monorepo: Path,
-           run, log, clock, t0: float, on_row, pool_factory=None) -> None:
+           run, log, clock, t0: float, on_row, pool_factory=None,
+           ceiling: float | None = None) -> bool:
+    """Scores every nonce in `sets`, or, with a `ceiling`, stops at the first row that puts
+    errors / nonces over it, the comparison the loop rejects a candidate with
+    (talos/loop.py::Loop._score_candidate). Errors only grow, so no later nonce can change that
+    verdict. Returns whether it stopped."""
     timeouts = payload.get("timeouts") or {}
     # talos.bench is not shipped to the container, so the per-track lookup is inlined here: a
     # track mapped to None, or absent, runs without the flag; {} is passed as {}.
@@ -38,10 +43,24 @@ def _score(payload: dict, sets: list[dict], so: Path, ptx: Path | None, monorepo
               mode, budgets.get(ns["track"]))
              for ns in sets for n in range(ns["start"], ns["start"] + ns["count"])]
     workers = int(payload.get("workers", 1))
-    for r in inside.run_nonces(tasks, workers, run=run, pool_factory=pool_factory):
-        on_row(r)
-        log(f"[{int(clock() - t0)}s] nonce {r['nonce']} ok={r['ok']} q={r['quality']} "
-            f"ms={r['runtime_ms']} err={r['error']}")
+    rows = inside.run_nonces(tasks, workers, run=run, pool_factory=pool_factory)
+    done = errors = 0
+    try:
+        for r in rows:
+            on_row(r)
+            log(f"[{int(clock() - t0)}s] nonce {r['nonce']} ok={r['ok']} q={r['quality']} "
+                f"ms={r['runtime_ms']} err={r['error']}")
+            done += 1
+            errors += not r["ok"]
+            if ceiling is not None and errors / len(tasks) > ceiling:
+                log(f"[{int(clock() - t0)}s] stopping: {errors} errors in {done} of "
+                    f"{len(tasks)} nonces is over the error ceiling of {ceiling}")
+                return True
+    finally:
+        # Closing the stream, not leaving it to the GC, is what kills the pool's workers and
+        # the solvers they started (talos/inside.py::run_nonces).
+        rows.close()
+    return False
 
 
 def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=subprocess.run,
@@ -123,8 +142,15 @@ def main(workdir: Path | None = None, artifacts_dir: Path | None = None, run=sub
 
     out["started"]["training"] = True
     _atomic(results, out)
-    _score(payload, payload["training"], so, ptx, monorepo, run, log, clock, t0,
-           scored("training"), pool_factory)
+    ceiling = payload["rule"]["error_ceiling"] if payload.get("stop_at_error_ceiling") else None
+    if _score(payload, payload["training"], so, ptx, monorepo, run, log, clock, t0,
+              scored("training"), pool_factory, ceiling):
+        # The client fills the nonces never started as "not_run" (talos/c3_bench.py).
+        out["stopped_early"] = True
+        out["holdout_reason"] = "not_won"
+        _atomic(results, out)
+        log(f"[{int(clock() - t0)}s] done (stopped at the error ceiling)")
+        return 0
     tr = [NonceResult.from_dict(r) for r in out["training"]]
     base = ([NonceResult.from_dict(r) for r in payload["baseline_training"]]
             if payload["baseline_training"] is not None else None)
