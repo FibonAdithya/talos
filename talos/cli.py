@@ -956,7 +956,8 @@ def cmd_run(args, ask) -> int:
     # Before a job directory exists or anything is spent. --fake builds a modal Config but never
     # reaches Modal, so it needs neither extra.
     try:
-        if not args.fake and cfg.provider != "fake" and cfg.backend == "modal":
+        if (not args.fake and not args.resume and cfg.provider != "fake"
+                and cfg.backend == "modal"):
             extras.require("modal", "the modal backend")
         if not args.fake and not args.resume and cfg.provider == "anthropic":
             extras.require("anthropic", "the anthropic provider")
@@ -1006,6 +1007,8 @@ def cmd_run(args, ask) -> int:
         cfg = replace(cfg, provider=spec.provider, model=spec.model, mode=spec.mode)
         # A resume keeps the provider it started with, whatever the config says today.
         try:
+            if not args.fake and spec.provider != "fake" and cfg.backend == "modal":
+                extras.require("modal", "the modal backend")
             if spec.provider == "anthropic":
                 extras.require("anthropic", "the anthropic provider")
         except ConfigError as e:

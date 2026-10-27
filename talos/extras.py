@@ -15,8 +15,11 @@ def missing(extra: str) -> bool:
 
 def install_hint(extra: str) -> str:
     # MEASURED 2026-10-27: on a tool installed without the extra, this form adds it with no
-    # --force; installing a different extra afterwards replaces the earlier one.
-    return (f"uv tool install --python 3.12 'talos-tig[{extra}]' "
+    # --force; installing a different extra afterwards replaces the earlier one. So the command
+    # names the missing extra first, then every other extra that is installed now. pip keeps
+    # what is installed, so the clone form names only the missing one.
+    names = [extra] + [e for e in EXTRAS if e != extra and not missing(e)]
+    return (f"uv tool install --python 3.12 'talos-tig[{','.join(names)}]' "
             f"(in a clone: pip install -e '.[{extra}]')")
 
 

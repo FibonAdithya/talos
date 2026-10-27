@@ -46,7 +46,7 @@ def test_require_names_the_extra_and_both_install_forms(monkeypatch):
         extras.require("modal", "the modal backend")
     msg = str(e.value)
     assert msg.startswith("the modal backend needs the modal extra")
-    assert "talos-tig[modal]" in msg and "pip install -e '.[modal]'" in msg
+    assert "uv tool install --python 3.12 'talos-tig[modal,anthropic]' (in a clone" in msg and "pip install -e '.[modal]'" in msg
 
 
 def test_require_passes_when_installed(monkeypatch):
@@ -64,7 +64,7 @@ def test_setup_modal_without_extra_exits_2_before_asking_for_a_token(
     assert rc == 2
     assert not (tmp_path / "talos.config.json").exists()
     assert len(prompts) == 1, prompts
-    assert "talos-tig[modal]" in capsys.readouterr().err
+    assert "install --python 3.12 'talos-tig[modal,anthropic]'" in capsys.readouterr().err
 
 
 def test_setup_anthropic_without_extra_exits_2(tmp_path, monkeypatch, capsys):
@@ -74,7 +74,7 @@ def test_setup_anthropic_without_extra_exits_2(tmp_path, monkeypatch, capsys):
     rc = cli.main(["setup"], ask=scripted(["local", "anthropic", "", "sk"], []))
     assert rc == 2
     assert not (tmp_path / "talos.config.json").exists()
-    assert "talos-tig[anthropic]" in capsys.readouterr().err
+    assert "install --python 3.12 'talos-tig[anthropic,modal]'" in capsys.readouterr().err
 
 
 def test_run_without_modal_extra_creates_no_job(tmp_path, monkeypatch, capsys):
@@ -85,7 +85,7 @@ def test_run_without_modal_extra_creates_no_job(tmp_path, monkeypatch, capsys):
     stub_run_paths(monkeypatch)
     assert cli.main(RUN) == 2
     assert not (tmp_path / "runs").exists()
-    assert "talos-tig[modal]" in capsys.readouterr().err
+    assert "install --python 3.12 'talos-tig[modal,anthropic]'" in capsys.readouterr().err
 
 
 def test_run_without_anthropic_extra_creates_no_job(tmp_path, monkeypatch, capsys):
@@ -96,7 +96,7 @@ def test_run_without_anthropic_extra_creates_no_job(tmp_path, monkeypatch, capsy
     stub_run_paths(monkeypatch)
     assert cli.main(RUN) == 2
     assert not (tmp_path / "runs").exists()
-    assert "talos-tig[anthropic]" in capsys.readouterr().err
+    assert "install --python 3.12 'talos-tig[anthropic,modal]'" in capsys.readouterr().err
 
 
 def test_resume_checks_the_jobs_provider_not_the_configs(tmp_path, monkeypatch, capsys):
@@ -116,7 +116,7 @@ def test_resume_checks_the_jobs_provider_not_the_configs(tmp_path, monkeypatch, 
     stub_run_paths(monkeypatch)
     capsys.readouterr()
     assert cli.main(["run", "--resume", run_dir.name]) == 2
-    assert "talos-tig[anthropic]" in capsys.readouterr().err
+    assert "install --python 3.12 'talos-tig[anthropic,modal]'" in capsys.readouterr().err
 
 
 def test_fake_run_and_demo_need_no_extras(tmp_path, monkeypatch):
@@ -137,7 +137,7 @@ def test_compile_with_modal_backend_needs_the_extra(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(cli, "make_bench", reached)
     rc = cli.main(["compile", "--challenge", "knapsack", "--dir", "src", "--backend", "modal"])
     assert rc == 2
-    assert "talos-tig[modal]" in capsys.readouterr().err
+    assert "install --python 3.12 'talos-tig[modal,anthropic]'" in capsys.readouterr().err
 
 
 def test_doctor_reports_a_missing_extra(monkeypatch):
@@ -148,5 +148,37 @@ def test_doctor_reports_a_missing_extra(monkeypatch):
                                     api_base=None, backend="modal"))
     p = doctor.check_provider(Config(provider="anthropic", model="m", mode="single-shot",
                                      api_base=None, backend="local"))
-    assert b.name == "backend" and b.status == doctor.FAIL and "talos-tig[modal]" in b.detail
-    assert p.name == "provider" and p.status == doctor.FAIL and "talos-tig[anthropic]" in p.detail
+    assert b.name == "backend" and b.status == doctor.FAIL and "'talos-tig[modal]'" in b.detail
+    assert p.name == "provider" and p.status == doctor.FAIL and "'talos-tig[anthropic]'" in p.detail
+
+
+def test_install_hint_keeps_the_extras_already_installed(monkeypatch):
+    # `uv tool install 'talos-tig[x]'` replaces the tool's extras, so the command lists the
+    # installed ones too; the clone form names only the missing one.
+    hide(monkeypatch, "modal")
+    assert extras.install_hint("modal") == (
+        "uv tool install --python 3.12 'talos-tig[modal,anthropic]' "
+        "(in a clone: pip install -e '.[modal]')")
+    hide(monkeypatch, "modal", "anthropic")
+    assert extras.install_hint("modal") == (
+        "uv tool install --python 3.12 'talos-tig[modal]' (in a clone: pip install -e '.[modal]')")
+
+
+def test_resume_checks_modal_for_the_jobs_provider_not_the_configs(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    save(tmp_path, Config(provider="fake", model="fake", mode="single-shot", api_base=None), None)
+    monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: type(
+        "I", (), {"id": "c003", "name": "knapsack", "is_gpu": False, "tracks": ["n=1"],
+                  "max_fuel": 7})())
+    assert cli.main(RUN + ["--fake"]) == 0
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    spec = json.loads((run_dir / "job.json").read_text())
+    spec["provider"] = "claude-cli"
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    save(tmp_path, Config(provider="fake", model="fake", mode="single-shot", api_base=None,
+                          backend="modal"), None)
+    hide(monkeypatch, "modal")
+    stub_run_paths(monkeypatch)
+    capsys.readouterr()
+    assert cli.main(["run", "--resume", run_dir.name]) == 2
+    assert "talos-tig[modal" in capsys.readouterr().err
