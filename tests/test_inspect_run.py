@@ -1,5 +1,7 @@
 """talos/inspect_run.py: read-only views of a run directory for status, show and diff."""
 import json
+import os
+import sys
 
 import pytest
 
@@ -117,6 +119,23 @@ def test_status_rows_one_per_job_including_unreadable(tmp_path):
     assert set(b) == set(a)  # same keys, nulls not missing keys
 
 
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0,
+                    reason="chmod 000 does not deny access on Windows or to root")
+def test_status_rows_survive_a_directory_without_permission(tmp_path):
+    # spec anti-goal: one unreadable run directory must not stop the others being listed.
+    # mutation: probing job.json outside the try lets PermissionError escape status_rows
+    runs = tmp_path / "runs"
+    make_run(runs / "A", [{"iteration": 1}])
+    make_run(runs / "B", [{"iteration": 1}])
+    (runs / "B").chmod(0)
+    try:
+        rows = status_rows(runs)
+    finally:
+        (runs / "B").chmod(0o755)
+    assert [r["job_id"] for r in rows] == ["A", "B"]
+    assert rows[1]["status"] == "unreadable" and "B" in rows[1]["error"]
+
+
 def test_status_rows_missing_runs_dir_is_empty(tmp_path):
     assert status_rows(tmp_path / "runs") == []
 
@@ -162,6 +181,24 @@ def test_overrun_hours_left_is_a_float_zero(tmp_path):
     run = _run(tmp_path, status="exhausted", timeline=[{"kind": "a"}] * 200)  # 199 min > 2 h
     left = job_detail(run, now=T0)["budget"]["hours"]["left"]
     assert left == 0 and isinstance(left, float)
+
+
+def test_money_and_hours_are_floats_even_when_stored_as_ints(tmp_path):
+    # docs/json-output.md types these as floats; a job.json/state.json written with whole
+    # numbers (hours 2, compute 0) would otherwise come out as JSON ints
+    run_dir = tmp_path / "runs" / "J"
+    make_run(run_dir, [{"iteration": 1}], timeline=[{"kind": "a"}, {"kind": "b"}])
+    spec = json.loads((run_dir / "job.json").read_text())
+    spec["budget"] = {"usd": 1, "hours": 2, "iterations": 10, "compute_usd": 5}
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    st = json.loads((run_dir / "state.json").read_text())
+    st["spend"].update(llm_usd=0, compute_usd=0)
+    (run_dir / "state.json").write_text(json.dumps(st))
+    budget = job_detail(load_run(tmp_path / "runs", "J"), now=T0)["budget"]
+    for dim in ("hours", "usd", "compute_usd"):
+        assert all(isinstance(v, float) for v in budget[dim].values()), (dim, budget[dim])
+    row, = status_rows(tmp_path / "runs")
+    assert isinstance(row["llm_usd"], float) and isinstance(row["compute_usd"], float)
 
 
 def test_budget_counts_extensions(tmp_path):
@@ -265,6 +302,9 @@ def test_show_best_has_tables_holdout_and_files(tmp_path, monkeypatch):
     headings = [t["heading"] for t in d["scores"]["tables"]]
     assert headings == ["Training nonces", "Held-out nonces"]
     assert d["scores"]["tables"][0]["tracks"][0]["track"] == "t"
+    # the fixture's baseline qualities are ints (100, 100): statistics.mean gives the int 100
+    row = d["scores"]["tables"][0]["tracks"][0]
+    assert all(isinstance(row[k], float) for k in ("base_mean", "cand_mean", "rel_delta"))
     assert "runs/J/iterations/0002/mod.rs" in d["files"]
 
 

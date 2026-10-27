@@ -45,9 +45,9 @@ class Run:
 
 def _read(run_dir: Path, job_id: str, name: str, parse):
     path = run_dir / name
-    if not path.is_file():
-        raise InspectError(f"job {job_id} has no {name}")
     try:
+        if not path.is_file():
+            raise InspectError(f"job {job_id} has no {name}")
         return parse(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise InspectError(f"job {job_id}: cannot read {name}: {e}") from e
@@ -117,7 +117,7 @@ def _llm(spec: JobSpec, llm_usd: float) -> tuple[float | None, bool, str | None]
     from talos.cli import unpriced_reason
 
     reason = unpriced_reason(spec.provider, spec.model)
-    return (llm_usd if reason is None else None), reason is None, reason
+    return (float(llm_usd) if reason is None else None), reason is None, reason
 
 
 _ROW_KEYS = ("job_id", "challenge", "provider", "model", "status", "iteration",
@@ -137,12 +137,17 @@ def status_rows(runs_root: Path) -> list[dict]:
         return []
     rows = []
     for d in sorted(p for p in runs_root.iterdir() if p.is_dir()):
-        if not ((d / "job.json").is_file() or (d / "state.json").is_file()):
-            continue
         row = dict.fromkeys(_ROW_KEYS)
         row["job_id"] = d.name
         try:
+            # is_file raises PermissionError on a directory the user cannot read
+            if not ((d / "job.json").is_file() or (d / "state.json").is_file()):
+                continue
             run = load_run(runs_root, d.name)
+        except OSError as e:
+            row["status"], row["error"] = "unreadable", f"job {d.name}: cannot read: {e}"
+            rows.append(row)
+            continue
         except InspectError as e:
             row["status"], row["error"] = "unreadable", str(e)
             rows.append(row)
@@ -152,19 +157,22 @@ def status_rows(runs_root: Path) -> list[dict]:
         row.update(challenge=spec.challenge, provider=spec.provider, model=spec.model,
                    status=state.status, iteration=state.iteration,
                    best_mean_rel_delta=_best_delta(state), llm_usd=llm_usd, llm_priced=priced,
-                   llm_unpriced_reason=reason, compute_usd=state.spend.compute_usd,
+                   llm_unpriced_reason=reason, compute_usd=float(state.spend.compute_usd),
                    last_event_ts=_last_ts(run.timeline))
         rows.append(row)
     return rows
 
 
-def _cap(cap, spent) -> dict:
-    left = None
-    if cap is not None and spent is not None:
-        diff = cap - spent
-        # float(): an overrun hours cap is 0.0, not the int 0, as the schema types it
-        left = float(max(0, diff)) if isinstance(diff, float) else max(0, diff)
-    return {"cap": cap, "spent": spent, "left": left}
+def _num(x, as_float: bool):
+    return None if x is None else (float(x) if as_float else x)
+
+
+def _cap(cap, spent, as_float: bool = True) -> dict:
+    """{cap, spent, left}. Money and hours are floats even when job.json or state.json holds
+    a whole number, as docs/json-output.md types them; iterations stay ints."""
+    left = None if cap is None or spent is None else max(0, cap - spent)
+    return {"cap": _num(cap, as_float), "spent": _num(spent, as_float),
+            "left": _num(left, as_float)}
 
 
 def job_detail(run: Run, now: float) -> dict:
@@ -194,7 +202,7 @@ def job_detail(run: Run, now: float) -> dict:
         "hardware": state.hardware,
         "scoring": {"requested": spec.scoring, "actual": state.scoring},
         "best": best,
-        "budget": {"iterations": _cap(eff.iterations, state.spend.iterations),
+        "budget": {"iterations": _cap(eff.iterations, state.spend.iterations, as_float=False),
                    "hours": _cap(eff.hours, hours_spent(run, now)),
                    "usd": _cap(eff.usd, llm_usd),
                    "compute_usd": _cap(eff.compute_usd, state.spend.compute_usd)},
@@ -251,10 +259,12 @@ def _tables(run: Run) -> list[dict]:
                         "error_rate": None, "error": str(e)})
             continue
         out.append({"heading": heading,
-                    "tracks": [{"track": t.track, "base_mean": t.base_mean,
-                                "cand_mean": t.cand_mean, "rel_delta": t.rel_delta,
+                    "tracks": [{"track": t.track, "base_mean": float(t.base_mean),
+                                "cand_mean": float(t.cand_mean),
+                                "rel_delta": float(t.rel_delta),
                                 "cand_errors": t.cand_errors, "n": t.n} for t in d.tracks],
-                    "mean_rel_delta": d.mean_rel_delta, "error_rate": d.error_rate,
+                    "mean_rel_delta": float(d.mean_rel_delta),
+                    "error_rate": float(d.error_rate),
                     "error": None})
     return out
 
