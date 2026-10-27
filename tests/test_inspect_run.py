@@ -3,9 +3,10 @@ import json
 
 import pytest
 
-from talos.inspect_run import (InspectError, SCHEMA_VERSION, format_job_detail,
-                               format_status_table, holdout_status, hours_spent, job_detail,
-                               last_event, load_run, status_rows)
+from talos.inspect_run import (InspectError, SCHEMA_VERSION, format_iteration,
+                               format_job_detail, format_status_table, holdout_status,
+                               hours_spent, iteration_detail, iteration_diff, job_detail,
+                               last_event, load_run, resolve_node, status_rows)
 from tests.run_fixture import T0, make_run
 
 
@@ -209,3 +210,129 @@ def test_status_table_unreadable_row(tmp_path):
 def test_job_detail_text_prints_infinite_cap(tmp_path):
     text = format_job_detail(job_detail(_run(tmp_path), now=T0))
     assert "∞" in text and "compute" in text
+
+
+# ── one iteration: show ──────────────────────────────────────────────
+
+def test_resolve_errors(tmp_path):
+    run = _run(tmp_path, hyps=[{"iteration": 1}, {"iteration": 2}])
+    with pytest.raises(InspectError, match=r"^job J has no best candidate; use --iteration N$"):
+        resolve_node(run, "best")
+    with pytest.raises(InspectError, match=r"^job J has no iteration 3 \(it has 1\.\.2\)$"):
+        resolve_node(run, 3)
+    empty = _run(tmp_path, name="K", hyps=[])
+    with pytest.raises(InspectError, match=r"^job K has no iteration 1 \(it has none\)$"):
+        resolve_node(empty, 1)
+
+
+def test_show_uses_record_mean_not_metered_rank_score(tmp_path):
+    # mutation: reading ReportNode.score (the metered score when present) as the training mean
+    nodes = [{"id": 1, "chain": 0, "parent": 0, "family": "f", "title": "t", "outcome": "improved",
+              "score": 0.02, "tracks": {"t": 0.02}, "metered_score": 0.015}]
+    run = _run(tmp_path, hyps=[{"iteration": 1, "mean_rel_delta": 0.02, "worst_track": "t",
+               "worst_rel_delta": 0.02, "design_family": "f"}], nodes=nodes,
+               iteration_files={1: {"mod.rs": "x\n"}})
+    s = iteration_detail(run, 1)["scores"]
+    assert s["mean_rel_delta"] == 0.02 and s["metered_rel_delta"] == 0.015
+    assert s["tracks"] == {"t": 0.02} and s["tables"] is None
+
+
+def test_show_pre_lineage_record_has_null_tracks(tmp_path):
+    run = _run(tmp_path, hyps=[{"iteration": 1, "mean_rel_delta": -0.01, "worst_track": "t",
+               "worst_rel_delta": -0.01, "against": 0}])
+    d = iteration_detail(run, 1)
+    assert d["scores"]["tracks"] is None and d["scores"]["worst_track"] == "t"
+    assert d["parent"] == 0 and d["schema_version"] == 1
+
+
+def test_show_best_has_tables_holdout_and_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # file paths are relative to the cwd
+    run = _run(tmp_path, hyps=[{"iteration": 1}, {"iteration": 2}], best=2, false_positives=[2],
+               timeline=[{"kind": "false_positive", "iteration": 2,
+                          "holdout": {"mean_rel_delta": -0.03, "worst_rel_delta": -0.05}}])
+    d = iteration_detail(run, "best")
+    assert d["iteration"] == 2 and d["kind"] == "best"
+    assert d["scores"]["holdout_status"] == "false_positive"
+    assert d["scores"]["holdout_mean_rel_delta"] == -0.03  # the failing value, not null
+    headings = [t["heading"] for t in d["scores"]["tables"]]
+    assert headings == ["Training nonces", "Held-out nonces"]
+    assert d["scores"]["tables"][0]["tracks"][0]["track"] == "t"
+    assert "runs/J/iterations/0002/mod.rs" in d["files"]
+
+
+def test_show_best_lists_the_best_dir(tmp_path, monkeypatch):
+    # mutation: listing only iterations/NNNN/ (the spec names best/ for the best)
+    monkeypatch.chdir(tmp_path)
+    run = _run(tmp_path, hyps=[{"iteration": 1}, {"iteration": 2}], best=2,
+               iteration_files={1: {"mod.rs": "one\n"}})
+    (run.run_dir / "best").mkdir()
+    (run.run_dir / "best" / "mod.rs").write_text("x\n")
+    assert "runs/J/best/mod.rs" in iteration_detail(run, "best")["files"]
+    # mutation: listing best/ for every iteration
+    assert "runs/J/best/mod.rs" not in iteration_detail(run, 1)["files"]
+
+
+def test_format_iteration_names_parent(tmp_path):
+    run = _run(tmp_path, hyps=[{"iteration": 1}, {"iteration": 2, "against": 1}], best=2)
+    assert "parent: #1" in format_iteration(iteration_detail(run, 2))
+    assert "parent: baseline" in format_iteration(iteration_detail(run, 1))
+
+
+def test_format_iteration_template_parent_and_full_description(tmp_path):
+    long = "word " * 200
+    run = _run(tmp_path, hyps=[{"iteration": 1, "description": long}], start="template",
+               template="fn t() {}\n")
+    text = format_iteration(iteration_detail(run, 1))
+    assert "parent: template" in text
+    # mutation: cutting the description to one line, as the event lines do
+    assert text.count("word") == 200
+
+
+# ── one iteration: diff ──────────────────────────────────────────────
+
+def test_diff_best_against_baseline_and_parent(tmp_path):
+    run = _run(tmp_path, hyps=[{"iteration": 1}, {"iteration": 2, "against": 1}], best=2,
+               iteration_files={1: {"mod.rs": "line a\nline b\nline c one\n"}})
+    base = iteration_diff(run, "best", "baseline")
+    assert base.startswith("--- baseline/mod.rs\n+++ candidate/mod.rs\n")
+    assert "+line c best 2" in base and "-line c\n" in base
+    par = iteration_diff(run, "best", "parent")
+    assert par.startswith("--- #1/mod.rs") and "-line c one" in par
+
+
+def test_diff_template_start_labels_template(tmp_path):
+    run = _run(tmp_path, start="template", template="fn t() {}\n", best=1)
+    assert iteration_diff(run, "best", "baseline").startswith("--- template/mod.rs")
+
+
+def test_diff_against_a_parent_with_no_files(tmp_path):
+    # mutation: diffing against {} when the base is None prints a whole-file "addition"
+    run = _run(tmp_path, hyps=[{"iteration": 1, "outcome": "failed:compile"},
+                               {"iteration": 2, "against": 1}], best=2, iteration_files={1: {}})
+    with pytest.raises(InspectError, match=r"^the files of #1 were not saved$"):
+        iteration_diff(run, "best", "parent")
+
+
+def test_diff_of_an_iteration_with_no_files(tmp_path):
+    run = _run(tmp_path, hyps=[{"iteration": 1, "outcome": "failed:compile"}],
+               iteration_files={1: {}})
+    with pytest.raises(InspectError,
+                       match=r"^iteration 1 saved no files \(outcome failed:compile\)$"):
+        iteration_diff(run, 1, "baseline")
+
+
+def test_diff_best_uses_state_files_when_the_iteration_dir_is_empty(tmp_path):
+    # make_run copies iteration_files[1] into state.best.files, so set those afterwards
+    run = _run(tmp_path, best=1, iteration_files={1: {}})  # iterations/0001 has no sources
+    st = json.loads((run.run_dir / "state.json").read_text())
+    st["best"]["files"] = {"mod.rs": "line a\nline b\nfrom state\n"}
+    (run.run_dir / "state.json").write_text(json.dumps(st))
+    run = load_run(run.run_dir.parent, "J")
+    assert "+from state" in iteration_diff(run, "best", "baseline")
+
+
+def test_diff_is_not_truncated(tmp_path):
+    # mutation: reusing report.node_diffs / truncate caps the patch
+    big = "".join(f"line {i}\n" for i in range(200_000))
+    run = _run(tmp_path, best=1, iteration_files={1: {"mod.rs": big}})
+    assert iteration_diff(run, "best", "baseline").count("\n+line ") == 200_000

@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from talos.budget import effective_budget
-from talos.report import holdout_points, read_timeline
+from talos.package import _diff, score_pairs
+from talos.report import ReportNode, holdout_points, read_timeline, report_nodes, run_sources
+from talos.scoring import ScoringError, bundle_delta
 from talos.state import TERMINAL, JobSpec, JobState
 
 SCHEMA_VERSION = 1
@@ -198,6 +200,115 @@ def job_detail(run: Run, now: float) -> dict:
     }
 
 
+# ── one iteration ────────────────────────────────────────────────────
+
+def resolve_node(run: Run, which: str | int) -> ReportNode:
+    """`which` is "best" or an iteration number; the node for it, or InspectError."""
+    nodes = report_nodes(run.spec, run.state)
+    if which == "best":
+        if run.state.best is None:
+            raise InspectError(f"job {run.job_id} has no best candidate; use --iteration N")
+        which = run.state.best.iteration
+    for n in nodes:
+        if n.id == which:
+            return n
+    has = f"1..{max(n.id for n in nodes)}" if nodes else "none"
+    raise InspectError(f"job {run.job_id} has no iteration {which} (it has {has})")
+
+
+def _label(run: Run, node_id: int) -> str:
+    if node_id == 0:
+        return "template" if run.spec.start == "template" else "baseline"
+    return f"#{node_id}"
+
+
+def _rel(path: Path) -> str:
+    try:
+        return path.relative_to(Path.cwd()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _files(run: Run, node_id: int, is_best: bool) -> list[str]:
+    dirs = [run.run_dir / "iterations" / f"{node_id:04d}"]
+    if is_best:
+        dirs.append(run.run_dir / "best")
+    return sorted(_rel(p) for d in dirs if d.is_dir() for p in d.rglob("*") if p.is_file())
+
+
+def _tables(run: Run) -> list[dict]:
+    out = []
+    for heading, base, cand in score_pairs(run.spec, run.state):
+        try:
+            d = bundle_delta(base, cand)
+        except ScoringError as e:
+            out.append({"heading": heading, "tracks": [], "mean_rel_delta": None,
+                        "error_rate": None, "error": str(e)})
+            continue
+        out.append({"heading": heading,
+                    "tracks": [{"track": t.track, "base_mean": t.base_mean,
+                                "cand_mean": t.cand_mean, "rel_delta": t.rel_delta,
+                                "cand_errors": t.cand_errors, "n": t.n} for t in d.tracks],
+                    "mean_rel_delta": d.mean_rel_delta, "error_rate": d.error_rate,
+                    "error": None})
+    return out
+
+
+def iteration_detail(run: Run, which: str | int) -> dict:
+    node = resolve_node(run, which)
+    state = run.state
+    record = next((h for h in state.hypotheses if h.get("iteration") == node.id), {})
+    stored = next((n for n in state.nodes if n.id == node.id), None)
+    is_best = state.best is not None and state.best.iteration == node.id
+    # The training mean is the record's, not ReportNode.score: that is the metered score when
+    # a native job validated the candidate.
+    mean = record.get("mean_rel_delta")
+    if mean is None and stored is not None:
+        mean = stored.score
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "job_id": run.job_id,
+        "iteration": node.id,
+        "parent": node.parent,
+        "parent_label": _label(run, node.parent),
+        "chain": node.chain,
+        "kind": node.kind,
+        "outcome": node.outcome,
+        "error": node.error,
+        "hypothesis": {"title": node.title, "description": node.description,
+                       "strategy_tag": node.strategy_tag,
+                       "design_family": record.get("design_family") or node.family or ""},
+        "scores": {
+            "mean_rel_delta": mean,
+            "worst_track": record.get("worst_track"),
+            "worst_rel_delta": record.get("worst_rel_delta"),
+            "runtime_ratio": record.get("runtime_ratio"),
+            "metered_rel_delta": stored.metered_score if stored is not None else None,
+            "tracks": stored.tracks if stored is not None else None,
+            "holdout_status": holdout_status(state, node.id),
+            "holdout_mean_rel_delta": holdout_points(run.timeline).get(node.id),
+            "tables": _tables(run) if is_best and state.baseline is not None else None,
+        },
+        "files": _files(run, node.id, is_best),
+    }
+
+
+def iteration_diff(run: Run, which: str | int, against: str) -> str:
+    """The unified diff of one iteration against the root ("baseline") or its parent,
+    untruncated."""
+    node = resolve_node(run, which)
+    sources = run_sources(run.run_dir, run.spec, run.state)
+    cand = sources(node.id)
+    if not cand:
+        raise InspectError(f"iteration {node.id} saved no files (outcome {node.outcome})")
+    base_id = 0 if against == "baseline" else node.parent
+    label = _label(run, base_id)
+    base = sources(base_id)
+    if not base:
+        raise InspectError(f"the files of {label} were not saved")
+    return _diff(base, cand, label)
+
+
 # ── human output ─────────────────────────────────────────────────────
 
 def _pct(x: float | None) -> str:
@@ -288,4 +399,48 @@ def format_job_detail(d: dict) -> str:
     lines.append("last event: -" if ev is None
                  else f"last event: {_utc(ev['ts'])} {ev['text']}")
     lines.append(f"hardware: {d['hardware'] or 'default'}")
+    return "\n".join(lines)
+
+
+def format_iteration(d: dict) -> str:
+    h, s = d["hypothesis"], d["scores"]
+    lines = [f"job: {d['job_id']}",
+             f"iteration: {d['iteration']}",
+             f"parent: {d['parent_label']}",
+             f"chain: {d['chain']}",
+             f"kind: {d['kind']}",
+             f"outcome: {d['outcome'] or '-'}"]
+    if d["error"]:
+        lines.append(f"error: {d['error']}")
+    lines += [f"title: {h['title']}",
+              f"strategy: {h['strategy_tag'] or '-'}",
+              f"design family: {h['design_family'] or '-'}",
+              "description:",
+              *(f"  {line}" for line in (h["description"] or "-").splitlines()),
+              f"training delta: {_pct(s['mean_rel_delta'])}"]
+    if s["worst_track"] is not None:
+        lines.append(f"worst track: {s['worst_track']} {_pct(s['worst_rel_delta'])}")
+    if s["runtime_ratio"] is not None:
+        lines.append(f"runtime ratio: x{s['runtime_ratio']:.2f}")
+    if s["metered_rel_delta"] is not None:
+        lines.append(f"metered delta: {_pct(s['metered_rel_delta'])}")
+    if s["tracks"]:
+        lines.append("per-track training deltas:")
+        lines += [f"  {t} {_pct(v)}" for t, v in sorted(s["tracks"].items())]
+    held = s["holdout_status"].replace("_", " ")
+    if s["holdout_mean_rel_delta"] is not None:
+        held += f" ({_pct(s['holdout_mean_rel_delta'])})"
+    lines.append(f"held-out: {held}")
+    for t in s["tables"] or []:
+        lines.append(f"{t['heading']}:")
+        if t["error"] is not None:
+            lines.append(f"  no bundle delta: {t['error']}")
+            continue
+        rows = [[r["track"], f"{r['base_mean']:.6g}", f"{r['cand_mean']:.6g}",
+                 _pct(r["rel_delta"]), str(r["cand_errors"]), str(r["n"])] for r in t["tracks"]]
+        rows.append(["mean", "", "", _pct(t["mean_rel_delta"]), f"{t['error_rate']:.2%}", ""])
+        table = _table(["track", "baseline mean", "best mean", "rel delta", "errors", "n"], rows)
+        lines += [f"  {line}" for line in table.splitlines()]
+    lines.append("files:")
+    lines += [f"  {f}" for f in d["files"]] or ["  (none saved)"]
     return "\n".join(lines)
