@@ -122,7 +122,8 @@ baseline and candidates cannot be compared with scores from the new build.
 `talos status` lists the job as `paused`.
 
 **Cause:** a compute call could not complete. The text after `bench:` says which case it is,
-and is also in `state.json` (`stop_reason`) under `runs/<job_id>/`. It is one of:
+and is also in `state.json` (`stop_reason`) under `runs/<job_id>/`; `talos status <job_id>` prints
+it. It is one of:
 
 - the backend could not be reached, or had no hardware free, for longer than Talos retries;
 - the Modal app is missing or older than the client (see
@@ -141,8 +142,8 @@ the job's files under `runs/<job_id>/c3/` before resuming, or start a new job.
 **Symptom:** the run ends with `Status: failed (<reason>)`, and `talos status` lists the job as
 `failed`.
 
-**Cause:** the reason is in `state.json` (`stop_reason`) and in the last lines of
-`timeline.jsonl`, both under `runs/<job_id>/`. Reasons Talos sets itself include
+**Cause:** `talos status <job_id>` prints the reason. It is also in `state.json` (`stop_reason`)
+and in the last lines of `timeline.jsonl`, both under `runs/<job_id>/`. Reasons Talos sets itself include
 `provider auth: …` (the LLM rejected the credential), `provider: …` (another LLM error),
 `docker: …`, `no NVIDIA container runtime` and `dev image not on GHCR`.
 

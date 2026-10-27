@@ -176,6 +176,7 @@ You submit it yourself. The full layout is in
 - [docs/maintainers.md](docs/maintainers.md): development, live smoke tests, dev image upgrades.
 - [docs/architecture.md](docs/architecture.md): the research loop, its guards and the agentic sandbox.
 - [docs/compute-backends.md](docs/compute-backends.md): how Modal, C3 and local Docker are used, with timings.
+- [docs/json-output.md](docs/json-output.md): the JSON schema of `talos status --json` and `talos show --json`.
 
 ## Licence
 

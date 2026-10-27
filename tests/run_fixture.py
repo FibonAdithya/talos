@@ -25,7 +25,8 @@ def _baseline() -> BaselineRecord:
 
 def make_run(run_dir, hyps, nodes=(), best=None, start="mainnet", false_positives=(),
              validations=(), confirmed=(), timeline=(), iteration_files=None,
-             baseline=_DEFAULT, pending_job=None, template=None, status="exhausted"):
+             baseline=_DEFAULT, pending_job=None, template=None, status="exhausted",
+             provider="fake", model="m", stop_reason="budget exhausted: iterations"):
     """`hyps` are hypothesis records; title, description, strategy_tag and outcome get
     defaults, `against` does not. `nodes` are Node objects or dicts. `iteration_files` maps an
     iteration to the files written to iterations/NNNN/ (an empty dict makes an empty
@@ -33,7 +34,7 @@ def make_run(run_dir, hyps, nodes=(), best=None, start="mainnet", false_positive
     challenge/template.rs."""
     run_dir = Path(run_dir)
     iteration_files = dict(iteration_files or {})
-    spec = JobSpec(job_id="J", challenge="knapsack", direction="go", provider="fake", model="m",
+    spec = JobSpec(job_id="J", challenge="knapsack", direction="go", provider=provider, model=model,
                    mode="single-shot",
                    budget=Budget(usd=1.0, hours=2.0, iterations=10, compute_usd=None),
                    rand_hash=HASH, tracks=["t"], training=[NonceSet("t", HASH, 0, 2)],
@@ -41,7 +42,7 @@ def make_run(run_dir, hyps, nodes=(), best=None, start="mainnet", false_positive
                    monorepo_ref="r", challenge_id="c003", start=start)
     st = JobState.fresh(Spend(started_at=T0))
     st.status = status
-    st.stop_reason = "budget exhausted: iterations"
+    st.stop_reason = stop_reason
     st.baseline = _baseline() if baseline is _DEFAULT else baseline
     records = []
     for h in hyps:

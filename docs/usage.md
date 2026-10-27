@@ -139,7 +139,9 @@ same instead of telling you to submit it.
 | `talos setup` | One-time configuration: backend, LLM provider, credentials. Validates them and deploys the Modal app. |
 | `talos run` | Starts or resumes a research job and writes its package when it stops. |
 | `talos compile` | Compiles a directory of algorithm files on the configured backend and prints the compiler output. Scores nothing. |
-| `talos status` | Lists every job under `runs/` with its status, iteration and spend. |
+| `talos status [JOB_ID]` | Lists every job under `runs/`, or one job's detail with `JOB_ID`; `--json` for scripts. |
+| `talos show JOB_ID` | Shows one iteration (the best by default): hypothesis, outcome, scores and file paths; `--json` for scripts. |
+| `talos diff JOB_ID` | Prints one iteration's unified diff against the baseline or its parent. |
 | `talos report JOB_ID` | Writes `runs/<job_id>/package/report.html`, a one-page view of the job's search, from the files already in the run directory. |
 | `talos demo` | Runs a scripted job with no account, network or spend, and prints its package guide. |
 | `talos doctor` | Runs health checks on the config, credential, provider (one small LLM test call), backend, mainnet and dev images, with no compute spend; `--full` also scores one real baseline after asking. |
@@ -403,23 +405,69 @@ returns or is interrupted. Each run overwrites that directory, so do not run two
 ### `talos status`
 
 ```bash
-talos status
+talos status [JOB_ID] [--json]
 ```
 
-One line per job under `runs/`:
+Without a job id, one row per job under `runs/` (the row below is illustrative, not a real
+run):
 
 ```
-20260917-101006-knapsack: won it=1 llm=$0.02 compute=$1.28
+JOB                             CHALLENGE       STATUS     IT  BEST     LLM          COMPUTE  LAST EVENT
+20260917-101006-knapsack        knapsack        won        1   +0.412%  $0.02        $1.28    2026-09-17 10:41 UTC
+20261026-120733-job_scheduling  job_scheduling  exhausted  6   n/a      not tracked  $12.40   2026-10-26 21:14 UTC
 ```
 
-LLM spend reads `llm=not tracked` for a `codex-cli` job and `llm=unpriced` for a model with
-no price-table entry, as in the status line during a run. A job whose `job.json` cannot be
-read shows the dollar figure followed by `(provider unknown)`.
+BEST is the best candidate's mean training delta, `n/a` with no candidate. LLM reads
+`not tracked` for a `codex-cli` job and `unpriced` for a model with no price-table entry, as in
+the status line during a run. LAST EVENT is the time of the last event in `timeline.jsonl`. A
+directory whose `state.json` or `job.json` is missing or cannot be parsed is listed as
+`unreadable`, with the reason on stderr; it does not stop the other jobs from being listed.
+
+With a job id, that job's settings, status and stop reason, its best candidate (training delta
+and held-out result), its budget (each cap after `--add-*` extensions, what was spent and what
+is left), the compute job in flight and the last event. Hours spent run to the last event for
+a job that has stopped (`won`, `exhausted`, `failed`, `cancelled` or `paused`) and to now for
+any other. Talos writes no lock file, so a `researching` job whose last event is old may belong
+to a process that has died.
+
+`--json` prints one JSON object instead; its schema is in
+[docs/json-output.md](json-output.md). The command reads `runs/` only: no config,
+credentials or network. Exit code 0, or 1 with a message on stderr for an unknown job id.
 
 Status is one of `queued`, `measuring_baseline`, `researching`, `confirming`, `won`,
 `exhausted` (a budget ran out; resumable with `--add-*`), `cancelled` (Ctrl-C), `paused`
 (the compute backend was unreachable) or `failed` (the reason is in `state.json` and the last
 lines of `timeline.jsonl`).
+
+### `talos show`
+
+```bash
+talos show JOB_ID [--iteration N|best] [--json]
+```
+
+One iteration of a job: its parent in the search tree, outcome, hypothesis (title, strategy,
+design family and the full description), training delta with the worst track and per-track
+deltas, the held-out result, and the paths of its saved files. For the best candidate it also
+prints the per-track tables, baseline against best, on the training and held-out nonces.
+`--iteration` defaults to `best`. `--json` prints one JSON object; see
+[docs/json-output.md](json-output.md).
+
+Exit code 0; 1 with a message on stderr when the job, the iteration or a best candidate does
+not exist (an iteration still in flight has no record yet); 2 for a bad flag.
+
+### `talos diff`
+
+```bash
+talos diff JOB_ID [--iteration N|best] [--against baseline|parent]
+```
+
+Prints the unified diff of one iteration's files to stdout, untruncated. `--iteration`
+defaults to `best`. `--against baseline` (the default) diffs against the root the job started
+from: the mainnet baseline, or the template for a `--start template` job. `--against parent`
+diffs against the iteration it was built on. An empty diff prints nothing.
+
+Exit code 0; 1 with a message on stderr when the job, the iteration or a best candidate does
+not exist, or when the iteration saved no files (an edit or compile failure); 2 for a bad flag.
 
 ### `talos report`
 

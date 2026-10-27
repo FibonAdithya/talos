@@ -35,10 +35,11 @@ When two documents disagree, the one higher in this list wins.
 2. **`README.md`** (quickstart), **`docs/usage.md`** (full command reference),
    **`docs/troubleshooting.md`**, **`docs/windows.md`** and **`docs/maintainers.md`** —
    setup and the commands you run day to day.
-3. **`docs/architecture.md`** and **`docs/compute-backends.md`** — the research
-   loop, the guards between build and scoring, the agentic sandbox, the
-   baseline cache, how Modal, C3 and local Docker are used, C3 and local
-   timings, and the dev images.
+3. **`docs/architecture.md`**, **`docs/compute-backends.md`** and
+   **`docs/json-output.md`** — the research loop, the guards between build and
+   scoring, the agentic sandbox, the baseline cache, how Modal, C3 and local
+   Docker are used, C3 and local timings, the dev images, and the versioned
+   JSON output of `talos status` and `talos show`.
 4. **`docs/ai/`** — *not authoritative*. Design specs and plans written by
    agents during development, kept for the reasoning behind decisions. They
    are not updated as the code changes. See `docs/ai/README.md`. Agents
@@ -255,6 +256,8 @@ nobody.
 | Run the gate | `Makefile` |
 | The research loop, its guards, the agentic sandbox, the baseline cache | `docs/architecture.md` |
 | Modal, C3 and local transports, job directories, timings, the dev images | `docs/compute-backends.md` |
+| JSON output of talos status / show (the versioned schema) | `docs/json-output.md` |
+| `talos status`, `show`, `diff`: reading a run directory | `talos/inspect_run.py` |
 | Why a decision was made (non-authoritative) | `docs/ai/specs/` |
 | CLI flags and dispatch | `talos/cli.py::build_parser`, `talos/cli.py::COMMANDS` |
 | Wizard menus and the yes/no confirmation | `talos/wizard.py`; the `run` wizard and job summary in `talos/cli.py::cmd_run` |
