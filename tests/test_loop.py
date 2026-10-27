@@ -2210,3 +2210,119 @@ def test_a_candidate_that_ran_every_nonce_has_no_stop_note(tmp_path):
     scored = [json.loads(x) for x in (store.run_dir / "timeline.jsonl").read_text().splitlines()
               if json.loads(x)["kind"] == "scored"]
     assert "not_run" not in scored[0]
+
+
+# Issue #32: the best is the code every later iteration edits, so a candidate that buys a higher
+# mean by regressing a track must not become it. Qualities per k on tracks t and u.
+def per_track(table, holdout=None):
+    def scores(challenge, files, ns):
+        k = int(re.search(r"let k = (\d+);", files["mod.rs"]).group(1))
+        if holdout is not None and ns.start >= 1_000_000:
+            return [holdout for _ in ns.nonces()]
+        return [table[k][0 if ns.track == "t" else 1] for _ in ns.nonces()]
+    return scores
+
+
+def test_a_higher_mean_that_regresses_a_track_does_not_become_the_best(tmp_path):
+    table = {1: (100, 100), 2: (102, 102), 5: (120, 95), 3: (103, 103)}
+    b = Budget(usd=None, hours=None, iterations=3, compute_usd=None)
+    script = [hyp("a"), edit(2),            # 1: +2% on both, the best (held-out flat: no win)
+              hyp("b"), edit(5, frm=2),     # 2: mean +7.5%, but u -5% under the best's +2%
+              hyp("c"), edit(3, frm=2)]     # 3: built on iteration 1, +3% on both
+    loop, fp, fb, store = make(tmp_path, script, per_track(table, holdout=100), b,
+                               two_tracks=True, thresholds=Thresholds(recall=1, distill=99))
+    st = loop.run()
+    # mutation: the mean-only rule makes iteration 2 the best, and iteration 3's SEARCH text
+    # `let k = 2;` then misses its `let k = 5;`, so iteration 3 is failed:edit
+    assert [h["outcome"] for h in st.hypotheses] == ["improved", "failed:score", "improved"]
+    assert st.best.iteration == 3
+    assert "u" in st.hypotheses[1]["error"] and "-5.00%" in st.hypotheses[1]["error"]
+    # the next prompt's recall block carries the reason
+    assert any("-5.00%" in user for _system, user in fp.calls[4:])
+
+
+def test_template_stepping_stones_keep_the_worst_track(tmp_path):
+    # A template start has no best, so the first scored candidate is the best however far below
+    # mainnet it is; after that the worst track may not fall. One chain on a template start
+    # also runs the per-chain greedy branch, which must apply the same rule.
+    table = {1: (10, 10), 2: (50, 60), 3: (70, 55), 4: (90, 40), 5: (75, 55)}
+    b = Budget(usd=None, hours=None, iterations=4, compute_usd=None)
+    script = [hyp("a"), whole(2),           # 1: -50%, -40%: the first best
+              hyp("b"), edit(3, frm=2),     # 2: -30%, -45%: mean up, worst -45% >= -50%
+              hyp("c"), edit(4, frm=3),     # 3: -10%, -60%: mean up, worst -60% < -45%
+              hyp("d"), edit(5, frm=3)]     # 4: -25%, -45%, built on iteration 2
+    loop, fp, fb, store = make(tmp_path, script, per_track(table), b, two_tracks=True,
+                               spec_kw={"start": "template"})
+    st = loop.run()
+    # mutation: the job-wide rule alone lets the chain branch take iteration 3 as "accepted",
+    # and the mean-only rule takes it as "improved"; either way iteration 4 is built on it
+    # and its SEARCH text `let k = 3;` misses, so it is failed:edit
+    assert [h["outcome"] for h in st.hypotheses] == [
+        "improved", "improved", "failed:score", "improved"]
+    assert [h["against"] for h in st.hypotheses] == [0, 1, 2, 2]
+    assert st.best.iteration == 4 and st.chains[0].best == 4
+
+
+def test_each_chain_keeps_its_own_worst_track(tmp_path):
+    # Chain 0's bar is its own best (node 1: +2%, +2%), not the job best (node 2: +10%, +6%).
+    from talos.challenges import CHALLENGES
+    table = {1: (100, 100), 2: (102, 102), 3: (110, 106), 4: (105, 103), 9: (100, 100),
+             6: (112, 101)}
+    b = Budget(usd=None, hours=None, iterations=5, compute_usd=None)
+    script = [hyp("a"), edit(2),            # 1, chain 0: the job best
+              hyp("b"), edit(3),            # 2, chain 1: the job best
+              hyp("c"), edit(4, frm=2),     # 3, chain 0: +4% mean, worst +3% >= +2%
+              hyp("d"), edit(9, frm=3),     # 4, chain 1: no gain
+              hyp("e"), edit(6, frm=4)]     # 5, chain 0: +6.5% mean, worst +1% < +3%
+    loop, fp, fb, store = make(tmp_path, script, per_track(table), b, two_tracks=True,
+                               spec_kw={"chains": 2})
+    loop.rule = replace(CHALLENGES["knapsack"].beat, margin=0.5)  # nothing wins outright
+    st = loop.run()
+    # mutation: the job best's bar for chain 0 rejects iteration 3, and iteration 5 is then
+    # failed:edit; the mean-only chain rule accepts iteration 5
+    assert [h["outcome"] for h in st.hypotheses] == [
+        "improved", "improved", "accepted", "failed:score", "failed:score"]
+    assert [c.best for c in st.chains] == [3, 2]
+    assert "+1.00%" in st.hypotheses[4]["error"]
+
+
+def test_native_validation_demotes_a_metered_worst_track_regression(tmp_path):
+    # k=5 is +10%, +4% natively; on the metered path three of u's nonces fail and u is +1%,
+    # under the validated best's worst track of +2%.
+    from talos.challenges import CHALLENGES
+    table = {1: (100, 100), 2: (102, 102), 5: (110, 104)}
+
+    def metered(ch, files, ns):
+        q = per_track(table)(ch, files, ns)
+        if "let k = 5;" in files["mod.rs"] and ns.track == "u":
+            return [None, None, None] + q[3:]
+        return q
+    fb = FakeBench(per_track(table), metered_scores=metered)
+    b = Budget(usd=None, hours=None, iterations=2, compute_usd=None)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(2), hyp("b"), edit(5, frm=2)],
+                                bench=fb, budget=b, two_tracks=True,
+                                budgets={"t": 1_000_000, "u": 1_000_000})
+    # no win outright; the ceiling lets u's three metered errors in 8 nonces through
+    loop.rule = replace(CHALLENGES["knapsack"].beat, margin=0.5, error_ceiling=0.5)
+    st = loop.run()
+    # mutation: validation_failure with the mean-only rule validates iteration 2 (+5.5% mean)
+    assert [v["reason"] for v in st.validations] == [None, "not_improved"]
+    assert st.best.iteration == 1
+
+
+def test_an_annealed_candidate_that_regresses_a_track_moves_current_but_not_best(tmp_path):
+    # Annealing accepts iteration 2 (its mean is over its parent's), so research goes on from
+    # it; a reheat still returns to the chain's best, which must be the one the rule allows.
+    # A template start, because with one chain on a mainnet start the chain's best moves only
+    # with the job's (Loop._chain_scores_apart).
+    from talos.lineage import AnnealSettings
+    table = {2: (50, 60), 5: (90, 40)}  # -50%, -40%; then mean -35% but worst -60%
+    b = Budget(usd=None, hours=None, iterations=2, compute_usd=None)
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), whole(2), hyp("b"), edit(5, frm=2)],
+                               per_track(table), b, two_tracks=True,
+                               spec_kw={"start": "template", "search": "anneal",
+                                        "anneal": AnnealSettings().to_dict()})
+    st = loop.run()
+    assert [h["outcome"] for h in st.hypotheses] == ["improved", "accepted"]
+    # mutation: the mean-only chain rule in _add_node makes node 2 the chain's best
+    assert (st.chains[0].current, st.chains[0].best) == (2, 1)

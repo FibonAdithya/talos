@@ -87,10 +87,56 @@ def runtime_ratio(baseline: list[NonceResult], candidate: list[NonceResult]) -> 
 
 
 def beats(baseline: list[NonceResult], candidate: list[NonceResult], rule: BeatRule) -> bool:
-    d = bundle_delta(baseline, candidate)
+    return _wins(bundle_delta(baseline, candidate), rule)
+
+
+def _wins(d: BundleDelta, rule: BeatRule) -> bool:
     return (d.mean_rel_delta > rule.margin
             and d.worst_rel_delta >= -rule.track_tolerance
             and d.error_rate <= rule.error_ceiling)
+
+
+@dataclass(frozen=True)
+class Bar:
+    """The current best's mean and worst-track deltas against the baseline: what a candidate
+    must clear to replace it. With no best it is the baseline against itself, (0.0, 0.0), or
+    minus infinity for both on a template start, whose empty template is never scored."""
+    mean: float
+    worst: float
+
+    @classmethod
+    def of(cls, delta: dict) -> Bar:
+        return cls(delta["mean_rel_delta"], delta["worst_rel_delta"])
+
+
+def clears(mean_delta: float, worst_delta: float, bar: Bar, rule: BeatRule) -> bool:
+    """A mean over the bar's, with the worst track no further below the bar's worst than
+    track_tolerance (issue #32)."""
+    return mean_delta > bar.mean and worst_delta >= bar.worst - rule.track_tolerance
+
+
+def improves(d: BundleDelta, bar: Bar, rule: BeatRule) -> bool:
+    """Whether a scored candidate replaces the best, the code later iterations edit. It does if
+    it beats the baseline, so a confirmed win is always the best, or if it clears the best
+    under the error ceiling. beats() alone is not required: that would rule out every stepping
+    stone (user decision 2026-09-29). The mean alone is not enough either: a higher mean
+    bought by regressing a track would become the base of every later iteration (issue #32)."""
+    return _wins(d, rule) or (d.error_rate <= rule.error_ceiling
+                              and clears(d.mean_rel_delta, d.worst_rel_delta, bar, rule))
+
+
+def worst_track_shortfall(d: BundleDelta, bar: Bar, rule: BeatRule) -> str | None:
+    """Why a candidate whose mean is over the best's does not improve on it, for the recall
+    block of the next prompt; None when the mean was not over the best's, the error rate is
+    over the ceiling, or it improves. What is left is a worst track under the bar's."""
+    if (d.mean_rel_delta <= bar.mean or d.error_rate > rule.error_ceiling
+            or improves(d, bar, rule)):
+        return None
+    worst = min(d.tracks, key=lambda t: t.rel_delta)
+    allowed = f" less the {rule.track_tolerance:.2%} tolerance" if rule.track_tolerance else ""
+    return (f"mean {d.mean_rel_delta:+.2%} is over the best's {bar.mean:+.2%}, but track "
+            f"{worst.track} at {worst.rel_delta:+.2%} is under the best's worst track, "
+            f"{bar.worst:+.2%}{allowed}")
 
 
 def holdout_decision(baseline_training: list[NonceResult] | None, training: list[NonceResult],
@@ -178,14 +224,13 @@ def quality_mismatches(metered: list[NonceResult], native: list[NonceResult]) ->
 
 
 def validation_failure(compiled: bool, metered: list[NonceResult], native: list[NonceResult],
-                       baseline: list[NonceResult], best_delta: float,
+                       baseline: list[NonceResult], bar: Bar,
                        rule: BeatRule) -> tuple[str | None, BundleDelta | None]:
     """Whether a candidate that improved natively still stands on TIG's metered runtime, and
     why not. It must build metered, run out of fuel on no nonce whose native run had budget
     left, give the native quality on every nonce both paths solved within their limits, stay
-    under the error ceiling, and still count as improved by the loop's own rule (mean over
-    the current best, or beats). beats() alone is not required: that would demote every
-    stepping stone (user decision 2026-09-29)."""
+    under the error ceiling, and still count as improved by the loop's own rule
+    (improves(): it clears the current best, or beats the baseline)."""
     if not compiled:
         return "native_metered_build_mismatch", None
     if fuel_proxy_misses(metered, native):
@@ -198,6 +243,6 @@ def validation_failure(compiled: bool, metered: list[NonceResult], native: list[
         return "unscoreable", None
     if d.error_rate > rule.error_ceiling:
         return "error_ceiling", d
-    if not (d.mean_rel_delta > best_delta or beats(baseline, metered, rule)):
+    if not improves(d, bar, rule):
         return "not_improved", d
     return None, d
