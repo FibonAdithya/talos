@@ -21,7 +21,7 @@ import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
-from talos import image_updates
+from talos import image_updates, workspace
 from talos import mainnet as mainnet_api
 from talos.budget import (ADD_DIMENSIONS, Budget, BudgetExhausted, Spend, effective_budget,
                           exhausted)
@@ -339,7 +339,10 @@ def _mainnet_hyperparameters(api, challenge: str, info) -> tuple[dict | None, di
 
 
 def cmd_setup(args, ask) -> int:
-    root = Path.cwd()
+    root = workspace.find_root_for_write()
+    print(f"Workspace: {root}"
+          + ("  (the default workspace; talos --workspace DIR setup keeps it elsewhere)"
+             if root == workspace.default_root() else ""))
     try:
         backend = ask_choice(ask, "Compute backend", BACKEND_OPTIONS, "modal")
         # "fake" is the in-process test double: it is in KINDS, but setting it up would write a
@@ -423,6 +426,7 @@ def cmd_setup(args, ask) -> int:
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 1
+    root.mkdir(parents=True, exist_ok=True)
     save(root, Config(provider=kind, model=model, mode=mode, api_base=api_base,
                       backend=backend, local_cpus=local.cpus if local else None,
                       local_memory_gib=local.memory_gib if local else None),
@@ -884,7 +888,7 @@ def _new_job_id(root: Path, challenge: str, prefix: str = "") -> str:
 
 def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: int,
                  cfg: Config, budget: Budget, start: str, search: str, chains: int,
-                 scoring: str, hp_line: str, backend: str) -> str:
+                 scoring: str, hp_line: str, backend: str, root: Path) -> str:
     cs = CHALLENGES[challenge]
     warning = status_warning(cs)
     caps = []
@@ -913,13 +917,13 @@ def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: 
         f"  budget:    {budget_text}",
         f"  backend:   {backend} - {billing}" if cfg.provider != "fake" else
         f"  backend:   {billing}",
-        f"  results:   runs/{job_id}/",
+        f"  results:   {root / 'runs' / job_id}",
     ]
     return "\n".join(lines)
 
 
 def cmd_run(args, ask) -> int:
-    root = Path.cwd()
+    root = workspace.find_root_for_write() if args.fake else workspace.find_root()
     add = {d: v for d in ADD_DIMENSIONS
            if (v := getattr(args, f"add_{d}")) is not None}  # 0 counts as given; extend refuses
     if add and not args.resume:
@@ -930,6 +934,7 @@ def cmd_run(args, ask) -> int:
     # spec §11: --fake needs neither a config file nor network, so it must be resolved before
     # `load(root)` is even attempted; a fresh clone with no talos.config.json still runs it.
     if args.fake:
+        root.mkdir(parents=True, exist_ok=True)
         cfg = Config(provider="fake", model="fake", mode="single-shot", api_base=None,
                      backend="modal")  # the fake bench is in-process: no backend to pick
     else:
@@ -1166,7 +1171,7 @@ def cmd_run(args, ask) -> int:
     print(_job_summary(job_id=job_id, challenge=challenge, scope=scope, nonces=nonces,
                        fuel=info.max_fuel, cfg=cfg, budget=budget, start=start, search=search,
                        chains=chains, scoring=scoring, hp_line=hp_line,
-                       backend=cfg.backend))
+                       backend=cfg.backend, root=root))
     # Nothing below this point has run yet: no image recommendation, no run directory, no bench.
     if not args.yes and not confirm(ask, "Start this job?", True):
         print("Not started.")
@@ -1204,7 +1209,8 @@ def cmd_demo(args, ask) -> int:
     from talos.demo import DemoScript, demo_compile_ok, demo_scores, describe_package
     from talos.providers.fake import FakeProvider
 
-    root = Path.cwd()
+    root = workspace.find_root_for_write()
+    root.mkdir(parents=True, exist_ok=True)
     challenge = args.challenge
     cfg = Config(provider="fake", model="fake", mode="single-shot", api_base=None,
                  backend="modal")  # the fake bench is in-process: no backend to pick
@@ -1231,7 +1237,7 @@ def cmd_demo(args, ask) -> int:
     (store.run_dir / "tacit.md").write_text(user_tacit(direction),
                                             encoding="utf-8", newline="\n")
     print(f"This is a scripted demo of a {challenge} job: no account, no network and no spend. "
-          f"Results go to runs/{job_id}/.")
+          f"Results go to {root / 'runs' / job_id}.")
     # Zero prices: the status lines then show $0.00, as the line above promises.
     rc = execute_job(spec, store, cfg, resume=False,
                      fakes=(FakeProvider(DemoScript(), usd_per_call=0.0),
@@ -1278,12 +1284,12 @@ def cmd_compile(args, ask) -> int:
         return 2
     from talos.bench import EvalRequest, PendingJobStore
     try:
-        backend = compile_backend(args, Path.cwd())
+        backend = compile_backend(args, workspace.find_root())
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
     try:
-        cfg = load(Path.cwd())
+        cfg = load(workspace.find_root())
     except ConfigError:
         cfg = None  # the agentic sandbox: the key comes from C3_API_KEY
     local = None
@@ -1294,7 +1300,7 @@ def cmd_compile(args, ask) -> int:
         except C3CommandError as e:
             print(f"Docker failed while preparing {args.challenge}: {e}", file=sys.stderr)
             return 1
-    run_dir = Path.cwd() / ".talos" / "compile"
+    run_dir = workspace.find_root() / ".talos" / "compile"
     bench = make_bench(backend, run_dir, PendingJobStore.memory(),
                        c3_api_key=resolve_c3_api_key(cfg) if backend == "c3" else None,
                        local=local)
@@ -1352,7 +1358,7 @@ def cmd_status(args, ask) -> int:
     """Lists the jobs under runs/, or one job's detail. Reads runs/ only."""
     from talos import inspect_run
 
-    root = Path.cwd() / "runs"
+    root = workspace.find_root() / "runs"
     if args.job_id is not None:
         try:
             detail = inspect_run.job_detail(inspect_run.load_run(root, args.job_id), time.time())
@@ -1369,7 +1375,7 @@ def cmd_status(args, ask) -> int:
         _print_json({"schema_version": inspect_run.SCHEMA_VERSION, "jobs": rows})
         return 0
     if not rows:
-        print("no jobs under runs/")
+        print(f"no jobs under {root}")
         return 0
     print(inspect_run.format_status_table(rows))
     for row in rows:
@@ -1383,7 +1389,7 @@ def cmd_show(args, ask) -> int:
     from talos import inspect_run
 
     try:
-        run = inspect_run.load_run(Path.cwd() / "runs", args.job_id)
+        run = inspect_run.load_run(workspace.find_root() / "runs", args.job_id)
         detail = inspect_run.iteration_detail(run, args.iteration)
     except inspect_run.InspectError as e:
         print(e, file=sys.stderr)
@@ -1400,7 +1406,7 @@ def cmd_diff(args, ask) -> int:
     from talos import inspect_run
 
     try:
-        run = inspect_run.load_run(Path.cwd() / "runs", args.job_id)
+        run = inspect_run.load_run(workspace.find_root() / "runs", args.job_id)
         text = inspect_run.iteration_diff(run, args.iteration, args.against)
     except inspect_run.InspectError as e:
         print(e, file=sys.stderr)
@@ -1411,7 +1417,7 @@ def cmd_diff(args, ask) -> int:
 
 def cmd_report(args, ask) -> int:
     """Writes runs/<job_id>/package/report.html. Needs no credentials or config."""
-    run_dir = Path.cwd() / "runs" / args.job_id
+    run_dir = workspace.find_root() / "runs" / args.job_id
     # Checked before JobStore, whose constructor creates the directory.
     if not run_dir.is_dir():
         print(f"no job {args.job_id} under runs/", file=sys.stderr)
@@ -1440,7 +1446,7 @@ def recommend_image_update(challenge: str) -> None:
 
 def cmd_doctor(args, ask) -> int:
     from talos import doctor
-    return doctor.run(Path.cwd(), full=args.full, challenge=args.challenge, yes=args.yes,
+    return doctor.run(workspace.find_root(), full=args.full, challenge=args.challenge, yes=args.yes,
                       json_out=args.json, ask=ask)
 
 
@@ -1482,6 +1488,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Talos researches better algorithms for a TIG challenge: it asks an LLM for "
                     "edits, scores each candidate on TIG's benchmark and keeps the "
                     "improvements.")
+    p.add_argument("--workspace", metavar="DIR",
+                   help="the Talos workspace (default: nearest talos.config.json above the "
+                        "current directory, else ~/.talos/workspace)")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
     sub.add_parser("setup", help="choose a backend and LLM provider and save the settings",
                    description="Interactive setup: pick a compute backend (modal, c3 or local) "
@@ -1631,10 +1640,16 @@ COMMANDS = {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status"
 
 def main(argv=None, ask=default_ask) -> int:
     args = build_parser().parse_args(argv)
+    if args.workspace:
+        os.environ[workspace.ENV_VAR] = str(Path(args.workspace).expanduser().resolve())
     # Every command, not only the inspect ones: `talos run` prints ≈, ∞ and LLM-written
     # titles on every iteration (issue #85).
     _utf8_stdout()
-    return COMMANDS[args.cmd](args, ask)
+    try:
+        return COMMANDS[args.cmd](args, ask)
+    except workspace.WorkspaceError as e:
+        print(e, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

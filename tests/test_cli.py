@@ -3258,7 +3258,7 @@ def test_accepting_the_summary_starts_the_job(tmp_path, monkeypatch, capsys):
     job_id = calls["execute"][0]
     assert (tmp_path / "runs" / job_id / "job.json").exists()
     out = capsys.readouterr().out
-    assert f"runs/{job_id}/" in out
+    assert f"  results:   {tmp_path.resolve() / 'runs' / job_id}\n" in out
 
 
 def test_summary_labels_codex_cli_spend_not_tracked(tmp_path, monkeypatch, capsys):
