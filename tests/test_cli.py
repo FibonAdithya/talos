@@ -1185,6 +1185,23 @@ def test_run_restores_the_default_sigint_handler_on_entry(tmp_path, monkeypatch)
     assert seen == [signal.default_int_handler]
 
 
+def test_run_puts_the_callers_sigint_handler_back(tmp_path, monkeypatch):
+    # mutation: no `finally` leaves default_int_handler installed for an in-process caller
+    import signal
+
+    def callers_handler(*_):
+        pass
+
+    def at_fetch(name):
+        raise MainnetError("stop")
+    previous = signal.signal(signal.SIGINT, callers_handler)
+    try:
+        assert _fake_config_run(tmp_path, monkeypatch, at_fetch) == 1
+        assert signal.getsignal(signal.SIGINT) is callers_handler
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def test_early_interrupt_exits_130_without_traceback(tmp_path, monkeypatch, capsys):
     # mutation: no catch lets KeyboardInterrupt out of main(); returning 1 or printing the
     # traceback changes the exit code or stderr

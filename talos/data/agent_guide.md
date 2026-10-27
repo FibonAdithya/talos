@@ -65,8 +65,10 @@ talos run --challenge knapsack --direction-file direction.md \
   tested. `talos run` warns before it starts an untested one. Prefer a tested challenge unless the
   user asks otherwise.
 - Exit codes: 0 when the job ends `won`; 1 when it ends any other way, or a mainnet or dev-image
-  check stops it; 2 for bad arguments, a missing config or a missing API key; 130 when it is
-  interrupted before the research loop starts.
+  check stops it; 2 for bad arguments, a missing config or a missing API key; 130 when an
+  interrupt lands outside the research loop (before it starts, or while the package is written).
+  An exit code alone does not say how the job ended: read `status` from
+  `talos status JOB_ID --json`.
 
 ### Writing the direction file
 
@@ -143,7 +145,8 @@ call to finish, which can take minutes. Send it once and wait for the process to
 (SIGTERM): the package is then not written. A SIGINT before the research loop starts (during the
 image pull or the capacity probe, say) exits with code 130. If the job summary had already been
 printed, the job is left `cancelled` and `talos run --resume JOB_ID` continues it; before that,
-nothing is written. On Windows there is no tested way to interrupt a background job; run it
+nothing is written. A SIGINT while the package is being written also exits 130, and the job
+keeps the status it stopped with. On Windows there is no tested way to interrupt a background job; run it
 in the foreground, or rely on the budgets to stop it.
 
 ### Resuming

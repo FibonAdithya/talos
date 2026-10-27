@@ -31,7 +31,7 @@ flowchart TD
     confirmed{"Still beats the baseline?<br/>with --track: no other track worse"}
     failed["Record the outcome in the hypothesis log<br/>after 3 iterations in a row without improvement,<br/>the LLM distills a lesson into tacit.md"]
     won["Status: won"]
-    stop["Status: exhausted, cancelled (Ctrl-C), failed or paused"]
+    stop["Status: exhausted, cancelled (Ctrl-C or one SIGINT), failed or paused"]
     package["Write runs/JOB_ID/package/ and package.zip<br/>best candidate, diff, scores, evidence draft"]
 
     setup --> start --> spec --> baseline --> budget

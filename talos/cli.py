@@ -933,12 +933,14 @@ def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: 
 def cmd_run(args, ask) -> int:
     # A `talos run ... &` from a non-interactive shell starts with SIGINT ignored, so without
     # this a `kill -INT` before execute_job installs the loop's handler does nothing (#71).
-    signal.signal(signal.SIGINT, signal.default_int_handler)
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         return _cmd_run(args, ask)
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def _run_job(spec: JobSpec, store: JobStore, cfg: Config, **kw) -> int:
