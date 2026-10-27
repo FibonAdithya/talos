@@ -1141,13 +1141,56 @@ def test_sigint_stops_the_bench_too(tmp_path, monkeypatch):
         self.request_stop = lambda: stops.append("bench")
     monkeypatch.setattr(FakeBench, "__init__", init)
     handlers = {}
-    # setdefault: execute_job's `finally` re-registers the previous handler, which must not
-    # overwrite the one under test
-    monkeypatch.setattr(cli.signal, "signal", lambda sig, h: handlers.setdefault(sig, h))
+    # Every registration in order: cmd_run's default handler first, then the loop's stop
+    # handler, then execute_job's `finally` putting the previous one back.
+    monkeypatch.setattr(cli.signal, "signal",
+                        lambda sig, h: handlers.setdefault(sig, []).append(h))
     assert cli.main(["run", "--challenge", "knapsack", "--direction", "go",
                      "--budget-iterations", "1", "--yes", "--fake"]) == 0
-    handlers[signal.SIGINT](None, None)
+    assert handlers[signal.SIGINT][0] is signal.default_int_handler
+    handlers[signal.SIGINT][1](None, None)
     assert stops == ["bench"]
+
+
+def _fake_config_run(tmp_path, monkeypatch, at_fetch):
+    """`talos run` with a fake config, stopped at the mainnet fetch by `at_fetch`."""
+    monkeypatch.chdir(tmp_path)
+    save(tmp_path, Config(provider="fake", model="fake", mode="single-shot", api_base=None), None)
+    monkeypatch.setattr(cli, "fetch_challenge_info", at_fetch)
+    return cli.main(["run", "--challenge", "knapsack", "--direction", "go",
+                     "--budget-iterations", "1", "--yes"])
+
+
+def test_run_restores_the_default_sigint_handler_on_entry(tmp_path, monkeypatch):
+    # A `talos run ... &` from a non-interactive shell inherits SIGINT ignored, so an agent's
+    # `kill -INT` before the loop installs its own handler did nothing (#71).
+    # mutation: no reset, or a reset placed after the mainnet fetch, records SIG_IGN
+    import signal
+    seen = []
+
+    def at_fetch(name):
+        seen.append(signal.getsignal(signal.SIGINT))
+        raise MainnetError("stop")
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        assert _fake_config_run(tmp_path, monkeypatch, at_fetch) == 1
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert seen == [signal.default_int_handler]
+
+
+def test_early_interrupt_exits_130_without_traceback(tmp_path, monkeypatch, capsys):
+    # mutation: no catch lets KeyboardInterrupt out of main(); returning 1 or printing the
+    # traceback changes the exit code or stderr
+    def at_fetch(name):
+        raise KeyboardInterrupt
+    try:
+        rc = _fake_config_run(tmp_path, monkeypatch, at_fetch)
+    except KeyboardInterrupt:  # escaping would abort the pytest session instead of failing
+        pytest.fail("KeyboardInterrupt escaped talos run")
+    assert rc == 130
+    assert capsys.readouterr().err == "interrupted\n"
+    assert list(tmp_path.glob("runs/*/job.json")) == []
 
 
 def test_a_cancelled_baseline_is_not_a_failed_run(tmp_path, monkeypatch, capsys):
