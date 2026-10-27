@@ -36,6 +36,7 @@ from talos.challenges import (CHALLENGES, DEFAULT_CHALLENGE, DEV_IMAGE_TAG, MONO
                               status_text, status_warning)
 from talos.config import (Config, ConfigError, ENV_KEYS, load, resolve_api_key,
                           resolve_c3_api_key, save)
+from talos.deploy_digest import marker_name
 from talos.diagnostics import first_error
 from talos.lineage import AnnealSettings
 from talos.local_transport import (DockerInfo, DockerTransport, docker_info, has_gpu_runtime,
@@ -76,8 +77,7 @@ def default_ask(prompt: str, default: str | None = None, secret: bool = False) -
 
 
 def deploy_bench(token_id: str | None, token_secret: str | None, run=subprocess.run) -> None:
-    modal = shutil.which("modal") or [sys.executable, "-m", "modal"]
-    base = modal if isinstance(modal, list) else [modal]
+    base = [sys.executable, "-m", "modal"]  # the modal this Talos was installed with
     if token_id and token_secret:
         r = run(base + ["token", "set", "--token-id", token_id, "--token-secret", token_secret],
                 capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -775,6 +775,8 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
     # `talos compile` inside the agentic sandbox runs in a worktree with no talos.config.json.
     os.environ["TALOS_BACKEND"] = "modal" if fake else cfg.backend
     try:
+        if cfg.backend == "modal" and not fake:
+            bench.check_deploy()  # before any probe: a stale app must not be billed
         freeze_hardware(bench, spec, state, store, "modal" if fake else cfg.backend)
     except BenchUnavailable as e:
         # Resumable: the GPUs may free up. A `failed` job could not be resumed at all.
@@ -1290,6 +1292,19 @@ def compile_backend(args, root: Path) -> str:
     return backend
 
 
+def cmd_deploy(args, ask) -> int:
+    """Redeploys the Modal app from this install's source. Reads no config, and keeps the token
+    `talos setup` already set."""
+    try:
+        extras.require("modal", "talos deploy")
+        deploy_bench(None, None)
+    except ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(f"Deployed talos-bench ({marker_name()})")
+    return 0
+
+
 def cmd_compile(args, ask) -> int:
     """Compile only: no nonce is scored. On C3 and local the job dir is the fixed
     `.talos/compile/<c3|local>/adhoc`, which every run rewrites, and on local the run removes
@@ -1332,6 +1347,8 @@ def cmd_compile(args, ask) -> int:
                        local=local)
     from talos.bench import BenchUnavailable
     try:
+        if backend == "modal":
+            bench.check_deploy()
         # The job's GPU when run from the agentic sandbox (execute_job exports it); a probe of
         # its own for an ad hoc compile, which has no job to match.
         bench.select_hardware(args.challenge, chosen=os.environ.get("TALOS_HARDWARE") or None)
@@ -1521,6 +1538,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("setup", help="choose a backend and LLM provider and save the settings",
                    description="Interactive setup: pick a compute backend (modal, c3 or local) "
                                "and an LLM provider, then save them to the Talos config.")
+    sub.add_parser("deploy", help="redeploy the Modal app after upgrading Talos",
+                   description="Deploy the talos-bench app to your Modal account from this "
+                               "install's source. Run it after upgrading Talos; a run stops "
+                               "before spending when the deployed app is older.")
     r = sub.add_parser(
         "run", help="research a challenge, or resume a job",
         description="Start a research job on one challenge, or resume an earlier job with "
@@ -1659,7 +1680,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"setup": cmd_setup, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
+COMMANDS = {"setup": cmd_setup, "deploy": cmd_deploy, "run": cmd_run, "compile": cmd_compile, "status": cmd_status,
             "show": cmd_show, "diff": cmd_diff, "report": cmd_report, "check-updates": cmd_check_updates, "demo": cmd_demo,
             "doctor": cmd_doctor}
 

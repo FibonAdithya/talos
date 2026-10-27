@@ -19,6 +19,7 @@ from talos.c3_bench import GBP_PER_HOUR
 from talos.challenges import (CHALLENGES, DEV_IMAGE_TAG, MODAL_GPUS, c3_hardware_options,
                               gpu_slug)
 from talos.config import ENV_KEYS, Config, ConfigError, load, resolve_api_key, resolve_c3_api_key
+from talos.deploy_digest import marker_name
 from talos.wizard import confirm
 
 OK, WARN, FAIL, SKIP = "ok", "warn", "FAIL", "skip"
@@ -43,7 +44,7 @@ def modal_function_names() -> list[str]:
         suffixes = [f"_{gpu_slug(g)}" for g in MODAL_GPUS] if spec.is_gpu else [""]
         for suffix in suffixes:
             names += [f"compile_{name}{suffix}", f"score_batch_{name}{suffix}"]
-    return names + [f"probe_{gpu_slug(g)}" for g in MODAL_GPUS]
+    return names + [f"probe_{gpu_slug(g)}" for g in MODAL_GPUS] + [marker_name()]
 
 
 def modal_lookup(app: str, name: str) -> bool:
@@ -112,11 +113,15 @@ def _check_modal() -> Check:
     except Exception as e:  # import, token or network: any of them means no usable deploy
         return Check("backend", FAIL, f"Modal lookup failed: {type(e).__name__}: {e}; run "
                                       f"`talos setup` to set the token and deploy")
+    if missing == [marker_name()]:
+        return Check("backend", FAIL, f"the deployed {MODAL_APP_NAME} app was built from "
+                                      f"different Talos code than this client; run "
+                                      f"`talos deploy`")
     if missing:
         shown = ", ".join(missing[:3]) + (", ..." if len(missing) > 3 else "")
         return Check("backend", FAIL, f"{len(missing)} of {len(names)} Modal functions in "
                                       f"{MODAL_APP_NAME} are missing ({shown}); run "
-                                      f"`talos setup` to deploy")
+                                      f"`talos deploy`")
     return Check("backend", OK, f"deployed ({len(names)} functions)")
 
 

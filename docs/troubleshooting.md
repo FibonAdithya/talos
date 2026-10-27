@@ -21,14 +21,16 @@ token, create a new one at modal.com/settings/tokens and give it to setup.
 
 **Symptom:** a run stops with one of:
 
-- ``Modal function <name> not found in app talos-bench: <error>. Run `talos setup` to deploy.``
-- ``the deployed talos-bench app predates this client (<error>). Run `talos setup` to redeploy.``
+- ``Modal function <name> not found in app talos-bench: <error>. Run `talos deploy`.``
+- ``the deployed talos-bench app was built from different Talos code than this client; run `talos deploy` ``
+- ``the deployed talos-bench app predates this client (<error>). Run `talos deploy` to redeploy.``
 
 **Cause:** the app deployed in your Modal account does not match this version of Talos. This
 happens after pulling a new version without redeploying, because the score function's
 arguments change between versions.
 
-**Fix:** `talos setup`, then `talos run --resume <job_id>` if a job stopped.
+**Fix:** `talos deploy` (it reads no config and keeps the Modal token `talos setup` stored), then
+`talos run --resume <job_id>` if a job stopped. `talos doctor` reports the same condition.
 
 ### No API key for the provider
 
