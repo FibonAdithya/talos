@@ -10,7 +10,9 @@ GUIDE = Path(talos.__file__).parent / "data" / "agent_guide.md"
 
 _FENCE = re.compile(r"^```[^\n]*\n(.*?)^```", re.M | re.S)
 _SPAN = re.compile(r"`([^`\n]+)`")
-_COMMAND = re.compile(r"(?<![\w/.-])talos ([a-z][a-z-]*)")
+# `talos`, any global flags (`--workspace DIR`, `--workspace=DIR`), then the subcommand.
+_COMMAND = re.compile(r"(?<![\w/.-])talos ((?:--[a-z][a-z-]*(?:=\S+| [^\s-]\S*)? )*)"
+                      r"([a-z][a-z-]*)")
 # Where the talos command's own arguments end: a pipe, a command separator or a redirect.
 _END = re.compile(r"\||;|&&|>|(?<!&)&(?!&)")
 
@@ -31,13 +33,17 @@ def _subparsers(parser):
 
 def unknown_references(text, parser):
     subs = _subparsers(parser)
-    every_flag = {f for p in subs.values() for f in p._option_string_actions}
+    every_flag = set(parser._option_string_actions).union(
+        *(p._option_string_actions for p in subs.values()))
     unknown = []
     fenced, spans = _code_lines(text)
     for line in fenced + spans:
         commands = list(_COMMAND.finditer(line))
         for i, m in enumerate(commands):
-            word = m.group(1)
+            for flag in re.findall(r"--[a-z][a-z-]*", m.group(1)):
+                if flag not in parser._option_string_actions:
+                    unknown.append(f"talos {flag}")
+            word = m.group(2)
             if word not in subs:
                 unknown.append(f"talos {word}")
                 continue
@@ -48,7 +54,7 @@ def unknown_references(text, parser):
                 if flag not in subs[word]._option_string_actions:
                     unknown.append(f"talos {word} {flag}")
     # A span of bare flags with no `talos` before them, such as `--budget-iterations 5`: each
-    # must be an option of some subcommand. A wildcard such as `--add-*` names a family.
+    # must be a global option or an option of some subcommand. A wildcard such as `--add-*` names a family.
     for span in spans:
         if span.startswith("--") and "*" not in span:
             for flag in re.findall(r"(?<!\S)--[a-z][a-z-]*", span):
@@ -68,6 +74,14 @@ def test_checker_flags_unknown_subcommands_and_flags():
 def test_checker_follows_line_continuations():
     text = "```\ntalos run --challenge knapsack \\\n  --budget-dollars 3\n```\n"
     assert unknown_references(text, cli.build_parser()) == ["talos run --budget-dollars"]
+
+
+def test_checker_reads_global_flags_before_the_command():
+    # mutation: a pattern that needs the command right after `talos` skips these lines
+    text = ("Run `talos --workspace . run --budget-dollars 1`, then\n"
+            "`talos --workspaces . setup` and `talos --workspace=~/w status --json`.\n")
+    assert sorted(unknown_references(text, cli.build_parser())) == [
+        "talos --workspaces", "talos run --budget-dollars"]
 
 
 def test_checker_ignores_flags_after_a_pipe_and_wildcards():

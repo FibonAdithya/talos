@@ -14,8 +14,8 @@ capabilities dropped, and CPU and memory limits; the one opt-in exception is
 [agentic codex](https://github.com/FibonAdithya/talos/blob/main/docs/usage.md#agentic-mode).
 
 Driving Talos from a coding agent? Tell it: "Run `talos guide` and follow it." The
-[guide](talos/data/agent_guide.md) says which commands spend money, how to start, watch and
-stop a job, and how to report back.
+[guide](https://github.com/FibonAdithya/talos/blob/main/talos/data/agent_guide.md) says which
+commands spend money, how to start, watch and stop a job, and how to report back.
 
 ## How it works
 

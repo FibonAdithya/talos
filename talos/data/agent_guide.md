@@ -12,8 +12,13 @@ that runs Talos on a user's behalf. It is printed by `talos guide`. Follow it in
 - Talos never submits anything to TIG. The user does that from the package Talos writes.
 - Talos spends the user's money: LLM calls on their provider account or CLI subscription, and
   compute on their Modal or C3 account. Every figure it shows is an estimate, not a bill.
-- Talos reads and writes `talos.config.json`, `.talos/secrets.json` and `runs/` in the current
-  directory. Run every command from the same directory, normally the user's Talos checkout.
+- Talos keeps `talos.config.json`, `.talos/secrets.json` and `runs/` in one workspace directory:
+  the one given by `talos --workspace DIR <command>` or `TALOS_WORKSPACE`, else the nearest
+  directory at or above the current one that holds `talos.config.json`, else
+  `~/.talos/workspace`. `talos setup` prints `Workspace: <path>`, and `talos run` and
+  `talos demo` print absolute result paths. Use one workspace for all commands of a job; if you
+  are unsure which one applies, pass `--workspace` on every command.
+- `talos --version` prints the installed version.
 
 ## 2. Spending rules
 
@@ -21,6 +26,7 @@ that runs Talos on a user's behalf. It is printed by `talos guide`. Follow it in
 |---|---|
 | **No compute, one small LLM call** | `talos doctor` |
 | **Spends money** | `talos run`, `talos doctor --full`, `talos compile` on the modal or c3 backend |
+| **Changes the user's Modal account, no compute** | `talos deploy`: redeploys the Modal app; run it, after asking, when Talos or `talos doctor` says the deployed app was built from different Talos code |
 | **The user runs it, not you** | `talos setup`: it is interactive and stores credentials |
 
 Rules:
