@@ -83,11 +83,22 @@ and the time left.
 
 ```
 [10:41:02] #1 trying: bump k (local_search)
-[10:49:12] #1 scored +1.000% vs baseline (worst track +1.000%, errors 0.0%, runtime x1.00)
+[10:49:12] #1 scored +1.000% vs baseline (±0.250%, 4.0x noise, clear; worst track +1.000%, errors 0.0%, runtime x1.00)
 [10:49:12] #1 new best | best +1.000% | llm $0.02 | compute ≈$1.28 | 3.9h left
 [10:49:12] #1 confirming on held-out nonces
 [10:49:12] #1 won: held-out +1.000% vs baseline (worst track +1.000%)
 ```
+
+The `±` figure after a scored delta is the paired standard error of the mean delta over the
+nonces. `4.0x noise` is the delta divided by that error, and the word after it is a band:
+`clear` for 2 or more, `marginal` for 1 to under 2, `noise` for under 1. Three cases have no
+ratio: `n=1` (a track has one nonce), `identical on every nonce` and `±0, no spread`. Over the
+error ceiling, nothing is shown. The noise text comes first, so a narrow terminal cuts the tail.
+
+The error measures nonce-to-nonce variation for one candidate. It does not account for the best
+being chosen out of many candidates, which is how a candidate improves on training and then
+fails held-out. A ratio of 3x on the best of 7 tries is weaker evidence than 3x on a single
+try. Whether the ratio predicts held-out results is not yet known.
 
 `best` is the best candidate's mean relative delta versus the baseline on training nonces.
 `compute ≈` is an estimate (see [Budget](#budget)). The last field is the wall-clock budget
@@ -527,7 +538,7 @@ talos report 20260917-101006-knapsack
 Writes `runs/<job_id>/package/report.html` and prints its path. The page is one file with no
 network access: a header (status, best delta, held-out result, spend, times, settings), a plot of
 every iteration's training delta against the mainnet baseline with lines from each node to its
-parent, a panel with any node's details and its diff against its parent, per-track tables for
+parent, a panel with any node's details and its diff against its parent, per-track tables (with a standard error column) for
 the best candidate, the best diff, and the hypothesis list. It is built only from files already in
 the run directory, so it works on old runs and on a job that is still running; it needs no
 credentials and writes nothing else. The package written when a job stops includes it too.
@@ -582,7 +593,7 @@ Each job gets a directory under `runs/` in the workspace:
 |---|---|
 | `runs/<job_id>/job.json` | The job's fixed inputs: challenge, direction, provider, model, mode, budget, nonces, fuel, track, baseline algorithm, hyperparameters, scoring, start, search, chains and the annealing settings. Written once. Its budget is the starting budget; a job resumed with `--add-*` runs on that budget plus the extensions in `state.json`. |
 | `runs/<job_id>/state.json` | Progress: status, iteration, spend, the best candidate, the hypothesis log, and the lineage tree (`nodes`, one per iteration, and `chains`, each chain's current node, best node and stall count). A job resumed with `--add-*` records each extension in `budget_extensions` (when, at which iteration, the status it was resumed from, and what it added). A `--scoring native` job also records its scoring, its per-track time budgets and a `validations` list: one entry per candidate that improved natively, with its iteration, its outcome (`validated` or `demoted`) and the reason it was demoted. |
-| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A resume with `--add-*` adds `budget_extended` (the additions and the resulting budget). A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. A tree job (anneal, several chains or a template start) adds `accept` (one per scored candidate: chain, node, parent, family, score, decision, probability, temperature) and `reheat`. |
+| `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A `scored` event carries `mean_rel_se`, `noise_ratio`, `noise_band`, `noise_state` and `track_rel_se` (the standard error of each track's delta). A resume with `--add-*` adds `budget_extended` (the additions and the resulting budget). A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. A tree job (anneal, several chains or a template start) adds `accept` (one per scored candidate: chain, node, parent, family, score, decision, probability, temperature) and `reheat`. |
 | `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
 | `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
 | `runs/<job_id>/challenge/` | A `--start template` job only: the challenge files and the template the LLM was shown. |
@@ -598,9 +609,9 @@ The package directory holds:
 | `submission` | A folder with the candidate to submit: the best algorithm's `.rs` and `.cu` files and TIG's submission `README.md` template, to fill out. Absent when the job produced no candidate. |
 | `diff_vs_baseline.patch` | The candidate as a patch against the baseline. A `--start template` job writes `diff_vs_template.patch` instead, against the empty template. |
 | lineage.json, lineage.md | The search tree: every iteration's node and each chain's state (lineage.json), and the path from the root to the best node with a per-design-family table (lineage.md). Written when the job recorded any node. |
-| `scores.md` | Per-nonce tables for baseline and candidate on training and held-out nonces. A focused job (`--track`) adds a regression-guard table for the other tracks. |
+| `scores.md` | Per-nonce tables for baseline and candidate on training and held-out nonces. A focused job (`--track`) adds a regression-guard table for the other tracks. Under each table's summary it adds `mean_rel_se: ±…  noise: N.Nx (band)` and a `per track:` line; the evidence draft for the TIG submission does not have them. |
 | `hypotheses.md` | The full hypothesis log with outcomes. |
-| `report.html` | The search on one page: a plot of every iteration with its lineage, each node's diff against its parent, per-track tables and the hypothesis log. Open it in a browser; it loads nothing from the network. Written on every package, including one with no candidate. If the page fails to render, the package prints `report.html not written: …` and is written without it; `talos report` rewrites it. |
+| `report.html` | The search on one page: a plot of every iteration with its lineage (a ±1 standard error whisker on each scored node), each node's diff against its parent, per-track tables and the hypothesis log. Open it in a browser; it loads nothing from the network. Written on every package, including one with no candidate. If the page fails to render, the package prints `report.html not written: …` and is written without it; `talos report` rewrites it. |
 | `evidence_draft.md` | A partly filled-in TIG advance-evidence template. |
 | `hyperparameters.json` | The per-track hyperparameters, when the job used them. Not written for a `--start template` job, whose candidate ran without them. |
 | `README.md` | The submission steps, with a Hyperparameters section when the job used them. |
