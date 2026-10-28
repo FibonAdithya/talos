@@ -38,7 +38,7 @@ uv tool install --python 3.12 'talos-tig[modal,anthropic]'
 talos --version
 ```
 
-Until v0.1.0 is published to PyPI, install from GitHub instead:
+To install the current `main` instead of the latest release:
 
 ```bash
 uv tool install --python 3.12 'talos-tig[modal,anthropic] @ git+https://github.com/FibonAdithya/talos'
@@ -51,7 +51,7 @@ The extras are `modal` (the Modal backend) and `anthropic` (the `anthropic` prov
 command: MEASURED 2026-10-27, `uv tool install 'talos-tig[anthropic]'` over an install made
 with `[modal]` removed the Modal client. A command that needs a missing extra exits with code
 2 and prints the install command. `pip install 'talos-tig[modal,anthropic]'` is expected to work
-in a virtual environment (Python 3.10 or newer), but it has not been verified against PyPI because the package is not published yet; `pipx` has not been tried. On Windows, see [docs/windows.md](https://github.com/FibonAdithya/talos/blob/main/docs/windows.md).
+in a virtual environment (Python 3.10 or newer), but it has not been run against a PyPI release that has the extras; `pipx` has not been tried. On Windows, see [docs/windows.md](https://github.com/FibonAdithya/talos/blob/main/docs/windows.md).
 
 ### Workspace
 

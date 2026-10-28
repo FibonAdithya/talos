@@ -2481,7 +2481,7 @@ def test_deploy_bench_deploys_the_app_as_a_package_module():
     """The functions are serialized=True. Deployed by file path, Modal imports the file as the
     top-level module `talos_bench`, the pickle refers to that name, and every container dies
     with "the 'talos_bench' module is not available in the remote environment": the image
-    only carries the packages `modal_app` and `talos`."""
+    only carries the package `talos`."""
     seen = []
 
     def run(cmd, **kw):
@@ -2489,10 +2489,11 @@ def test_deploy_bench_deploys_the_app_as_a_package_module():
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     cli.deploy_bench(None, None, run=run)
     (cmd, kw), = seen
-    # mutation: deploying modal_app/talos_bench.py by path deploys an app no container can load
-    assert cmd[-3:] == ["deploy", "-m", "modal_app.talos_bench"]
-    # mutation: without the cwd, `-m` cannot import modal_app from outside the checkout
-    assert (Path(kw["cwd"]) / "modal_app" / "talos_bench.py").is_file()
+    # mutation: deploying talos/modal_app/talos_bench.py by path deploys an app no container
+    # can load
+    assert cmd[-3:] == ["deploy", "-m", "talos.modal_app.talos_bench"]
+    # mutation: without the cwd, `-m` cannot import talos from outside the checkout
+    assert (Path(kw["cwd"]) / "talos" / "modal_app" / "talos_bench.py").is_file()
 
 
 def test_deploy_command_deploys_without_a_config(tmp_path, monkeypatch, capsys):

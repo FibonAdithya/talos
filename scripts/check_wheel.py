@@ -2,8 +2,9 @@
 
 Usage: python scripts/check_wheel.py dist/talos_tig-X-py3-none-any.whl
 
-Exits 1 and names each missing entry. It reads JOB_MODULES and DEPLOYED_FILES from the repo's
-source with `ast`, so it does not import talos.
+Exits 1 and names each missing entry, and each entry outside `talos/` and the wheel's own
+`.dist-info/` (a wheel's top-level packages install straight into site-packages). It reads
+JOB_MODULES and DEPLOYED_FILES from the repo's source with `ast`, so it does not import talos.
 """
 import ast
 import sys
@@ -27,8 +28,7 @@ def literal_tuple(source_file: str, name: str) -> tuple[str, ...]:
 def required() -> list[str]:
     job_modules = literal_tuple("talos/c3_jobdir.py", "JOB_MODULES")
     deployed = literal_tuple("talos/deploy_digest.py", "DEPLOYED_FILES")
-    names = [*DATA_FILES, "modal_app/talos_bench.py",
-             *(f"talos/{m}.py" for m in job_modules), *deployed]
+    names = [*DATA_FILES, *(f"talos/{m}.py" for m in job_modules), *deployed]
     return list(dict.fromkeys(names))
 
 
@@ -41,7 +41,11 @@ def main(argv: list[str]) -> int:
     missing = [n for n in required() if n not in present]
     for n in missing:
         print(f"missing from {argv[0]}: {n}", file=sys.stderr)
-    if missing:
+    outside = sorted(n for n in present if n.split("/")[0] != "talos"
+                     and not n.split("/")[0].endswith(".dist-info"))
+    for n in outside:
+        print(f"outside talos/ in {argv[0]}: {n}", file=sys.stderr)
+    if missing or outside:
         return 1
     print(f"{argv[0]}: all {len(required())} required files present")
     return 0

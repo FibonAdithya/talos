@@ -214,7 +214,7 @@ def test_no_config_skips_dependent_checks(tmp_path, monkeypatch, capsys):
 def test_modal_function_names_match_register():
     # mutation: the probe names or a GPU suffix dropped from modal_function_names
     pytest.importorskip("modal")
-    from modal_app import talos_bench
+    from talos.modal_app import talos_bench
 
     seen = []
 

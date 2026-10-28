@@ -38,7 +38,7 @@ class Check:
 
 
 def modal_function_names() -> list[str]:
-    """Every function `modal_app/talos_bench.py::register` deploys."""
+    """Every function `talos/modal_app/talos_bench.py::register` deploys."""
     names = []
     for name, spec in CHALLENGES.items():
         suffixes = [f"_{gpu_slug(g)}" for g in MODAL_GPUS] if spec.is_gpu else [""]
