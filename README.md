@@ -179,12 +179,12 @@ warns before it starts a job on a challenge that is not tested.
 |---|---|---|
 | `knapsack` | CPU | tested |
 | `energy_arbitrage` | CPU | tested |
+| `job_scheduling` | CPU | tested |
 | `hypergraph` | GPU | tested |
 | `satisfiability` | CPU | untested |
 | `vehicle_routing` | CPU | untested |
 | `vector_search` | GPU | untested |
 | `neuralnet_optimizer` | GPU | untested |
-| `job_scheduling` | CPU | known broken ([#36](https://github.com/FibonAdithya/talos/issues/36)) |
 
 ## Where results land
 

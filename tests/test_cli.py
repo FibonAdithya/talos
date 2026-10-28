@@ -3,6 +3,7 @@ import os
 import stat
 import time
 import types
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -129,6 +130,9 @@ def test_wizard_labels_gpu_challenges_asks_mode_and_survives_a_typo(tmp_path, mo
     save(tmp_path, Config(provider="claude-cli", model="claude-opus-5", mode="single-shot",
                           api_base=None), None)
     monkeypatch.setattr(cli, "fetch_challenge_info", lambda name: knapsack_info())
+    # No challenge is known broken today; mark one so the menu's issue label is still checked.
+    monkeypatch.setitem(cli.CHALLENGES, "job_scheduling",
+                        replace(cli.CHALLENGES["job_scheduling"], status="known broken", issue=36))
     seen = {}
     monkeypatch.setattr(cli, "execute_job",
                         lambda spec, store, cfg, resume: seen.update(spec=spec, cfg=cfg) or 0)
