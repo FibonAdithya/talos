@@ -154,7 +154,7 @@ def test_run_sources_template_root_has_algorithm_cu(tmp_path):
     files = {1: {"mod.rs": "A\n", "algorithm.cu": "B\n"}}
     spec, st, store = make_run(tmp_path, hyps, start="template", iteration_files=files,
                                template="RS\n")
-    (store.run_dir / "challenge" / "template.cu").write_text("CU\n")
+    (store.run_dir / "challenge" / "template.cu").write_bytes(b"CU\n")  # LF, as talos writes it
     sources = run_sources(store.run_dir, replace(spec, challenge="hypergraph"), st)
     assert sources(0) == {"mod.rs": "RS\n", "algorithm.cu": "CU\n"}
     assert sources(1) == {"mod.rs": "A\n", "algorithm.cu": "B\n"}
