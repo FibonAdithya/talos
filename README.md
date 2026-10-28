@@ -1,5 +1,11 @@
 # Talos
 
+> **Are you an AI agent?** Go to the
+> [agent guide](https://github.com/FibonAdithya/talos/blob/main/talos/data/agent_guide.md) to
+> set up and run Talos. It says which commands spend money, which ones the user must run
+> themselves, and how to start, watch and stop a job. Once Talos is
+> [installed](https://github.com/FibonAdithya/talos#install), `talos guide` prints the same guide.
+
 Single-user autoresearch for [TIG](https://tig.foundation). You pick a TIG challenge and
 describe what to explore. An LLM then repeatedly edits the current top mainnet algorithm for
 that challenge, and each candidate is compiled and scored with TIG's own `tig-runtime` and
@@ -13,9 +19,8 @@ Only the `local` backend runs that container on your machine, with networking of
 capabilities dropped, and CPU and memory limits; the one opt-in exception is
 [agentic codex](https://github.com/FibonAdithya/talos/blob/main/docs/usage.md#agentic-mode).
 
-Driving Talos from a coding agent? Tell it: "Run `talos guide` and follow it." The
-[guide](https://github.com/FibonAdithya/talos/blob/main/talos/data/agent_guide.md) says which
-commands spend money, how to start, watch and stop a job, and how to report back.
+Driving Talos from a coding agent? Point it at this README, or tell it: "Run `talos guide`
+and follow it."
 
 ## How it works
 
@@ -155,7 +160,9 @@ talos run --challenge knapsack \
 
 `talos run` with no flags asks for each answer instead. Before it spends anything it prints a
 job summary. Press `Ctrl-C` once to stop: Talos packages the best candidate so far, and
-`talos run --resume <job_id>` continues later. `talos status` lists your jobs. Watching,
+`talos run --resume <job_id>` continues later. `talos status` lists your jobs. When the job
+stops, open `runs/<job_id>/package/report.html` in a browser to see how the search evolved
+(see [Where results land](https://github.com/FibonAdithya/talos#where-results-land)). Watching,
 stopping, resuming and submitting are covered in [Running a job](https://github.com/FibonAdithya/talos/blob/main/docs/usage.md#running-a-job).
 
 ## What to expect
@@ -191,7 +198,14 @@ warns before it starts a job on a challenge that is not tested.
 Each job writes to `runs/<job_id>/` in the workspace. When it stops, `runs/<job_id>/package/` holds the
 hand-back package: the code to submit in its `submission` folder, per-nonce `scores.md`, the
 `hypotheses.md` log, a one-page `report.html` and a `README.md` with the submission steps.
-You submit it yourself. The full layout is in
+You submit it yourself.
+
+`report.html` shows how the search evolved over the run: a plot of every iteration's training
+score against the baseline, with a line from each candidate to the candidate it was edited
+from. Selecting a candidate shows its diff against that parent. Below the plot are per-track
+scores for the best candidate against the baseline, the best candidate's diff and the
+hypothesis log. It is one file that loads nothing from the network. `talos report <job_id>`
+writes it again from the run directory. The full layout is in
 [Where results land](https://github.com/FibonAdithya/talos/blob/main/docs/usage.md#where-results-land).
 
 ## Documentation
