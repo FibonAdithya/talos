@@ -1,8 +1,9 @@
 """Compare a candidate's per-nonce results against the baseline's on identical nonces."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, asdict
-from statistics import mean
+from statistics import mean, stdev
 
 from talos.challenges import BeatRule
 from talos.types import NonceResult, NonceSet
@@ -20,6 +21,7 @@ class TrackDelta:
     rel_delta: float
     cand_errors: int
     n: int
+    rel_se: float | None = None
 
 
 @dataclass
@@ -28,6 +30,7 @@ class BundleDelta:
     mean_rel_delta: float
     worst_rel_delta: float
     error_rate: float
+    mean_rel_se: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -56,20 +59,52 @@ def bundle_delta(baseline: list[NonceResult], candidate: list[NonceResult]) -> B
         observed = [r.quality for r in list(b[track].values()) + list(c[track].values())
                     if r.ok and r.quality is not None]
         worst = max(0, min(observed)) if observed else 0
-        bq = [_quality_or_worst(r, worst) for r in b[track].values()]
-        cq = [_quality_or_worst(r, worst) for r in c[track].values()]
+        nonces = sorted(b[track])
+        bq = [_quality_or_worst(b[track][k], worst) for k in nonces]
+        cq = [_quality_or_worst(c[track][k], worst) for k in nonces]
         bm, cm = mean(bq), mean(cq)
         if bm <= 0:
             raise ScoringError(f"baseline mean quality on {track} is {bm}; cannot normalise")
         n_err = sum(1 for r in c[track].values() if not r.ok)
+        # Paired standard error of the relative delta: the spread of per-nonce differences.
+        rel_se = (stdev([x - y for x, y in zip(cq, bq)]) / math.sqrt(len(cq)) / bm
+                  if len(cq) >= 2 else None)
         tracks.append(TrackDelta(track=track, base_mean=bm, cand_mean=cm,
-                                 rel_delta=(cm - bm) / bm, cand_errors=n_err, n=len(cq)))
+                                 rel_delta=(cm - bm) / bm, cand_errors=n_err, n=len(cq),
+                                 rel_se=rel_se))
         total += len(cq)
         errors += n_err
     return BundleDelta(tracks=tracks,
                        mean_rel_delta=mean(t.rel_delta for t in tracks),
                        worst_rel_delta=min(t.rel_delta for t in tracks),
-                       error_rate=errors / total)
+                       error_rate=errors / total,
+                       mean_rel_se=(None if any(t.rel_se is None for t in tracks)
+                                    else math.sqrt(sum(t.rel_se ** 2 for t in tracks))
+                                    / len(tracks)))
+
+
+NOISE_CLEAR = 2.0
+NOISE_MARGINAL = 1.0
+# The words shown for a state with no ratio, on the status line, in scores.md and in report.html.
+NOISE_WORDS = {"n1": "n=1", "identical": "identical on every nonce",
+               "no_spread": "±0, no spread"}
+
+
+def noise(d: BundleDelta, rule: BeatRule) -> tuple[float | None, str | None, str]:
+    """(ratio, band, state): |mean delta| over its paired standard error. Display only; no
+    decision reads it. The ratio and band are None unless the state is "ok". Band is "clear"
+    at NOISE_CLEAR or more, "marginal" at NOISE_MARGINAL or more, else "noise"."""
+    if d.error_rate > rule.error_ceiling:
+        return None, None, "over_ceiling"
+    if d.mean_rel_se is None:
+        return None, None, "n1"
+    if d.mean_rel_se == 0:
+        identical = all(t.rel_delta == 0 for t in d.tracks)
+        return None, None, "identical" if identical else "no_spread"
+    ratio = abs(d.mean_rel_delta) / d.mean_rel_se
+    band = ("clear" if ratio >= NOISE_CLEAR else "marginal" if ratio >= NOISE_MARGINAL
+            else "noise")
+    return ratio, band, "ok"
 
 
 def runtime_ratio(baseline: list[NonceResult], candidate: list[NonceResult]) -> float:

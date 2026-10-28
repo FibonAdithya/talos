@@ -3,8 +3,9 @@ import math
 import pytest
 
 from talos.challenges import BeatRule
-from talos.scoring import (Bar, ScoringError, beats, beats_focused, bundle_delta, focus_sets,
-                           fuel_proxy_misses, quality_mismatches,
+from talos.scoring import (Bar, BundleDelta, ScoringError, TrackDelta, beats, beats_focused,
+                           bundle_delta, focus_sets, fuel_proxy_misses, noise,
+                           quality_mismatches,
                            improves, runtime_ratio, select, validation_failure,
                            worst_track_shortfall)
 from talos.types import NonceResult, NonceSet
@@ -398,3 +399,92 @@ def test_validation_demotes_a_metered_worst_track_regression():
     # mutation: validation_failure keeping the mean-only rule validates it
     assert validation_failure(True, metered, metered, base, Bar(0.01, 0.005),
                               VRULE)[0] == "not_improved"
+
+
+def test_paired_se_matches_hand_computation_on_two_tracks():
+    # spec Tests 1. mutations: population stdev; dividing by the candidate mean; summing
+    # track SEs instead of root-sum-of-squares; dividing the combined SE by sqrt(T)
+    base = [R("A", i, 100) for i in range(4)] + [R("B", 0, 200), R("B", 1, 200)]
+    cand = [R("A", 0, 101), R("A", 1, 103), R("A", 2, 99), R("A", 3, 105),
+            R("B", 0, 200), R("B", 1, 204)]
+    d = bundle_delta(base, cand)
+    by = {t.track: t for t in d.tracks}
+    assert by["A"].rel_se == pytest.approx(math.sqrt(5 / 3) / 100, rel=1e-9)
+    assert by["B"].rel_se == pytest.approx(0.01, rel=1e-9)
+    assert d.mean_rel_se == pytest.approx(math.sqrt(2 / 3) / 100, rel=1e-9)
+    ratio, band, state = noise(d, BeatRule())
+    assert ratio == pytest.approx(1.5 / math.sqrt(2 / 3), rel=1e-9)
+    assert (band, state) == ("marginal", "ok")
+    assert d.to_dict()["mean_rel_se"] == d.mean_rel_se
+    assert d.to_dict()["tracks"][0]["rel_se"] == by["A"].rel_se
+
+
+def test_se_is_none_when_any_track_has_one_nonce():
+    # spec Tests 2. mutation: averaging over the tracks that have an SE hides the n=1 track
+    d = bundle_delta([R("a", 0, 100)], [R("a", 0, 102)])
+    assert d.tracks[0].rel_se is None and d.mean_rel_se is None
+    assert noise(d, BeatRule()) == (None, None, "n1")
+    base = [R("a", 0, 100)] + [R("b", i, 100) for i in range(4)]
+    cand = [R("a", 0, 102)] + [R("b", 0, 100), R("b", 1, 102), R("b", 2, 100), R("b", 3, 102)]
+    d = bundle_delta(base, cand)
+    by = {t.track: t for t in d.tracks}
+    assert by["a"].rel_se is None and by["b"].rel_se is not None
+    assert d.mean_rel_se is None and noise(d, BeatRule())[2] == "n1"
+
+
+def test_se_scores_a_failed_nonce_at_the_worst_quality():
+    # spec Tests 3. mutation: leaving the failed nonce out of the differences gives [2, 0]
+    base = [R("t", 0, 10), R("t", 1, 20), R("t", 2, 30)]
+    cand = [R("t", 0, 12), R("t", 1, None, "panic"), R("t", 2, 30)]
+    d = bundle_delta(base, cand)
+    assert d.tracks[0].rel_delta == pytest.approx(-2 / 15, rel=1e-9)
+    assert d.tracks[0].rel_se == pytest.approx(0.1855921454276674, rel=1e-9)
+    assert noise(d, BeatRule(error_ceiling=0.34))[2] == "ok"
+
+
+def test_noise_is_withheld_over_the_error_ceiling():
+    # spec Tests 4 and 10. mutation: checking n=1 before the ceiling reports "n1" for a
+    # broken one-nonce candidate
+    base = [R("t", 0, 10), R("t", 1, 20), R("t", 2, 30)]
+    cand = [R("t", 0, 12), R("t", 1, None, "panic"), R("t", 2, 30)]
+    d = bundle_delta(base, cand)
+    assert noise(d, BeatRule(error_ceiling=0.05)) == (None, None, "over_ceiling")
+    assert d.mean_rel_se is not None
+    one = bundle_delta([R("t", 0, 100)], [R("t", 0, None, "panic")])
+    assert noise(one, BeatRule())[2] == "over_ceiling"
+
+
+def test_zero_spread_states():
+    # spec Tests 5. mutation: dividing by a zero SE raises ZeroDivisionError or returns inf
+    same = bundle_delta(BASE, list(BASE))
+    assert same.mean_rel_se == 0.0
+    assert noise(same, BeatRule()) == (None, None, "identical")
+    plus = [R(r.track, r.nonce, r.quality + 1) for r in BASE]
+    assert noise(bundle_delta(BASE, plus), BeatRule()) == (None, None, "no_spread")
+
+
+def test_se_pairs_rows_by_nonce_not_by_input_order():
+    # The bench may return rows in another order than the baseline's. mutation: pairing
+    # b[track].values() with c[track].values() in dict order. Reversed, that pairs
+    # [100, 110, 120, 130] with [135, 119, 113, 101]: differences [35, 9, -7, -29], a far
+    # larger stdev than the true [1, 3, -1, 5]
+    base = [R("A", 0, 100), R("A", 1, 110), R("A", 2, 120), R("A", 3, 130)]
+    cand = [R("A", 0, 101), R("A", 1, 113), R("A", 2, 119), R("A", 3, 135)]
+    fwd = bundle_delta(base, cand)
+    rev = bundle_delta(base, list(reversed(cand)))
+    # differences [1, 3, -1, 5] in either order: stdev sqrt(20/3), mean base 115
+    expected = math.sqrt(20 / 3) / 2 / 115
+    assert fwd.tracks[0].rel_se == pytest.approx(expected, rel=1e-9)
+    assert rev.tracks[0].rel_se == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.parametrize("delta,band", [(2.0, "clear"), (1.999, "marginal"),
+                                        (1.0, "marginal"), (0.999, "noise"),
+                                        (-2.0, "clear")])
+def test_noise_band_boundaries(delta, band):
+    # spec Tests 6. mutations: > for >= at either boundary; the band using the signed delta
+    d = BundleDelta(tracks=[TrackDelta("t", 1.0, 1.0, delta, 0, 4, rel_se=1.0)],
+                    mean_rel_delta=delta, worst_rel_delta=delta, error_rate=0.0,
+                    mean_rel_se=1.0)
+    ratio, got, state = noise(d, BeatRule())
+    assert (ratio, got, state) == (abs(delta), band, "ok")

@@ -2326,3 +2326,92 @@ def test_an_annealed_candidate_that_regresses_a_track_moves_current_but_not_best
     assert [h["outcome"] for h in st.hypotheses] == ["improved", "accepted"]
     # mutation: the mean-only chain rule in _add_node makes node 2 the chain's best
     assert (st.chains[0].current, st.chains[0].best) == (2, 1)
+
+
+ONE = Budget(usd=None, hours=None, iterations=1, compute_usd=None)
+
+
+def _scored_events(store):
+    rows = [json.loads(x) for x in (store.run_dir / "timeline.jsonl").read_text().splitlines()]
+    return [r for r in rows if r["kind"] == "scored"]
+
+
+def test_scored_event_and_record_carry_the_noise_figures(tmp_path):
+    # baseline 100 on nonces 0..3; candidate [100, 102, 100, 102]: differences [0, 2, 0, 2],
+    # delta 1%, SE sqrt(1/3)%, ratio sqrt(3). mutation: not passing the fields to _event
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(2)], budget=ONE,
+                               scores=lambda ch, files, ns: [100 + 2 * (n % 2)
+                                                             for n in ns.nonces()])
+    st = loop.run()
+    ev = _scored_events(store)[0]
+    se = math.sqrt(1 / 3) / 100
+    assert ev["mean_rel_se"] == pytest.approx(se, rel=1e-9)
+    assert ev["noise_ratio"] == pytest.approx(math.sqrt(3), rel=1e-9)
+    assert (ev["noise_band"], ev["noise_state"]) == ("marginal", "ok")
+    assert ev["track_rel_se"] == {"t": pytest.approx(se, rel=1e-9)}
+    rec = st.hypotheses[0]
+    assert rec["mean_rel_se"] == pytest.approx(se, rel=1e-9)
+    assert (rec["noise_band"], rec["noise_state"]) == ("marginal", "ok")
+
+
+def test_over_ceiling_scored_event_withholds_the_ratio(tmp_path):
+    # one of four nonces fails: 25% > the 5% ceiling. mutation: calling noise() without the
+    # rule's ceiling, or computing the band in the loop
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(2)], budget=ONE,
+                               scores=lambda ch, files, ns: [None] + [101] * (ns.count - 1))
+    loop.run()
+    ev = _scored_events(store)[0]
+    assert ev["noise_state"] == "over_ceiling"
+    assert ev["noise_ratio"] is None and ev["noise_band"] is None
+    assert ev["mean_rel_se"] is not None
+
+
+def test_a_validated_record_carries_the_metered_noise(tmp_path):
+    # spec Tests 11. native: 104 on every nonce, so zero spread. metered: [error, 104, 104, 104];
+    # the error scores at the worst observed (100), so the differences are [0, 4, 4, 4]: delta 3%,
+    # SE 1%, ratio 3, error rate 0.25, which is at the ceiling and not over it.
+    # mutation: no overwrite in _validate_and_finish leaves 0.0 / no_spread in the record
+    from talos.challenges import CHALLENGES
+
+    def metered(ch, files, ns):
+        q = quality_from_files(ch, files, ns)
+        return [None] + q[1:] if "let k = 5;" in files["mod.rs"] else q
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(5)], bench=fb, budget=ONE)
+    loop.rule = replace(CHALLENGES["knapsack"].beat, error_ceiling=0.25)
+    st = loop.run()
+    assert st.validations[0]["outcome"] == "validated"
+    rec = st.hypotheses[0]
+    assert rec["mean_rel_se"] == pytest.approx(0.01, rel=1e-9)
+    assert rec["noise_ratio"] == pytest.approx(3.0, rel=1e-9)
+    assert (rec["noise_band"], rec["noise_state"]) == ("clear", "ok")
+    ev = _scored_events(store)[0]
+    assert ev["mean_rel_se"] == 0.0 and ev["noise_state"] == "no_spread"
+
+
+def test_a_demoted_record_keeps_the_native_noise(tmp_path):
+    # Review Focus 1. Metered fails one nonce of four: 25% is over the default 5% ceiling, so
+    # validation demotes it as "error_ceiling" and, unlike "nondeterministic", returns a
+    # metered delta. mutation: overwriting the noise fields from that delta before the
+    # demotion return records "over_ceiling" instead of the native "no_spread"
+    def metered(ch, files, ns):
+        q = quality_from_files(ch, files, ns)
+        return [None] + q[1:] if "let k = 5;" in files["mod.rs"] else q
+    fb = FakeBench(quality_from_files, metered_scores=metered)
+    loop, fp, _, store = native(tmp_path, [hyp("a"), edit(5)], bench=fb, budget=ONE)
+    st = loop.run()
+    assert st.hypotheses[0]["outcome"] == "failed:validation"
+    assert st.validations[0]["reason"] == "error_ceiling"
+    ev = _scored_events(store)[0]
+    assert ev["noise_state"] == "no_spread"
+    for k in ("mean_rel_se", "noise_ratio", "noise_band", "noise_state"):
+        assert st.hypotheses[0][k] == ev[k]
+
+
+def test_focused_scored_event_has_the_focus_track_se_only(tmp_path):
+    # Review Focus 3. mutation: computing the SE against the unselected baseline raises a
+    # track mismatch, or lists track u
+    loop, fp, fb, store = make(tmp_path, [hyp("a"), edit(2)], budget=ONE, two_tracks=True,
+                               track="t")
+    loop.run()
+    assert set(_scored_events(store)[0]["track_rel_se"]) == {"t"}

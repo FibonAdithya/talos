@@ -46,6 +46,10 @@ class ReportNode:
     former_best: bool
     confirmed: bool
     false_positive: bool
+    se: float | None = None
+    noise_ratio: float | None = None
+    noise_band: str | None = None
+    noise_state: str | None = None
 
 
 def _kind(n: int, score: float | None, outcome: str, accepted: bool, state: JobState,
@@ -96,7 +100,10 @@ def report_nodes(spec: JobSpec, state: JobState) -> list[ReportNode]:
             score=score, tracks=tracks, metered_score=metered, accepted=bool(accepted),
             probability=probability, draw=draw, temperature=temperature, kind=kind,
             former_best=bool(s is not None and s.best and kind != "best"),
-            confirmed=i in state.confirmed, false_positive=i in state.false_positives))
+            confirmed=i in state.confirmed, false_positive=i in state.false_positives,
+            se=h.get("mean_rel_se"),
+            noise_ratio=h.get("noise_ratio"), noise_band=h.get("noise_band"),
+            noise_state=h.get("noise_state")))
     return sorted(out, key=lambda n: n.id)
 
 
@@ -398,6 +405,14 @@ def _figure(spec: JobSpec, nodes: list[ReportNode], axis: Axis,
         out.append(f'<path data-holdout="{i}" class="holdout" '
                    f'd="M{hx:.1f},{hy - 7:.1f}l7,7l-7,7l-7,-7Z"><title>#{i} held-out '
                    f'{_esc(_pct(v))}</title></path>')
+    # one standard error either side of a scored node, behind the nodes; clipped to the plot
+    for n in nodes:
+        if n.noise_state != "ok" or n.score is None or n.se is None or cuts[n.id]:
+            continue
+        wx = pos[n.id][0]
+        out.append(f'<line class="whisker" data-whisker="{n.id}" x1="{wx:.1f}" '
+                   f'x2="{wx:.1f}" y1="{y(n.score + n.se):.1f}" '
+                   f'y2="{y(n.score - n.se):.1f}"/>')
     # nodes, drawn last so they sit on top
     for n in nodes:
         px, py = pos[n.id]
@@ -485,25 +500,36 @@ def _header(spec: JobSpec, state: JobState, timeline: list[dict],
 
 def _track_tables(spec: JobSpec, state: JobState) -> str:
     from talos.package import score_pairs
-    from talos.scoring import ScoringError, bundle_delta
+    from talos.challenges import CHALLENGES
+    from talos.scoring import NOISE_WORDS, ScoringError, bundle_delta, noise
 
     out = []
     for heading, base, cand in score_pairs(spec, state):
         out.append(f"<h3>{_esc(heading)}</h3><table class='grid'><tr><th>track</th>"
                    "<th>baseline mean</th><th>best mean</th><th>rel delta</th><th>errors</th>"
-                   "<th>n</th></tr>")
+                   "<th>n</th><th>SE</th></tr>")
         try:
             d = bundle_delta(base, cand)
         except ScoringError as e:
-            out.append(f"<tr><td colspan='6'>no bundle delta: {_esc(e)}</td></tr></table>")
+            out.append(f"<tr><td colspan='7'>no bundle delta: {_esc(e)}</td></tr></table>")
             continue
+        ratio, band, nstate = noise(d, CHALLENGES[spec.challenge].beat)
         for t in d.tracks:
+            se = ("" if nstate == "over_ceiling"
+                  else "n=1" if t.rel_se is None else f"±{t.rel_se:.3%}")
             out.append(f"<tr><td>{_esc(t.track)}</td><td>{t.base_mean:.6g}</td>"
                        f"<td>{t.cand_mean:.6g}</td><td>{_esc(_pct(t.rel_delta))}</td>"
-                       f"<td>{t.cand_errors}</td><td>{t.n}</td></tr>")
-        out.append(f"<tr class='total'><td>mean</td><td></td><td></td>"
+                       f"<td>{t.cand_errors}</td><td>{t.n}</td>"
+                       f"<td>{se}</td></tr>")
+        text = NOISE_WORDS.get(nstate)
+        if nstate == "ok":
+            text = f"±{d.mean_rel_se:.3%}, {ratio:.1f}x {band}"
+        # colour only a gain: a loss is not good news at any ratio
+        cls = (" noise-" + (band if d.mean_rel_delta > 0 else "muted")) if nstate == "ok" else ""
+        out.append(f"<tr class='total{cls}'><td>mean</td><td></td><td></td>"
                    f"<td>{_esc(_pct(d.mean_rel_delta))}</td>"
-                   f"<td>{_esc(f'{d.error_rate:.2%}')}</td><td></td></tr></table>")
+                   f"<td>{_esc(f'{d.error_rate:.2%}')}</td><td></td>"
+                   f"<td class='nz'>{_esc(text or '')}</td></tr></table>")
     return "".join(out)
 
 
@@ -603,12 +629,14 @@ _CSS = """
 :root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#d9d9dc;--panel:#fff;--code:#f3f3f1;
 --best:#c98a00;--improved:#1f9d55;--accepted:#2f6fdb;--rejected:#9a9aa0;--demoted:#e07b00;
 --false_positive:#e07b00;--failed:#d93b3b;--holdout:#7a4fd0;--step:#1f9d55;
---add:#e3f5e8;--addfg:#155d32;--del:#fbe6e6;--delfg:#8f1f1f;--hunk:#5a5fb0;color-scheme:light}
+--add:#e3f5e8;--addfg:#155d32;--del:#fbe6e6;--delfg:#8f1f1f;--hunk:#5a5fb0;--noise-clear:#155d32;
+--noise-marginal:#9a6700;--noise-noise:#b42318;color-scheme:light}
 @media (prefers-color-scheme:dark){:root{--bg:#161618;--fg:#e8e8ea;--muted:#9a9aa2;
 --line:#34343a;--panel:#1f1f23;--code:#232327;--best:#f2b84b;--improved:#4cc983;
 --accepted:#6d9cf0;--rejected:#7c7c84;--demoted:#f59d3d;--false_positive:#f59d3d;
 --failed:#f06a6a;--holdout:#b195f2;--step:#4cc983;--add:#173a24;--addfg:#a6e8bf;
---del:#45201f;--delfg:#f3b0ae;--hunk:#a3a7f0;color-scheme:dark}}
+--del:#45201f;--delfg:#f3b0ae;--hunk:#a3a7f0;--noise-clear:#4cc983;
+--noise-marginal:#f2b84b;--noise-noise:#f06a6a;color-scheme:dark}}
 *{box-sizing:border-box}[hidden]{display:none!important}
 body{margin:0 auto;max-width:1400px;padding:16px;background:var(--bg);color:var(--fg);
 font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -621,6 +649,10 @@ vertical-align:top;overflow-wrap:anywhere}
 table.grid{min-width:min(100%,560px)}table.grid th,table.grid td{border-bottom:1px solid
 var(--line);padding:4px 10px;text-align:right}table.grid th:first-child,table.grid
 td:first-child{text-align:left}table.grid tr.total td{font-weight:600}
+table.grid tr.noise-clear td.nz{color:var(--noise-clear)}
+table.grid tr.noise-marginal td.nz{color:var(--noise-marginal)}
+table.grid tr.noise-noise td.nz{color:var(--noise-noise)}
+table.grid tr.noise-muted td.nz{color:var(--muted)}
 .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;margin-bottom:6px}
 .toggle select{font:inherit;margin-left:4px}
 .legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin:0;padding:0;list-style:none;
@@ -665,6 +697,7 @@ svg .cutlabel{font-size:10px}
 .edge{stroke:var(--muted);stroke-width:.8;opacity:.25}.edge.solid{opacity:.7;stroke-width:1.1}
 .stepline{fill:none;stroke:var(--step);stroke-width:1.5;opacity:.55}
 .holdout{fill:none;stroke:var(--holdout);stroke-width:1.6}
+.whisker{stroke:var(--muted);stroke-width:1.2;opacity:.8}
 .root circle{fill:var(--bg);stroke:var(--fg);stroke-width:1.5}.root text{fill:var(--fg)}
 """
 
@@ -704,6 +737,14 @@ _JS = r"""
     dl.appendChild(el("dt", null, k));
     dl.appendChild(el("dd", null, String(v)));
   };
+  const noiseText = (n) => {
+    if (n.noise_state === "ok") {
+      return "\u00b1" + (n.se * 100).toFixed(3) + "%, " + n.noise_ratio.toFixed(1) +
+        "x noise, " + n.noise_band;
+    }
+    return {n1: "n=1", identical: "identical on every nonce",
+            no_spread: "\u00b10, no spread"}[n.noise_state] || null;
+  };
   let selected = null;
   const show = (id) => {
     const n = byId.get(id);
@@ -732,6 +773,7 @@ _JS = r"""
       field(dl, "per track", Object.keys(n.tracks).sort()
         .map((t) => t + " " + pct(n.tracks[t])).join(", "));
     }
+    field(dl, "noise", noiseText(n));
     if (n.metered_score != null) field(dl, "metered", pct(n.metered_score));
     if (n.probability != null) field(dl, "accept probability", n.probability.toFixed(3));
     if (n.draw != null) field(dl, "draw", n.draw.toFixed(3));
@@ -757,7 +799,9 @@ _JS = r"""
     const g = e.target.closest("[data-node]");
     if (!g) { tip.hidden = true; return; }
     const n = byId.get(Number(g.dataset.node));
-    tip.textContent = "#" + n.id + " " + n.title + " (" + pct(n.score) + ")";
+    const nz = noiseText(n);
+    tip.textContent = "#" + n.id + " " + n.title + " (" + pct(n.score) +
+      (nz ? ", " + nz : "") + ")";
     tip.hidden = false;
     tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 370) + "px";
     tip.style.top = (e.clientY + 14) + "px";

@@ -49,6 +49,7 @@ from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
 from talos.prompts import WHOLE_FILE_FORMAT
 from talos.wizard import ask_choice, confirm
+from talos.scoring import NOISE_WORDS
 from talos.state import JobSpec, JobState, JobStore, user_tacit
 from talos.types import Usage
 
@@ -565,6 +566,18 @@ def _holdout_text(data: dict) -> str:
             f"(worst track {h['worst_rel_delta']:+.3%})")
 
 
+def _noise_text(data: dict) -> str | None:
+    """The noise figure of a scored event, or None when the line shows none.
+    Reads the recorded noise_state only; an event written before issue #69 has no state."""
+    state = data.get("noise_state")
+    if state == "ok":
+        se, ratio, band = data.get("mean_rel_se"), data.get("noise_ratio"), data.get("noise_band")
+        if se is None or ratio is None or band is None:
+            return None
+        return f"±{se:.3%}, {ratio:.1f}x noise, {band}"
+    return NOISE_WORDS.get(state)
+
+
 def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | None:
     """One loop event as one terminal line, or None for an event the terminal does not show.
     timeline.jsonl keeps every event with every field; this is the summary of it."""
@@ -579,8 +592,10 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
         text = f"trying: {data.get('title', '')}{tag}"
     elif kind == "scored":
         runtime = data.get("runtime_ratio")
-        text = (f"scored {data['mean_rel_delta']:+.3%} vs baseline "
-                f"(worst track {data['worst_rel_delta']:+.3%}, errors {data['error_rate']:.1%}"
+        noise = _noise_text(data)
+        text = (f"scored {data['mean_rel_delta']:+.3%} vs baseline ("
+                + (f"{noise}; " if noise else "")
+                + f"worst track {data['worst_rel_delta']:+.3%}, errors {data['error_rate']:.1%}"
                 + (f", runtime x{runtime:.2f}" if runtime is not None else "")
                 + (f", {data['not_run']} not run" if data.get("not_run") else "") + ")")
     elif kind == "compile_failed":
