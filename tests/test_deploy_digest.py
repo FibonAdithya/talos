@@ -4,7 +4,7 @@ import ast
 import re
 from pathlib import Path
 
-from modal_app import talos_bench
+from talos.modal_app import talos_bench
 from talos.deploy_digest import DEPLOYED_FILES, digest, marker_name
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,7 +21,7 @@ def _module_files(sub: str) -> list[str]:
 
 
 def _imports(path: Path) -> set[str]:
-    """Repo-relative files that `path` imports from `talos` or `modal_app`, function-level
+    """Repo-relative files that `path` imports from `talos`, function-level
     imports included. Relative imports are resolved against the importing file's package."""
     found = set()
     pkg = path.relative_to(ROOT).parent.parts
@@ -39,17 +39,18 @@ def _imports(path: Path) -> set[str]:
             continue
         for mod, names in mods:
             parts = mod.split(".")
-            if parts[0] not in ("talos", "modal_app"):
+            if parts[0] != "talos":
                 continue
-            found.add(f"{parts[0]}/__init__.py")
-            found.update(_module_files("/".join(parts)))
+            # importing a.b.c runs a/__init__.py and a/b/__init__.py, then a/b/c
+            for i in range(1, len(parts) + 1):
+                found.update(_module_files("/".join(parts[:i])))
             for n in names:  # `from talos import x`
                 found.update(_module_files("/".join(parts + [n])))
     return found
 
 
 def test_deployed_files_are_the_import_closure_of_the_modal_app():
-    closure = {"modal_app/__init__.py", "modal_app/talos_bench.py"}
+    closure = {"talos/modal_app/__init__.py", "talos/modal_app/talos_bench.py"}
     todo = list(closure)
     while todo:
         for dep in _imports(ROOT / todo.pop()):
@@ -133,9 +134,9 @@ def test_the_marker_is_a_closure_not_a_module_level_function():
     assert not hasattr(talos_bench, fn.__name__)
 
 
-def test_deployed_paths_are_under_the_two_packages_the_image_carries():
-    # the compile/score image adds only these two packages (add_local_python_source)
-    assert all(p.split("/")[0] in ("modal_app", "talos") for p in DEPLOYED_FILES)
+def test_deployed_paths_are_under_the_package_the_image_carries():
+    # the compile/score image adds only the talos package (add_local_python_source)
+    assert all(p.split("/")[0] == "talos" for p in DEPLOYED_FILES)
 
 
 def test_the_walker_resolves_packages_and_relative_imports(tmp_path, monkeypatch):
@@ -152,3 +153,17 @@ def test_the_walker_resolves_packages_and_relative_imports(tmp_path, monkeypatch
     # digest does not cover
     assert me._imports(mod) == {"talos/__init__.py", "talos/providers/__init__.py",
                                 "talos/providers/x.py", "talos/y.py"}
+
+
+def test_the_walker_counts_every_package_on_a_dotted_path(tmp_path, monkeypatch):
+    import tests.test_deploy_digest as me
+    (tmp_path / "talos" / "modal_app").mkdir(parents=True)
+    for f in ("talos/__init__.py", "talos/modal_app/__init__.py", "talos/modal_app/bench.py"):
+        (tmp_path / f).write_text("")
+    mod = tmp_path / "talos" / "a.py"
+    mod.write_text("import talos.modal_app.bench\n")
+    monkeypatch.setattr(me, "ROOT", tmp_path)
+    # mutation: adding only the first package's __init__.py misses talos/modal_app/__init__.py,
+    # which Python runs on this import
+    assert me._imports(mod) == {"talos/__init__.py", "talos/modal_app/__init__.py",
+                                "talos/modal_app/bench.py"}

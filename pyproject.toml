@@ -35,7 +35,7 @@ dev = ["pytest>=8", "ruff>=0.5"]
 talos = "talos.cli:main"
 
 [tool.setuptools]
-packages = ["talos", "talos.providers", "modal_app"]
+packages = ["talos", "talos.providers", "talos.modal_app"]
 
 [tool.setuptools.dynamic]
 version = {attr = "talos.__version__"}

@@ -6,13 +6,14 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-# The import closure of modal_app/talos_bench.py, relative to the parent of the `talos` package
+# The import closure of talos/modal_app/talos_bench.py, relative to the parent of the `talos`
+# package
 # (the repo root in a clone, site-packages in a wheel). tests/test_deploy_digest.py walks the
 # imports and fails when this drifts. scripts/check_wheel.py reads it with `ast`, so it stays a
 # literal tuple of string literals.
-DEPLOYED_FILES = ("modal_app/__init__.py", "modal_app/talos_bench.py", "talos/__init__.py",
-                  "talos/challenges.py", "talos/deploy_digest.py", "talos/inside.py",
-                  "talos/native_runner.py")
+DEPLOYED_FILES = ("talos/__init__.py", "talos/challenges.py", "talos/deploy_digest.py",
+                  "talos/inside.py", "talos/modal_app/__init__.py",
+                  "talos/modal_app/talos_bench.py", "talos/native_runner.py")
 
 
 def digest(root: Path | None = None) -> str:
