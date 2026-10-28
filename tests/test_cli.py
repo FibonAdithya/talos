@@ -3005,11 +3005,35 @@ def test_event_lines_for_validation():
 
 # ── --start, --search, --chains ───────────────────────────────────────────────
 
-def _template_job(tmp_path, extra=()):
-    """A fake template-start job on energy_arbitrage; returns (rc, run_dir)."""
-    rc = cli.main(["run", "--fake", "--yes", "--challenge", "energy_arbitrage", "--direction",
+def _template_job(tmp_path, extra=(), challenge="energy_arbitrage"):
+    """A fake template-start job (energy_arbitrage by default); returns (rc, run_dir)."""
+    rc = cli.main(["run", "--fake", "--yes", "--challenge", challenge, "--direction",
                    "go", "--start", "template", "--budget-iterations", "1", *extra])
     return rc, next((tmp_path / "runs").glob("*/job.json")).parent
+
+
+def test_template_start_runs_on_a_cpu_challenge(tmp_path, monkeypatch):
+    # mutation: the CLI refusal left in place for knapsack
+    monkeypatch.chdir(tmp_path)
+    rc, run_dir = _template_job(tmp_path, challenge="knapsack")
+    # 1 = exhausted: the fake first candidate is at baseline parity (k=1)
+    assert rc == 1
+    assert (run_dir / "challenge" / "mod.rs").read_text() == "fake knapsack/mod.rs\n"
+    assert (run_dir / "package" / "diff_vs_template.patch").is_file()
+
+
+def test_template_start_writes_and_quotes_nested_docs(tmp_path, monkeypatch):
+    # mutation: writing docs without mkdir(parents=True) raises for nn/linear.rs
+    monkeypatch.chdir(tmp_path)
+    prompts = []
+    script = cli._fake_script
+    monkeypatch.setattr(cli, "_fake_script",
+                        lambda s, u: prompts.append(s + u) or script(s, u))
+    _template_job(tmp_path, challenge="neuralnet_optimizer")
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert (run_dir / "challenge" / "nn" / "linear.rs").read_text() == \
+        "fake neuralnet_optimizer/nn/linear.rs\n"
+    assert any("tig-challenges/src/neuralnet_optimizer/nn/linear.rs" in p for p in prompts)
 
 
 def test_start_template_refuses_an_unsupported_challenge(tmp_path, monkeypatch, capsys):

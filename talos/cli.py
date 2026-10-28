@@ -501,7 +501,10 @@ FAKE_MAINNET = types.SimpleNamespace(
         for t in tracks},
     fetch_algorithm_files=lambda ch, name: {"mod.rs": "fn solve() { let k = 1; }\n"},
     fetch_template=lambda ch: "pub fn solve_challenge(",
-    fetch_challenge_docs=lambda ch: {"README.md": "Fake challenge: maximise k.\n"})
+    # one stub per name on the challenge's list, so nested names (nn/linear.rs) are exercised
+    fetch_challenge_docs=lambda ch: {
+        name: "Fake challenge: maximise k.\n" if name == "README.md" else f"fake {ch}/{name}\n"
+        for name in TEMPLATE_START_FILES[ch]})
 
 
 def unpriced_reason(provider: str, model: str) -> str | None:
@@ -1273,6 +1276,7 @@ def _cmd_run(args, ask) -> int:
         docs_dir = store.run_dir / "challenge"
         docs_dir.mkdir()
         for name, text in {**docs, "template.rs": template}.items():
+            (docs_dir / name).parent.mkdir(parents=True, exist_ok=True)  # nn/linear.rs
             (docs_dir / name).write_text(text, encoding="utf-8", newline="\n")
     (store.run_dir / "tacit.md").write_text(user_tacit(direction),
                                             encoding="utf-8", newline="\n")
