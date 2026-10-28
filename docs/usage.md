@@ -359,7 +359,7 @@ that is not tested.
 | `--hyperparameters mainnet\|none` | `mainnet` (the default) runs the baseline and every candidate with the baseline algorithm's mainnet hyperparameters per track, fixed at job start; with `--start template` only the baseline uses them. `none` runs every nonce without hyperparameters. See **`--hyperparameters`** below. |
 | `--mode single-shot\|agentic` | Overrides the configured mode for this job. `agentic` needs a CLI provider and uses roughly 5 to 20 times the tokens of `single-shot`. |
 | `--scoring native\|metered` | `native` (the default) scores research candidates with a faster unmetered runner and scores an improvement again on the metered runtime before it can become the best. `metered` scores every candidate with TIG's own `tig-runtime`. See **`--scoring`** below. |
-| `--start mainnet\|template` | `mainnet` (the default) starts from the top-adoption mainnet algorithm. `template` starts from TIG's empty template, for `energy_arbitrage` only. See **`--start`** below. |
+| `--start mainnet\|template` | `mainnet` (the default) starts from the top-adoption mainnet algorithm. `template` starts from TIG's empty template, on any challenge. See **`--start`** below. |
 | `--search greedy\|anneal` | `greedy` (the default) edits the best candidate so far. `anneal` edits the chain's current candidate and sometimes accepts a worse one so the search can leave a local optimum. The annealing settings (start temperature 0.05, final temperature 0.1 of that, reheat after 5 iterations without a new chain best) are estimates with no measurement behind them. |
 | `--chains N` | Independent search chains (default 1; a value below 1 is refused). Chains take turns: iteration n runs on chain (n-1) mod N, one at a time; running them concurrently comes in a later change. |
 | `--budget-usd N` | LLM spend cap in USD. |
@@ -414,9 +414,15 @@ scores metered and says so in the timeline.
 source files from the pinned monorepo (`talos/challenges.py::TEMPLATE_START_FILES`, not the
 baseline algorithms' directory) and the template, and never the baseline's code. The baseline
 is still measured and every candidate is scored against it. Candidates run without
-hyperparameters while the baseline keeps the mainnet ones. Refused for challenges other than
-`energy_arbitrage`. Refused with `codex-cli` in agentic mode, even with
-`TALOS_ALLOW_CODEX_AGENTIC=1`. See
+hyperparameters while the baseline keeps the mainnet ones. hypergraph's challenge files include
+TIG's greedy partitioner, which sets the quality zero point. On a GPU challenge
+(`hypergraph`, `vector_search`, `neuralnet_optimizer`) the starting candidate also has
+`algorithm.cu`, TIG's `template.cu`, for its CUDA kernels. Every new best of a template job is
+scored again on the metered runtime (with `--scoring native`, the default), and a template
+job's first scored candidate is always a new best, so expect more of these runs than on a
+mainnet start; they cost more on a GPU challenge. `neuralnet_optimizer` has nine challenge
+files, so its prompts are long (ESTIMATE (unverified) ~25k tokens each). Refused with
+`codex-cli` in agentic mode, even with `TALOS_ALLOW_CODEX_AGENTIC=1`. See
 [From-scratch start and annealing search](architecture.md#from-scratch-start-and-annealing-search).
 
 Without flags, the wizard asks for challenge, direction, an LLM budget (USD for metered
@@ -601,7 +607,7 @@ Each job gets a directory under `runs/` in the workspace:
 | `runs/<job_id>/timeline.jsonl` | One JSON event per line; the same events the terminal prints. A `scored` event carries `mean_rel_se`, `noise_ratio`, `noise_band`, `noise_state` and `track_rel_se` (the standard error of each track's delta). A resume with `--add-*` adds `budget_extended` (the additions and the resulting budget). A native job adds `calibrated` (the budgets), `validating`, `validated` and `demoted` (with its reason); `calibration_fallback` says the job scores metered and why. A tree job (anneal, several chains or a template start) adds `accept` (one per scored candidate: chain, node, parent, family, score, decision, probability, temperature) and `reheat`. |
 | `runs/<job_id>/tacit.md` | Your direction, plus lessons the LLM distilled from failed attempts. |
 | `runs/<job_id>/baseline/` | The baseline algorithm's files and its per-nonce results. |
-| `runs/<job_id>/challenge/` | A `--start template` job only: the challenge files and the template the LLM was shown. |
+| `runs/<job_id>/challenge/` | A `--start template` job only: the challenge files and the template the LLM was shown (`template.rs`, plus `template.cu` on a GPU challenge). |
 | `runs/<job_id>/iterations/<n>/` | Each candidate's files and its hypothesis. |
 | `runs/<job_id>/best/` | The best candidate's files so far. |
 | `runs/<job_id>/package/` | The hand-back package, written when the job stops. |
