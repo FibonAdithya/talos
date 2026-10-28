@@ -139,6 +139,10 @@ One-time setup by the repository owner: create the `pypi` environment in the Git
 repository's settings, and add a trusted publisher for `talos-tig` on PyPI with owner
 `FibonAdithya`, repository `talos`, workflow `.github/workflows/publish.yml` (in PyPI's
 form, the workflow name is "publish.yml", without the directories) and environment `pypi`.
-Until the first release exists, add it as a pending publisher. This follows PyPI's
-trusted-publishing documentation and has
-not yet been done for this project.
+This follows PyPI's trusted-publishing documentation.
+
+0.1.0 was uploaded by hand on 2026-10-28, from commit `ee77f2c` (tag `v0.1.0`), before
+this workflow existed. The project therefore exists on PyPI: add the publisher on the
+project's own Publishing settings page, not as a pending publisher. On 2026-10-28 the
+`pypi` environment did not exist yet (`gh api repos/FibonAdithya/talos/environments` listed
+no environments).
