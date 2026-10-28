@@ -12,7 +12,8 @@ from talos.budget import ADD_DIMENSIONS, Budget, effective_budget
 from talos.challenges import CHALLENGES, BeatRule
 from talos.lineage import Node
 from talos.prompts import in_tree, parent_label
-from talos.scoring import ScoringError, beats, bundle_delta, focus_sets, noise, select
+from talos.scoring import (
+    NOISE_WORDS, BundleDelta, ScoringError, beats, bundle_delta, focus_sets, noise, select)
 from talos.state import JobSpec, JobState, JobStore
 from talos.types import NonceResult
 
@@ -43,7 +44,7 @@ def scores_markdown(baseline: list[NonceResult], candidate: list[NonceResult],
     return "\n".join(rows) + "\n" + summary
 
 
-def _noise_lines(d, rule: BeatRule) -> str:
+def _noise_lines(d: BundleDelta, rule: BeatRule) -> str:
     """The SE and noise ratio lines under a table's summary; display only. Nothing when the
     error rate is over the ceiling, as for the other noise displays."""
     ratio, band, state = noise(d, rule)
@@ -51,12 +52,8 @@ def _noise_lines(d, rule: BeatRule) -> str:
         return ""
     if state == "ok":
         head = f"mean_rel_se: ±{d.mean_rel_se:.4%}  noise: {ratio:.1f}x ({band})"
-    elif state == "n1":
-        head = "noise: n=1"
-    elif state == "identical":
-        head = "noise: identical on every nonce"
     else:
-        head = "noise: ±0, no spread"
+        head = f"noise: {NOISE_WORDS[state]}"
     # 0.0 is a legitimate SE (no spread), so test for None, not falsiness
     tracks = "; ".join(f"{t.track}: n=1" if t.rel_se is None
                        else f"{t.track}: ±{t.rel_se:.2%} (n={t.n})" for t in d.tracks)

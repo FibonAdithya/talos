@@ -49,6 +49,7 @@ from talos.providers.codex_cli import list_codex_models
 from talos.providers.pricing import estimate_cost
 from talos.prompts import WHOLE_FILE_FORMAT
 from talos.wizard import ask_choice, confirm
+from talos.scoring import NOISE_WORDS
 from talos.state import JobSpec, JobState, JobStore, user_tacit
 from talos.types import Usage
 
@@ -567,18 +568,14 @@ def _holdout_text(data: dict) -> str:
 
 def _noise_text(data: dict) -> str | None:
     """The noise figure of a scored event, or None when the line shows none.
-    Reads the recorded noise_state only; an event written before Task 2 has no state."""
+    Reads the recorded noise_state only; an event written before issue #69 has no state."""
     state = data.get("noise_state")
     if state == "ok":
-        return (f"±{data.get('mean_rel_se', 0):.3%}, {data.get('noise_ratio', 0):.1f}x noise, "
-                f"{data.get('noise_band')}")
-    if state == "n1":
-        return "n=1"
-    if state == "identical":
-        return "identical on every nonce"
-    if state == "no_spread":
-        return "±0, no spread"
-    return None
+        se, ratio, band = data.get("mean_rel_se"), data.get("noise_ratio"), data.get("noise_band")
+        if se is None or ratio is None or band is None:
+            return None
+        return f"±{se:.3%}, {ratio:.1f}x noise, {band}"
+    return NOISE_WORDS.get(state)
 
 
 def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | None:

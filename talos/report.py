@@ -501,8 +501,7 @@ def _header(spec: JobSpec, state: JobState, timeline: list[dict],
 def _track_tables(spec: JobSpec, state: JobState) -> str:
     from talos.package import score_pairs
     from talos.challenges import CHALLENGES
-    from talos.cli import _noise_text
-    from talos.scoring import ScoringError, bundle_delta, noise
+    from talos.scoring import NOISE_WORDS, ScoringError, bundle_delta, noise
 
     out = []
     for heading, base, cand in score_pairs(spec, state):
@@ -514,14 +513,15 @@ def _track_tables(spec: JobSpec, state: JobState) -> str:
         except ScoringError as e:
             out.append(f"<tr><td colspan='7'>no bundle delta: {_esc(e)}</td></tr></table>")
             continue
+        ratio, band, nstate = noise(d, CHALLENGES[spec.challenge].beat)
         for t in d.tracks:
+            se = ("" if nstate == "over_ceiling"
+                  else "n=1" if t.rel_se is None else f"±{t.rel_se:.3%}")
             out.append(f"<tr><td>{_esc(t.track)}</td><td>{t.base_mean:.6g}</td>"
                        f"<td>{t.cand_mean:.6g}</td><td>{_esc(_pct(t.rel_delta))}</td>"
                        f"<td>{t.cand_errors}</td><td>{t.n}</td>"
-                       f"<td>{'n=1' if t.rel_se is None else f'±{t.rel_se:.3%}'}</td></tr>")
-        ratio, band, nstate = noise(d, CHALLENGES[spec.challenge].beat)
-        text = _noise_text({"noise_state": nstate, "mean_rel_se": d.mean_rel_se,
-                            "noise_ratio": ratio, "noise_band": band})
+                       f"<td>{se}</td></tr>")
+        text = NOISE_WORDS.get(nstate)
         if nstate == "ok":
             text = f"±{d.mean_rel_se:.3%}, {ratio:.1f}x {band}"
         # colour only a gain: a loss is not good news at any ratio
@@ -799,8 +799,9 @@ _JS = r"""
     const g = e.target.closest("[data-node]");
     if (!g) { tip.hidden = true; return; }
     const n = byId.get(Number(g.dataset.node));
+    const nz = noiseText(n);
     tip.textContent = "#" + n.id + " " + n.title + " (" + pct(n.score) +
-      (n.noise_state === "ok" ? ", " + n.noise_ratio.toFixed(1) + "x noise" : "") + ")";
+      (nz ? ", " + nz : "") + ")";
     tip.hidden = false;
     tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 370) + "px";
     tip.style.top = (e.clientY + 14) + "px";

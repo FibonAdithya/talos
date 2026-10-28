@@ -85,6 +85,9 @@ def bundle_delta(baseline: list[NonceResult], candidate: list[NonceResult]) -> B
 
 NOISE_CLEAR = 2.0
 NOISE_MARGINAL = 1.0
+# The words shown for a state with no ratio, on the status line, in scores.md and in report.html.
+NOISE_WORDS = {"n1": "n=1", "identical": "identical on every nonce",
+               "no_spread": "±0, no spread"}
 
 
 def noise(d: BundleDelta, rule: BeatRule) -> tuple[float | None, str | None, str]:

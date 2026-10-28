@@ -90,15 +90,19 @@ and the time left.
 ```
 
 The `±` figure after a scored delta is the paired standard error of the mean delta over the
-nonces. `4.0x noise` is the delta divided by that error, and the word after it is a band:
-`clear` for 2 or more, `marginal` for 1 to under 2, `noise` for under 1. Three cases have no
-ratio: `n=1` (a track has one nonce), `identical on every nonce` and `±0, no spread`. Over the
-error ceiling, nothing is shown. The noise text comes first, so a narrow terminal cuts the tail.
+nonces. `4.0x noise` is the size (absolute value) of the delta divided by that error, and the
+word after it is a band: `clear` for 2 or more, `marginal` for 1 to under 2, `noise` for under 1.
+The band says only how far the delta is from zero. It does not say whether the delta is a gain,
+so a regression can read `clear`. Three cases have no ratio. `n=1` means a track has one nonce,
+so no error can be computed. `identical on every nonce` means the candidate scored the same as
+the baseline on every nonce. `±0, no spread` means every nonce moved by the same amount. Over
+the error ceiling, nothing is shown. The noise text comes first on the line. A line cut to the
+terminal width loses the worst-track, error and runtime figures before the noise figure.
 
-The error measures nonce-to-nonce variation for one candidate. It does not account for the best
-being chosen out of many candidates, which is how a candidate improves on training and then
-fails held-out. A ratio of 3x on the best of 7 tries is weaker evidence than 3x on a single
-try. Whether the ratio predicts held-out results is not yet known.
+The standard error measures nonce-to-nonce variation for one candidate. It does not account
+for the best being chosen out of many candidates, which is how a candidate improves on training
+and then fails held-out. A ratio of 3x on the best of 7 tries is weaker evidence than 3x on a
+single try. Whether the ratio predicts held-out results is not yet known.
 
 `best` is the best candidate's mean relative delta versus the baseline on training nonces.
 `compute ≈` is an estimate (see [Budget](#budget)). The last field is the wall-clock budget
@@ -538,10 +542,11 @@ talos report 20260917-101006-knapsack
 Writes `runs/<job_id>/package/report.html` and prints its path. The page is one file with no
 network access: a header (status, best delta, held-out result, spend, times, settings), a plot of
 every iteration's training delta against the mainnet baseline with lines from each node to its
-parent, a panel with any node's details and its diff against its parent, per-track tables (with a standard error column) for
-the best candidate, the best diff, and the hypothesis list. It is built only from files already in
-the run directory, so it works on old runs and on a job that is still running; it needs no
-credentials and writes nothing else. The package written when a job stops includes it too.
+parent, a panel with any node's details and its diff against its parent, per-track tables (with a
+standard error column) for the best candidate, the best diff, and the hypothesis list. It is built
+only from files already in the run directory, so it works on old runs and on a job that is still
+running; it needs no credentials and writes nothing else. The package written when a job stops
+includes it too.
 Diffs are shortened to keep the page under about 2 MB; a shortened diff ends with the `diff -u`
 command that prints it in full.
 
@@ -611,7 +616,7 @@ The package directory holds:
 | lineage.json, lineage.md | The search tree: every iteration's node and each chain's state (lineage.json), and the path from the root to the best node with a per-design-family table (lineage.md). Written when the job recorded any node. |
 | `scores.md` | Per-nonce tables for baseline and candidate on training and held-out nonces. A focused job (`--track`) adds a regression-guard table for the other tracks. Under each table's summary it adds `mean_rel_se: ±…  noise: N.Nx (band)` and a `per track:` line; the evidence draft for the TIG submission does not have them. |
 | `hypotheses.md` | The full hypothesis log with outcomes. |
-| `report.html` | The search on one page: a plot of every iteration with its lineage (a ±1 standard error whisker on each scored node), each node's diff against its parent, per-track tables and the hypothesis log. Open it in a browser; it loads nothing from the network. Written on every package, including one with no candidate. If the page fails to render, the package prints `report.html not written: …` and is written without it; `talos report` rewrites it. |
+| `report.html` | The search on one page: a plot of every iteration with its lineage (a ±1 standard error whisker on each scored node that has a nonzero standard error under the error ceiling), each node's diff against its parent, per-track tables and the hypothesis log. Open it in a browser; it loads nothing from the network. Written on every package, including one with no candidate. If the page fails to render, the package prints `report.html not written: …` and is written without it; `talos report` rewrites it. |
 | `evidence_draft.md` | A partly filled-in TIG advance-evidence template. |
 | `hyperparameters.json` | The per-track hyperparameters, when the job used them. Not written for a `--start template` job, whose candidate ran without them. |
 | `README.md` | The submission steps, with a Hyperparameters section when the job used them. |

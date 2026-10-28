@@ -501,3 +501,10 @@ def test_package_builds_from_a_state_without_noise_keys(tmp_path):
     spec, st, store = make(tmp_path)
     assert "mean_rel_se" not in st.best.delta
     build_package(spec, st, store)
+
+
+def test_scores_markdown_names_identical_on_every_nonce():
+    # mutation: swapping the identical and no_spread words
+    md = scores_markdown(T4, list(T4), BeatRule())
+    assert "noise: identical on every nonce" in md
+    assert "no spread" not in md

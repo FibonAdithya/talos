@@ -453,3 +453,34 @@ def test_track_table_zero_se_is_not_n1(tmp_path):
                         {"mean_rel_delta": 0.1}, st.best.hypothesis)
     html = _render(spec, st, store)
     assert "±0.000%" in html and "<td>n=1</td>" not in html
+
+
+def test_track_table_over_the_ceiling_shows_no_se(tmp_path):
+    # spec decision 3. mutation: printing the SE cells whatever the noise state
+    from talos.state import Candidate
+    from talos.types import NonceResult
+    spec, st, store = make_run(tmp_path, _scored(1), best=1)
+    st.best = Candidate(1, st.best.files, "b",
+                        [NonceResult("t", 0, True, 110, 1),
+                         NonceResult("t", 1, False, None, 1, "panic")],
+                        {"mean_rel_delta": 0.1}, st.best.hypothesis)
+    html = _render(spec, st, store)
+    tables = html[html.index("<h3>"):html.index("</table>", html.index("<h3>"))]
+    assert "<th>SE</th>" in tables and "±" not in tables and "n=1" not in tables
+
+
+def test_tooltip_uses_the_panel_noise_text(tmp_path):
+    # spec: the tooltip shows the same noise text as the panel. mutation: the tooltip
+    # appending only the ratio again
+    html = rendered(tmp_path, [{**_scored(1)[0], **OK}])
+    handler = html[html.index('addEventListener("mousemove"'):]
+    handler = handler[:handler.index('addEventListener("mouseleave"')]
+    assert "noiseText(n)" in handler and "noise_ratio" not in handler
+
+
+def test_report_script_carries_the_shared_state_words(tmp_path):
+    # the JS keeps a literal copy of the words in talos.scoring.NOISE_WORDS
+    from talos.scoring import NOISE_WORDS
+    html = rendered(tmp_path, _scored(1))
+    for word in NOISE_WORDS.values():
+        assert word.replace("±", "\\u00b1") in html

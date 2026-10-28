@@ -3636,3 +3636,13 @@ def test_version_flag_prints_the_package_version(capsys):
     assert exc.value.code == 0
     assert capsys.readouterr().out == f"talos {talos.__version__}\n"
     assert importlib.metadata.version("talos-tig") == talos.__version__
+
+
+@pytest.mark.parametrize("missing", ["mean_rel_se", "noise_ratio", "noise_band"])
+def test_event_line_scored_ok_with_a_null_field_has_no_noise(missing):
+    # mutation: .get(..., 0) invents "±0.000%, 0.0x noise, None" or raises TypeError on None
+    data = {**SCORED, "mean_rel_se": 0.0031, "noise_ratio": 1.29, "noise_band": "marginal",
+            "noise_state": "ok", missing: None}
+    assert cli._event_line("scored", data, width=200) == "scored +0.400% vs baseline (" + TAIL
+    del data[missing]
+    assert cli._event_line("scored", data, width=200) == "scored +0.400% vs baseline (" + TAIL
