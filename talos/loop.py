@@ -27,7 +27,7 @@ from talos.prompts import (PromptContext, STRATEGY_TAGS, compile_fix_prompts,
 from talos.providers import (ProviderAuthError, ProviderError, ProviderRateLimited,
                              ProviderTimeout)
 from talos.scoring import (Bar, ScoringError, beats, beats_focused, bundle_delta, clears,
-                           focus_sets, fuel_proxy_misses, improves, quality_mismatches,
+                           focus_sets, fuel_proxy_misses, improves, noise, quality_mismatches,
                            runtime_ratio, select, validation_failure, worst_track_shortfall)
 from talos.search_replace import format_misses
 from talos.state import Candidate, JobSpec, JobState, JobStore, TERMINAL, user_tacit
@@ -506,6 +506,12 @@ class Loop:
         return {"chain": chain.index, "against": self._parent_id(chain), "design_family": "",
                 "accepted": False, "probability": None, "draw": None, "temperature": None}
 
+    def _noise_fields(self, d) -> dict:
+        """Display-only noise figures for a delta; the rules live in scoring.noise."""
+        ratio, band, state = noise(d, self.rule)
+        return {"mean_rel_se": d.mean_rel_se, "noise_ratio": ratio, "noise_band": band,
+                "noise_state": state}
+
     def _add_node(self, n: int, record: dict, improved: bool, scored: dict | None,
                   metered: dict | None) -> None:
         """Appends iteration n's Node and moves its chain. A job-wide improvement always becomes
@@ -711,9 +717,12 @@ class Loop:
             keys = {(r.track, r.nonce) for r in ran}
             record["runtime_ratio"] = runtime_ratio(
                 [r for r in base_tr if (r.track, r.nonce) in keys], ran)
+        fields = self._noise_fields(delta)
+        record.update(**fields)
         self._event("scored", mean_rel_delta=delta.mean_rel_delta,
                     worst_rel_delta=delta.worst_rel_delta, error_rate=delta.error_rate,
-                    runtime_ratio=record.get("runtime_ratio"),
+                    runtime_ratio=record.get("runtime_ratio"), **fields,
+                    track_rel_se={t.track: t.rel_se for t in delta.tracks},
                     **({"not_run": not_run} if not_run else {}))
         if delta.error_rate > self.rule.error_ceiling:  # spec §9: over the ceiling is a failure
             record.update(outcome="failed:runtime", error_rate=delta.error_rate)
@@ -792,7 +801,8 @@ class Loop:
         self._write_files(self.store.run_dir / "best", best.files)
         record.update(outcome="improved", accepted=True, mean_rel_delta=d.mean_rel_delta,
                       worst_rel_delta=d.worst_rel_delta,
-                      runtime_ratio=runtime_ratio(base_tr, res.training))
+                      runtime_ratio=runtime_ratio(base_tr, res.training),
+                      **self._noise_fields(d))
         self._event("validated", mean_rel_delta=d.mean_rel_delta)
         # The node keeps the native score it was produced with beside the metered one.
         self._finish_iteration(n, record, improved=True, scored=cand.delta, metered=best.delta)
