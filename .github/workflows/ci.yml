@@ -94,6 +94,9 @@ jobs:
           export HOME="$fake_home" USERPROFILE="$fake_home"
           cd "$empty_dir"
           talos --version
+          # The installed `talos guide` prints the packaged guide byte for byte (#71). Bytes and
+          # utf-8 here: Windows python would otherwise decode the pipe as cp1252 and add \r.
+          talos guide | python -c "import os,sys; from pathlib import Path; got=sys.stdin.buffer.read().decode('utf-8').replace('\r\n','\n'); want=(Path(os.environ['GITHUB_WORKSPACE'])/'talos'/'data'/'agent_guide.md').read_bytes().decode('utf-8').replace('\r\n','\n'); assert got==want, (len(got), len(want))"
           talos demo --delay 0
           talos status --json | python -c "import json,sys; from pathlib import Path; jobs=json.load(sys.stdin)['jobs']; assert len(jobs)==1 and jobs[0]['status']=='won', jobs; d=Path.home()/'.talos'/'workspace'/'runs'/jobs[0]['job_id']; assert d.is_dir(), d"
 

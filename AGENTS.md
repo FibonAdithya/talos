@@ -259,6 +259,7 @@ nobody.
 | Task | Start here |
 |---|---|
 | Set up and run day-to-day commands | `README.md`, `docs/usage.md` |
+| The guide for agents *using* Talos (`talos guide`) | `talos/data/agent_guide.md`; its drift test is `tests/test_guide.py` |
 | Run the gate | `Makefile` |
 | The research loop, its guards, the agentic sandbox, the baseline cache | `docs/architecture.md` |
 | Modal, C3 and local transports, job directories, timings, the dev images | `docs/compute-backends.md` |

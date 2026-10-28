@@ -931,6 +931,40 @@ def _job_summary(*, job_id: str, challenge: str, scope: str, nonces: int, fuel: 
 
 
 def cmd_run(args, ask) -> int:
+    # A `talos run ... &` from a non-interactive shell starts with SIGINT ignored, so without
+    # this a `kill -INT` before execute_job installs the loop's handler does nothing (#71).
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        return _cmd_run(args, ask)
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _run_job(spec: JobSpec, store: JobStore, cfg: Config, **kw) -> int:
+    """execute_job, where a Ctrl-C after job.json exists but before the loop installs its own
+    handler (the image pull, the capacity probe) leaves the job `cancelled` and resumable
+    instead of `queued` for ever."""
+    try:
+        return execute_job(spec, store, cfg, **kw)
+    except KeyboardInterrupt:
+        try:
+            state = store.load()
+        except (OSError, ValueError, KeyError):
+            state = JobState.fresh(Spend(started_at=time.time()))
+        if state.status in ("won", "exhausted", "failed", "cancelled", "paused"):
+            print("interrupted", file=sys.stderr)  # already stopped: keep what it recorded
+        else:
+            state.status, state.stop_reason = "cancelled", "interrupted before the research loop"
+            store.save(state)
+            print(f"interrupted; continue with talos run --resume {spec.job_id}",
+                  file=sys.stderr)
+        return 130
+
+
+def _cmd_run(args, ask) -> int:
     root = workspace.find_root_for_write() if args.fake else workspace.find_root()
     add = {d: v for d in ADD_DIMENSIONS
            if (v := getattr(args, f"add_{d}")) is not None}  # 0 counts as given; extend refuses
@@ -1020,7 +1054,7 @@ def cmd_run(args, ask) -> int:
             return 2
         if _codex_refused(cfg, spec.start):
             return 2
-        return execute_job(spec, store, cfg, resume=True, add=add)
+        return _run_job(spec, store, cfg, resume=True, add=add)
     if args.mode:
         if args.mode == "agentic" and cfg.provider not in CLI_PROVIDERS:
             print(f"--mode agentic needs a CLI provider ({' or '.join(CLI_PROVIDERS)}), "
@@ -1227,7 +1261,7 @@ def cmd_run(args, ask) -> int:
             (docs_dir / name).write_text(text, encoding="utf-8", newline="\n")
     (store.run_dir / "tacit.md").write_text(user_tacit(direction),
                                             encoding="utf-8", newline="\n")
-    return execute_job(spec, store, cfg, resume=False)
+    return _run_job(spec, store, cfg, resume=False)
 
 
 def cmd_demo(args, ask) -> int:
@@ -1489,6 +1523,14 @@ def recommend_image_update(challenge: str) -> None:
               f"This job will use the pinned image {update.current}.", file=sys.stderr)
 
 
+def cmd_guide(args, ask) -> int:
+    """Print the packaged agent guide (#71); read as package data so a wheel install works."""
+    from importlib import resources
+    print(resources.files("talos.data").joinpath("agent_guide.md").read_text(encoding="utf-8"),
+          end="")
+    return 0
+
+
 def cmd_doctor(args, ask) -> int:
     from talos import doctor
     return doctor.run(workspace.find_root(), full=args.full, challenge=args.challenge, yes=args.yes,
@@ -1680,12 +1722,17 @@ def build_parser() -> argparse.ArgumentParser:
                      help="run --full without asking; with --json, --full needs it")
     doc.add_argument("--json", action="store_true",
                      help="print one JSON document instead of text lines")
+    sub.add_parser("guide", help="print the guide for coding agents driving Talos",
+                   description="Print the guide a coding agent follows to run Talos for a "
+                               "user: what spends money, how to start, watch and stop a job, "
+                               "and how to report back. Needs no config or network.")
     return p
 
 
 COMMANDS = {"setup": cmd_setup, "deploy": cmd_deploy, "run": cmd_run, "compile": cmd_compile,
             "status": cmd_status, "show": cmd_show, "diff": cmd_diff, "report": cmd_report,
-            "check-updates": cmd_check_updates, "demo": cmd_demo, "doctor": cmd_doctor}
+            "check-updates": cmd_check_updates, "demo": cmd_demo, "doctor": cmd_doctor,
+            "guide": cmd_guide}
 
 
 def main(argv=None, ask=default_ask) -> int:

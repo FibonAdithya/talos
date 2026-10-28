@@ -114,6 +114,9 @@ next step without improving the job's best reads `kept as the chain's next step`
 Press `Ctrl-C` once. Talos stops at the next safe point, packages the best candidate found
 so far, and prints the final status. The job can be resumed later.
 
+For a `talos run` started in the background from a script, send one SIGINT instead:
+`kill -INT <pid>`. A plain `kill` (SIGTERM) or `kill -9` ends it without writing the package.
+
 ### Resume
 
 ```bash
@@ -169,6 +172,7 @@ same instead of telling you to submit it.
 | `talos demo` | Runs a scripted job with no account, network or spend, and prints its package guide. |
 | `talos doctor` | Runs health checks on the config, credential, provider (one small LLM test call), backend, mainnet and dev images, with no compute spend; `--full` also scores one real baseline after asking. |
 | `talos check-updates` | Checks GHCR for newer published TIG dev image versions and prints upgrade guidance. |
+| `talos guide` | Prints the guide for a coding agent that drives Talos for you. |
 
 ### `talos setup`
 
@@ -412,7 +416,10 @@ the mainnet challenge id no longer matches `talos/challenges.py`; mainnet gives 
 budget for the challenge; or, on C3, the challenge's dev image tag is not on GHCR.
 
 Exit code 0 when the job ends `won`, or when you decline the confirmation; 1 when it ends any other way, or when the mainnet or
-dev image check stops it; 2 for invalid arguments, a missing config, or a missing API key.
+dev image check stops it; 2 for invalid arguments, a missing config, or a missing API key. 130 when an interrupt lands outside the research
+loop. Before the loop, a job already written under `runs/` is left `cancelled` and `--resume`
+continues it; after the loop (while the package is written) the job keeps the status it stopped
+with. An interrupt during the loop stops it as described under [Stop](#stop) and exits 1.
 
 ### `talos compile`
 
@@ -476,7 +483,8 @@ to a process that has died.
 credentials or network. Exit code 0, or 1 with a message on stderr for an unknown job id.
 
 Status is one of `queued`, `measuring_baseline`, `researching`, `confirming`, `won`,
-`exhausted` (a budget ran out; resumable with `--add-*`), `cancelled` (Ctrl-C), `paused`
+`exhausted` (a budget ran out; resumable with `--add-*`), `cancelled` (Ctrl-C or one SIGINT before
+the job had stopped; resumable), `paused`
 (the compute backend was unreachable) or `failed` (the reason is in `state.json` and the last
 lines of `timeline.jsonl`).
 
@@ -525,6 +533,19 @@ the run directory, so it works on old runs and on a job that is still running; i
 credentials and writes nothing else. The package written when a job stops includes it too.
 Diffs are shortened to keep the page under about 2 MB; a shortened diff ends with the `diff -u`
 command that prints it in full.
+
+### `talos guide`
+
+```bash
+talos guide
+```
+
+Prints the guide for a coding agent (Claude Code, Codex, Cursor or any other) that runs Talos
+on your behalf: which commands spend money and need your agreement, how to start a job with
+every answer as a flag, how to watch it with `talos status JOB_ID --json` and stop it with one
+SIGINT, how to read the results, and a template for reporting back. Tell your agent "Run
+`talos guide` and follow it." The text is `talos/data/agent_guide.md`, shipped in the package,
+so it needs no config, network or checkout. Exit code 0.
 
 ## Agentic mode
 

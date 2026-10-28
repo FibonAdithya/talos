@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_FILES = ("talos/data/rust_rules.md", "talos/data/evidence_template.md",
-              "talos/data/submission_readme_template.md")
+              "talos/data/submission_readme_template.md", "talos/data/agent_guide.md")
 
 
 def literal_tuple(source_file: str, name: str) -> tuple[str, ...]:
