@@ -393,3 +393,63 @@ def test_write_report_reads_the_timeline(tmp_path):
                            timeline=[{"kind": "started"}, {"kind": "x"}, {"kind": "y"}])
     text = write_report(store).read_text(encoding="utf-8")
     assert "<th>Elapsed</th><td>0h 02m</td>" in text
+
+
+OK = {"mean_rel_se": 0.002, "noise_ratio": 2.5, "noise_band": "clear", "noise_state": "ok"}
+
+
+def test_whisker_for_ok_nodes_only(tmp_path):
+    # spec Tests 13. mutation: drawing on "SE is not null" draws one on the broken node 2
+    hyps = [{**_scored(1)[0], **OK},
+            {"iteration": 2, "against": 0, "mean_rel_delta": -0.3, "mean_rel_se": 0.01,
+             "noise_ratio": None, "noise_band": None, "noise_state": "over_ceiling"}]
+    html = rendered(tmp_path, hyps)
+    assert 'data-whisker="1"' in html and 'data-whisker="2"' not in html
+    assert '"noise_band": "clear"' in html  # the panel's node data
+
+
+def test_old_records_draw_no_whisker(tmp_path):
+    # Review Focus 5 and spec Tests 7
+    html = rendered(tmp_path, _scored(3))
+    assert "data-whisker" not in html
+
+
+def test_whisker_is_clipped_to_the_plot(tmp_path):
+    # Review Focus 4. An SE of 50 percentage points runs far past the axis.
+    # mutation: no clipping puts a y coordinate outside the plot area
+    from talos.report import _PLOT_BOTTOM, _TOP
+    hyps = [{**h, **OK, "mean_rel_se": 0.5} for h in _scored(3)]
+    html = rendered(tmp_path, hyps)
+    pairs = re.findall(r'<line class="whisker"[^>]* y1="([\d.]+)"[^>]* y2="([\d.]+)"', html)
+    assert len(pairs) == 3
+    ys = [float(v) for pair in pairs for v in pair]
+    assert all(_TOP <= y <= _PLOT_BOTTOM for y in ys)
+
+
+def test_track_table_mean_row_colour_follows_the_sign(tmp_path):
+    # spec Tests 9. The fixture's best scores [110, 111]. Against a baseline of [200, 202] the
+    # delta is about -45% at a clear ratio. mutation: colouring by band alone makes it green
+    from talos.state import BaselineRecord
+    from talos.types import NonceResult
+    low = BaselineRecord("base", 1, "a", dict(BASELINE_FILES),
+                         [NonceResult("t", 0, True, 200, 1), NonceResult("t", 1, True, 202, 1)],
+                         [NonceResult("t", 1_000_000, True, 100, 1),
+                          NonceResult("t", 1_000_001, True, 100, 1)])
+    html = rendered(tmp_path, _scored(1), best=1, baseline=low)
+    row = re.search(r"<tr class='total[^']*'>", html).group(0)
+    assert "noise-muted" in row and "noise-clear" not in row
+    up = rendered(tmp_path / "up", _scored(1), best=1)  # the default baseline: +10.5%, clear
+    assert "noise-clear" in re.search(r"<tr class='total[^']*'>", up).group(0)
+
+
+def test_track_table_zero_se_is_not_n1(tmp_path):
+    # mutation: `if t.rel_se:` prints "n=1" for a zero-spread track. A best of [110, 110]
+    # against [100, 100] has differences [10, 10]: SE 0.0
+    from talos.state import Candidate
+    from talos.types import NonceResult
+    spec, st, store = make_run(tmp_path, _scored(1), best=1)
+    st.best = Candidate(1, st.best.files, "b",
+                        [NonceResult("t", 0, True, 110, 1), NonceResult("t", 1, True, 110, 1)],
+                        {"mean_rel_delta": 0.1}, st.best.hypothesis)
+    html = _render(spec, st, store)
+    assert "±0.000%" in html and "<td>n=1</td>" not in html
