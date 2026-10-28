@@ -15,6 +15,7 @@ from talos.prompts import in_tree, parent_label
 from talos.scoring import (
     NOISE_WORDS, BundleDelta, ScoringError, beats, bundle_delta, focus_sets, noise, select)
 from talos.state import JobSpec, JobState, JobStore
+from talos.template_start import read_template_root
 from talos.types import NonceResult
 
 
@@ -351,12 +352,11 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     write_submission(spec, state.best.files, pkg / SUBMISSION_DIR)
     template_missing = False
     if spec.start == "template":
-        template_path = store.run_dir / "challenge" / "template.rs"
-        template_missing = not template_path.is_file()
+        root = read_template_root(store.run_dir / "challenge", spec.challenge)
+        template_missing = root is None
         if not template_missing:
             (pkg / "diff_vs_template.patch").write_text(
-                _diff({"mod.rs": template_path.read_text(encoding="utf-8")}, state.best.files,
-                      "template"), encoding="utf-8", newline="\n")
+                _diff(root, state.best.files, "template"), encoding="utf-8", newline="\n")
     else:
         (pkg / "diff_vs_baseline.patch").write_text(
             _diff(state.baseline.files, state.best.files), encoding="utf-8", newline="\n")

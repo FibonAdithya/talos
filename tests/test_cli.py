@@ -3046,6 +3046,24 @@ def test_gpu_template_job_roots_carry_algorithm_cu(tmp_path, monkeypatch):
     assert (first / "algorithm.cu").read_text() == "// fake template.cu\n"
 
 
+def test_gpu_template_package_diff_names_algorithm_cu(tmp_path, monkeypatch):
+    # mutation: the package diffing against {"mod.rs": template.rs} only shows algorithm.cu as
+    # a new file, with no removed template line
+    from talos.prompts import WHOLE_FILE_FORMAT
+    monkeypatch.chdir(tmp_path)
+    script = cli._fake_script
+
+    def with_cu(system, user):
+        reply = script(system, user)
+        if WHOLE_FILE_FORMAT in system:
+            reply += "<<<<<<< FILE algorithm.cu\n// changed\n>>>>>>> END FILE\n"
+        return reply
+    monkeypatch.setattr(cli, "_fake_script", with_cu)
+    _, run_dir = _template_job(tmp_path, challenge="hypergraph")
+    patch = (run_dir / "package" / "diff_vs_template.patch").read_text()
+    assert "-// fake template.cu" in patch and "+// changed" in patch
+
+
 def _stopped_gpu_template_job(tmp_path, monkeypatch):
     """A one-iteration fake hypergraph template job, made resumable for one more iteration."""
     monkeypatch.chdir(tmp_path)

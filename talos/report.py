@@ -18,6 +18,7 @@ from pathlib import Path
 
 from talos.package import _diff
 from talos.state import JobSpec, JobState, JobStore
+from talos.template_start import read_template_root, root_names
 
 KINDS = ("best", "false_positive", "demoted", "improved", "accepted", "rejected", "failed")
 
@@ -119,10 +120,8 @@ def run_sources(run_dir: Path, spec: JobSpec, state: JobState) -> Sources:
     names (edit and compile failures save none)."""
     run_dir = Path(run_dir)
     if spec.start == "template":
-        path = run_dir / "challenge" / "template.rs"
-        root = ({"mod.rs": path.read_bytes().decode("utf-8", errors="replace")}
-                if path.is_file() else None)
-        names: list[str] = ["mod.rs"]
+        root = read_template_root(run_dir / "challenge", spec.challenge)
+        names: list[str] = root_names(spec.challenge)
     else:
         root = dict(state.baseline.files) if state.baseline is not None else None
         names = sorted(root) if root else []
