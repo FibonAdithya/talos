@@ -74,7 +74,7 @@ progress.
    `talos/challenges.py::C3_GPU_CLASSES` and
    `talos/challenges.py::C3_CPU_PROFILES`. A fallback per call, such as Modal's
    own `gpu=[...]` list, would score candidates on hardware the baseline never
-   ran on, which is why `modal_app/talos_bench.py::register` pins each function
+   ran on, which is why `talos/modal_app/talos_bench.py::register` pins each function
    to one GPU.
    Both sides also run with identical hyperparameters, except in a `--start template`
    job (the third asymmetry below): the per-track map is
@@ -131,7 +131,7 @@ progress.
 3. **The monorepo commit and dev image tag are pins, and both are part of
    every cache key.** `MONOREPO_REF` and `DEV_IMAGE_TAG` in
    `talos/challenges.py` enter the Modal artifact hash
-   (`modal_app/talos_bench.py::content_hash`) and the baseline cache key. The
+   (`talos/modal_app/talos_bench.py::content_hash`) and the baseline cache key. The
    exit codes in `talos/inside.py` were read from `tig-runtime` at that
    commit. Bumping either pin silently changes what every cached baseline
    meant, and the Modal app must be redeployed (`talos deploy`) before any run.
@@ -277,7 +277,7 @@ nobody.
 | How a candidate is compared to the baseline | `talos/scoring.py::bundle_delta`, `talos/scoring.py::beats` |
 | What a job persists, and the run directory layout | `talos/state.py::JobStore`, `docs/usage.md#where-results-land` |
 | Baseline resolution and its cache | `talos/baseline.py::resolve_baseline` |
-| Modal app: image, compile and score functions | `modal_app/talos_bench.py`; container-side logic in `talos/inside.py` |
+| Modal app: image, compile and score functions | `talos/modal_app/talos_bench.py`; container-side logic in `talos/inside.py` |
 | Modal client: retries, pause window, cost estimate | `talos/bench.py::ModalBench` |
 | Stale-deploy check before spend; `talos deploy` | `talos/deploy_digest.py`, `talos/bench.py::ModalBench.check_deploy`, `talos/cli.py::cmd_deploy` |
 | C3 client: deploy, poll, pull, cost estimate | `talos/c3_bench.py::C3Bench` |

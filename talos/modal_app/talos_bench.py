@@ -43,7 +43,7 @@ def _image(name: str) -> modal.Image:
             f"cd /app && git checkout {MONOREPO_REF}",
         )
         .env({"CHALLENGE": name})
-        .add_local_python_source("modal_app", "talos")
+        .add_local_python_source("talos")
     )
 
 

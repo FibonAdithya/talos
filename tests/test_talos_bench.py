@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from modal_app import talos_bench
+from talos.modal_app import talos_bench
 
 
 def test_content_hash_changes_with_the_monorepo_pin_and_image_tag(monkeypatch):

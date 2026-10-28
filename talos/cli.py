@@ -54,10 +54,10 @@ from talos.types import Usage
 
 BASELINE_CACHE = Path.home() / ".talos" / "baselines"
 CALIBRATION_CACHE = Path.home() / ".talos" / "calibration"
-# Deployed as a module from the directory that holds the `modal_app` package, never by file
+# Deployed as a module from the directory that holds the `talos` package, never by file
 # path: a file path makes Modal import the app as top-level `talos_bench`, the serialized
 # functions then refer to that name, and no container can load them.
-MODAL_APP_MODULE = "modal_app.talos_bench"
+MODAL_APP_MODULE = "talos.modal_app.talos_bench"
 MODAL_APP_ROOT = Path(__file__).resolve().parent.parent
 CLI_PROVIDERS = ("claude-cli", "codex-cli")
 UNMETERED = CLI_PROVIDERS + ("fake",)

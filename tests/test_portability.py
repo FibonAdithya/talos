@@ -75,7 +75,7 @@ def test_the_checker_flags_each_platform_default():
 def test_text_io_names_its_encoding_and_line_ending():
     # mutation: dropping encoding= or newline= from any call in the package fails this
     found = [f"{p.relative_to(ROOT).as_posix()}:{line}: {what}"
-             for d in ("talos", "modal_app") for p in sorted((ROOT / d).rglob("*.py"))
+             for d in ("talos",) for p in sorted((ROOT / d).rglob("*.py"))
              for line, what in _text_io_violations(p.read_text(encoding="utf-8"))]
     assert found == []
 
