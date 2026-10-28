@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from talos.budget import Budget, Spend
+from talos.challenges import BeatRule
 from talos.lineage import ROOT, Chain, Node
 from talos.package import build_package, evidence_draft, scores_markdown
 from talos.state import BaselineRecord, Candidate, JobSpec, JobState, JobStore
@@ -446,3 +447,57 @@ def test_diff_applies_with_git_and_reproduces_the_candidate(tmp_path, base, cand
                        text=True)
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "mod.rs").read_bytes() == cand.encode()
+
+
+T4 = [NonceResult("t", n, True, 100, 1) for n in range(4)]
+ALT = [NonceResult("t", n, True, 100 + 2 * (n % 2), 1) for n in range(4)]
+
+
+def test_scores_markdown_with_a_rule_adds_the_noise_lines():
+    # differences [0, 2, 0, 2]: SE sqrt(1/3)% = 0.5774%, ratio 1.7
+    md = scores_markdown(T4, ALT, BeatRule())
+    assert "mean_rel_se: ±0.5774%  noise: 1.7x (marginal)" in md
+    assert "per track: t: ±0.58% (n=4)" in md
+
+
+def test_scores_markdown_without_a_rule_has_no_noise_lines():
+    # mutation: defaulting rule to BeatRule() changes evidence_draft and this table
+    assert "noise:" not in scores_markdown(T4, ALT)
+    assert "per track:" not in scores_markdown(T4, ALT)
+
+
+def test_scores_markdown_over_the_ceiling_has_no_noise_lines():
+    bad = [NonceResult("t", 0, False, None, 1, "panic")] + ALT[1:]
+    md = scores_markdown(T4, bad, BeatRule())
+    assert "noise:" not in md and "per track:" not in md and "mean_rel_delta" in md
+
+
+def test_scores_markdown_names_n1():
+    md = scores_markdown(T4[:1], [NonceResult("t", 0, True, 101, 1)], BeatRule())
+    assert "noise: n=1" in md and "per track: t: n=1" in md
+
+
+def test_scores_markdown_zero_se_is_not_n1():
+    # mutation: `if t.rel_se:` treats a 0.0 SE as missing and prints "n=1"
+    plus = [NonceResult("t", n, True, 101, 1) for n in range(4)]
+    md = scores_markdown(T4, plus, BeatRule())
+    assert "noise: ±0, no spread" in md and "per track: t: ±0.00% (n=4)" in md
+    assert "n=1" not in md
+
+
+def test_evidence_has_no_noise_but_scores_md_does(tmp_path):
+    # spec Tests 12. mutation: build_package not passing with_noise=True, or evidence_draft
+    # passing it
+    spec, st, store = make(tmp_path)
+    pkg = build_package(spec, st, store)
+    assert "noise: 21.0x (clear)" in (pkg / "scores.md").read_text(encoding="utf-8")
+    text = evidence_draft(spec, st)
+    assert "noise:" not in text and "mean_rel_se" not in text
+
+
+def test_package_builds_from_a_state_without_noise_keys(tmp_path):
+    # Review Focus 5: the fixture's best.delta is {"mean_rel_delta": 0.105} only, as in a
+    # state.json written before this change
+    spec, st, store = make(tmp_path)
+    assert "mean_rel_se" not in st.best.delta
+    build_package(spec, st, store)

@@ -9,15 +9,16 @@ from importlib import resources
 from pathlib import Path
 
 from talos.budget import ADD_DIMENSIONS, Budget, effective_budget
-from talos.challenges import CHALLENGES
+from talos.challenges import CHALLENGES, BeatRule
 from talos.lineage import Node
 from talos.prompts import in_tree, parent_label
-from talos.scoring import ScoringError, beats, bundle_delta, focus_sets, select
+from talos.scoring import ScoringError, beats, bundle_delta, focus_sets, noise, select
 from talos.state import JobSpec, JobState, JobStore
 from talos.types import NonceResult
 
 
-def scores_markdown(baseline: list[NonceResult], candidate: list[NonceResult]) -> str:
+def scores_markdown(baseline: list[NonceResult], candidate: list[NonceResult],
+                    rule: BeatRule | None = None) -> str:
     rows = ["| track | nonce | baseline | candidate | note |", "|---|---|---|---|---|"]
     by_b = {(r.track, r.nonce): r for r in baseline}
     for c in sorted(candidate, key=lambda r: (r.track, r.nonce)):
@@ -35,9 +36,31 @@ def scores_markdown(baseline: list[NonceResult], candidate: list[NonceResult]) -
         d = bundle_delta(baseline, candidate)
         summary = (f"\nmean_rel_delta: {d.mean_rel_delta:+.4%}  worst_rel_delta: "
                    f"{d.worst_rel_delta:+.4%}  error_rate: {d.error_rate:.2%}\n")
+        if rule is not None:
+            summary += _noise_lines(d, rule)
     except ScoringError as e:
         summary = f"\n(no bundle delta: {e})\n"
     return "\n".join(rows) + "\n" + summary
+
+
+def _noise_lines(d, rule: BeatRule) -> str:
+    """The SE and noise ratio lines under a table's summary; display only. Nothing when the
+    error rate is over the ceiling, as for the other noise displays."""
+    ratio, band, state = noise(d, rule)
+    if state == "over_ceiling":
+        return ""
+    if state == "ok":
+        head = f"mean_rel_se: ±{d.mean_rel_se:.4%}  noise: {ratio:.1f}x ({band})"
+    elif state == "n1":
+        head = "noise: n=1"
+    elif state == "identical":
+        head = "noise: identical on every nonce"
+    else:
+        head = "noise: ±0, no spread"
+    # 0.0 is a legitimate SE (no spread), so test for None, not falsiness
+    tracks = "; ".join(f"{t.track}: n=1" if t.rel_se is None
+                       else f"{t.track}: ±{t.rel_se:.2%} (n={t.n})" for t in d.tracks)
+    return f"{head}\nper track: {tracks}\n"
 
 
 def _diff(base: dict[str, str], cand: dict[str, str], label: str = "baseline") -> str:
@@ -80,9 +103,12 @@ def score_pairs(spec: JobSpec, state: JobState
     return out
 
 
-def scores_sections(spec: JobSpec, state: JobState) -> list[tuple[str, str]]:
-    """(heading, table) pairs for scores.md and the evidence appendix."""
-    return [(h, scores_markdown(b, c)) for h, b, c in score_pairs(spec, state)]
+def scores_sections(spec: JobSpec, state: JobState, *, with_noise: bool = False
+                    ) -> list[tuple[str, str]]:
+    """(heading, table) pairs for scores.md and the evidence appendix. with_noise adds the
+    SE and noise ratio lines (scores.md only; the evidence draft stays as it was)."""
+    rule = CHALLENGES[spec.challenge].beat if with_noise else None
+    return [(h, scores_markdown(b, c, rule)) for h, b, c in score_pairs(spec, state)]
 
 
 def evidence_draft(spec: JobSpec, state: JobState) -> str:
@@ -337,7 +363,8 @@ def build_package(spec: JobSpec, state: JobState, store: JobStore) -> Path:
     else:
         (pkg / "diff_vs_baseline.patch").write_text(
             _diff(state.baseline.files, state.best.files), encoding="utf-8", newline="\n")
-    scores = "\n".join(f"# {heading}\n\n{table}" for heading, table in scores_sections(spec, state))
+    scores = "\n".join(f"# {heading}\n\n{table}"
+                       for heading, table in scores_sections(spec, state, with_noise=True))
     (pkg / "scores.md").write_text(scores, encoding="utf-8", newline="\n")
     hyps = "\n".join(_hypothesis_line(spec, h) for h in state.hypotheses)
     (pkg / "hypotheses.md").write_text("# Hypotheses\n\n" + hyps + "\n",
