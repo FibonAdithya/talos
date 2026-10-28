@@ -3005,17 +3005,110 @@ def test_event_lines_for_validation():
 
 # ── --start, --search, --chains ───────────────────────────────────────────────
 
-def _template_job(tmp_path, extra=()):
-    """A fake template-start job on energy_arbitrage; returns (rc, run_dir)."""
-    rc = cli.main(["run", "--fake", "--yes", "--challenge", "energy_arbitrage", "--direction",
+def _template_job(tmp_path, extra=(), challenge="energy_arbitrage"):
+    """A fake template-start job (energy_arbitrage by default); returns (rc, run_dir)."""
+    rc = cli.main(["run", "--fake", "--yes", "--challenge", challenge, "--direction",
                    "go", "--start", "template", "--budget-iterations", "1", *extra])
     return rc, next((tmp_path / "runs").glob("*/job.json")).parent
+
+
+def test_template_start_runs_on_a_cpu_challenge(tmp_path, monkeypatch):
+    # mutation: the CLI refusal left in place for knapsack
+    monkeypatch.chdir(tmp_path)
+    rc, run_dir = _template_job(tmp_path, challenge="knapsack")
+    # 1 = exhausted: the fake first candidate is at baseline parity (k=1)
+    assert rc == 1
+    assert (run_dir / "challenge" / "mod.rs").read_text() == "fake knapsack/mod.rs\n"
+    assert (run_dir / "package" / "diff_vs_template.patch").is_file()
+
+
+def test_template_start_writes_and_quotes_nested_docs(tmp_path, monkeypatch):
+    # mutation: writing docs without mkdir(parents=True) raises for nn/linear.rs
+    monkeypatch.chdir(tmp_path)
+    prompts = []
+    script = cli._fake_script
+    monkeypatch.setattr(cli, "_fake_script",
+                        lambda s, u: prompts.append(s + u) or script(s, u))
+    _template_job(tmp_path, challenge="neuralnet_optimizer")
+    run_dir = next((tmp_path / "runs").glob("*/job.json")).parent
+    assert (run_dir / "challenge" / "nn" / "linear.rs").read_text() == \
+        "fake neuralnet_optimizer/nn/linear.rs\n"
+    assert any("tig-challenges/src/neuralnet_optimizer/nn/linear.rs" in p for p in prompts)
+
+
+def test_gpu_template_job_roots_carry_algorithm_cu(tmp_path, monkeypatch):
+    # mutation: cli not writing challenge/template.cu, or the loop root without it
+    monkeypatch.chdir(tmp_path)
+    rc, run_dir = _template_job(tmp_path, challenge="hypergraph")
+    assert (run_dir / "challenge" / "template.cu").read_text() == "// fake template.cu\n"
+    # the fake whole-file reply replaces mod.rs only, so algorithm.cu is the template's
+    first = run_dir / "iterations" / "0001"
+    assert (first / "algorithm.cu").read_text() == "// fake template.cu\n"
+
+
+def test_gpu_template_package_diff_names_algorithm_cu(tmp_path, monkeypatch):
+    # mutation: the package diffing against {"mod.rs": template.rs} only shows algorithm.cu as
+    # a new file, with no removed template line
+    from talos.prompts import WHOLE_FILE_FORMAT
+    monkeypatch.chdir(tmp_path)
+    script = cli._fake_script
+
+    def with_cu(system, user):
+        reply = script(system, user)
+        if WHOLE_FILE_FORMAT in system:
+            reply += "<<<<<<< FILE algorithm.cu\n// changed\n>>>>>>> END FILE\n"
+        return reply
+    monkeypatch.setattr(cli, "_fake_script", with_cu)
+    _, run_dir = _template_job(tmp_path, challenge="hypergraph")
+    patch = (run_dir / "package" / "diff_vs_template.patch").read_text()
+    assert "-// fake template.cu" in patch and "+// changed" in patch
+
+
+def _stopped_gpu_template_job(tmp_path, monkeypatch):
+    """A one-iteration fake hypergraph template job, made resumable for one more iteration."""
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)  # a resume reads the config; it names the fake provider
+    rc, run_dir = _template_job(tmp_path, challenge="hypergraph")
+    assert rc == 1
+    spec = json.loads((run_dir / "job.json").read_text())
+    spec["budget"]["iterations"] = 2
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    st = json.loads((run_dir / "state.json").read_text())
+    st["status"] = "cancelled"  # an exhausted job is finished; a cancelled one resumes
+    (run_dir / "state.json").write_text(json.dumps(st))
+    return run_dir
+
+
+def test_gpu_template_resume_keeps_algorithm_cu(tmp_path, monkeypatch):
+    # mutation: resume not passing template_cu to the Loop (_node_files calls _root_files
+    # first, template_root raises, the job fails and iteration 2 writes no algorithm.cu).
+    # Iteration 2's parent is node 1 = state.best, whose files come from state.best.files.
+    run_dir = _stopped_gpu_template_job(tmp_path, monkeypatch)
+    cli.main(["run", "--resume", run_dir.name])
+    assert (run_dir / "iterations" / "0002" / "algorithm.cu").read_text() == \
+        "// fake template.cu\n"
+
+
+def test_gpu_template_resume_without_template_cu_fails_clearly(tmp_path, monkeypatch, capsys):
+    # mutation: a KeyError/ValueError traceback, or a resume that runs with a root missing
+    # the .cu, instead of a message naming the file
+    from talos.state import JobStore
+    run_dir = _stopped_gpu_template_job(tmp_path, monkeypatch)
+    (run_dir / "challenge" / "template.cu").unlink()
+    capsys.readouterr()
+    rc = cli.main(["run", "--resume", run_dir.name])
+    assert rc == 1
+    assert "template.cu" in capsys.readouterr().err
+    assert JobStore(run_dir).load().iteration == 1
 
 
 def test_start_template_refuses_an_unsupported_challenge(tmp_path, monkeypatch, capsys):
     # mutation: dropping the TEMPLATE_START_FILES check fetches docs that do not exist and
     # creates a job before failing
+    from talos.challenges import TEMPLATE_START_FILES
     monkeypatch.chdir(tmp_path)
+    # every challenge has a list now; a challenge dropped from it in future must still refuse
+    monkeypatch.delitem(TEMPLATE_START_FILES, "knapsack")
     monkeypatch.setattr(cli.FAKE_MAINNET, "fetch_challenge_docs",
                         lambda ch: pytest.fail("must not fetch for an unsupported challenge"))
     rc = cli.main(["run", "--fake", "--yes", "--start", "template", "--challenge", "knapsack",

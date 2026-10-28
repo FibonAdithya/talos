@@ -97,8 +97,11 @@ frozen in `job.json`; a resume with a different value is refused.
 
 ### Template start
 
-`--start template` supports `energy_arbitrage` only. The root of every chain is TIG's empty
-template (`talos/loop.py::Loop._root_files`), and a candidate has exactly one file, `mod.rs`.
+`--start template` works on every challenge. The root of every chain is TIG's empty template
+(`talos/template_start.py::template_root`, used by `talos/loop.py::Loop._root_files`, the
+package and the report): `mod.rs` on a CPU challenge, and `mod.rs` plus `algorithm.cu` (TIG's
+`template.cu`, stored as `runs/<job>/challenge/template.cu`) on a GPU challenge, because the
+build needs a `.cu` file. A candidate's file set never grows from its root.
 The LLM sees the challenge's `README.md` and non-baseline source files at the pinned monorepo
 commit (`talos/challenges.py::TEMPLATE_START_FILES`) plus the template, never the baseline's
 code. The baseline is still measured, with the mainnet hyperparameters, and candidates run with

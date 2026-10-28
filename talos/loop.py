@@ -31,6 +31,7 @@ from talos.scoring import (Bar, ScoringError, beats, beats_focused, bundle_delta
                            runtime_ratio, select, validation_failure, worst_track_shortfall)
 from talos.search_replace import format_misses
 from talos.state import Candidate, JobSpec, JobState, JobStore, TERMINAL, user_tacit
+from talos.template_start import template_root
 from talos.types import Completion, NonceResult
 
 
@@ -95,10 +96,13 @@ class Loop:
                  template_rs: str, clock=time.time, sleep=time.sleep,
                  on_event: Callable[[str, dict], None] | None = None,
                  thresholds: Thresholds | None = None,
-                 challenge_docs: dict[str, str] | None = None):
+                 challenge_docs: dict[str, str] | None = None,
+                 template_cu: str | None = None):
         self.spec, self.state, self.store = spec, state, store
         self.provider, self.bench = provider, bench
         self.template_rs = template_rs
+        # A GPU template start's kernel template (runs/<job>/challenge/template.cu); None else.
+        self.template_cu = template_cu
         # The challenge definition files shown to a template start (prompts.challenge_block).
         self.challenge_docs = dict(challenge_docs or {})
         self.clock, self.sleep = clock, sleep
@@ -420,10 +424,11 @@ class Loop:
         return chain.current if self.spec.search == "anneal" else chain.best
 
     def _root_files(self) -> dict[str, str]:
-        """A template start's root is TIG's empty template as mod.rs. The baseline's code is
-        never read here for it, so it reaches no prompt, timeline entry or iteration directory."""
+        """A template start's root is TIG's empty template as mod.rs (plus template.cu as
+        algorithm.cu on a GPU challenge). The baseline's code is never read here for it, so it
+        reaches no prompt, timeline entry or iteration directory."""
         if self.spec.start == "template":
-            return {"mod.rs": self.template_rs}
+            return template_root(self.spec.challenge, self.template_rs, self.template_cu)
         return dict(self.state.baseline.files)
 
     def _root_score(self) -> float | None:
@@ -573,7 +578,7 @@ class Loop:
                              hyperparameters=self._candidate_hyperparameters(),
                              scoring=self._scoring(), start=self.spec.start,
                              challenge_docs=self.challenge_docs, search=self.spec.search,
-                             chains=self.spec.chains)
+                             chains=self.spec.chains, template_cu=self.template_cu)
 
     # ── single-shot propose + edit ────────────────────────────────────
 

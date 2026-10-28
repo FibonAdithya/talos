@@ -1,6 +1,7 @@
 import pytest
 
 from talos import mainnet
+from talos.challenges import CHALLENGES as CHALLENGE_SPECS
 from talos.challenges import MONOREPO_REF, TEMPLATE_START_FILES
 
 BLOCK = {"block": {"id": "b1"}}
@@ -264,11 +265,35 @@ def test_challenge_docs_come_from_the_pin_and_skip_the_reference_policy():
     assert not any("baselines" in u for u in urls)
 
 
+def test_fetch_template_cu_is_pinned():
+    urls = []
+    assert mainnet.fetch_template_cu("hypergraph",
+                                     get_text=lambda u: urls.append(u) or "CU") == "CU"
+    # mutation: a branch name instead of the pinned commit, or template.rs
+    assert urls == [f"{mainnet.GH_RAW}/{MONOREPO_REF}/tig-algorithms/src/hypergraph/template.cu"]
+
+
 def test_challenge_docs_refuse_a_challenge_without_a_file_list():
-    # mutation: `TEMPLATE_START_FILES.get(name, ())` returns {} and a knapsack template job
-    # would run with no problem definition at all
+    # mutation: `TEMPLATE_START_FILES.get(name, ())` returns {} and a template job would run
+    # with no problem definition at all
     with pytest.raises(mainnet.MainnetError):
-        mainnet.fetch_challenge_docs("knapsack", get_text=lambda u: "x")
+        mainnet.fetch_challenge_docs("no_such_challenge", get_text=lambda u: "x")
+
+
+def test_every_challenge_has_a_template_file_list():
+    # mutation: leaving a challenge out of TEMPLATE_START_FILES, or a list without mod.rs
+    assert set(TEMPLATE_START_FILES) == set(CHALLENGE_SPECS)
+    for files in TEMPLATE_START_FILES.values():
+        assert {"README.md", "mod.rs"} <= set(files)
+
+
+@pytest.mark.parametrize("challenge", sorted(CHALLENGE_SPECS))
+def test_challenge_docs_never_fetch_baselines(challenge):
+    urls = []
+    docs = mainnet.fetch_challenge_docs(challenge, get_text=lambda u: urls.append(u) or "x")
+    # mutation: a baselines/ entry in a list, or walking the directory
+    assert urls and not any("/baselines/" in u for u in urls)
+    assert set(docs) == set(TEMPLATE_START_FILES[challenge])
 
 
 def test_fetch_challenges_returns_all_with_one_block_lookup():

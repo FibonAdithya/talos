@@ -9,11 +9,21 @@ MONOREPO_REF = "839c7184afda9b64c4a9dca18bca5a647a1bb867"
 DEV_IMAGE_TAG = "0.0.8"
 
 # `talos run --start template`: the challenge files under tig-challenges/src/<name>/ at the
-# pin that the first candidate is written from. The baselines/ directory is left out on
-# purpose: it holds working designs.
+# pin that the first candidate is written from, for every challenge. Each list is every file of
+# that directory except baselines/, which is left out on purpose: it holds working designs.
+# hypergraph's mod.rs and kernels.cu include TIG's greedy partitioner on purpose: it sets the
+# quality zero point, and it is compiled into the candidate's PTX module whether shown or not.
 TEMPLATE_START_FILES: dict[str, tuple[str, ...]] = {
     "energy_arbitrage": ("README.md", "mod.rs", "battery.rs", "market.rs", "network.rs",
                          "scenarios.rs", "constants.rs", "utils.rs"),
+    "knapsack": ("README.md", "mod.rs"),
+    "job_scheduling": ("README.md", "mod.rs", "scenarios.rs"),
+    "satisfiability": ("README.md", "mod.rs"),
+    "vehicle_routing": ("README.md", "mod.rs"),
+    "hypergraph": ("README.md", "mod.rs", "kernels.cu"),
+    "vector_search": ("README.md", "mod.rs", "kernels.cu"),
+    "neuralnet_optimizer": ("README.md", "mod.rs", "kernels.cu", "nn/mod.rs", "nn/batch_norm.rs",
+                            "nn/linear.rs", "nn/mlp.rs", "nn/tensor.rs", "nn/kernels.cu"),
 }
 
 # `tested`: at least one Talos job got past its baseline on some backend.

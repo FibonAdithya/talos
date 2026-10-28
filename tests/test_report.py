@@ -147,6 +147,19 @@ def test_template_root_is_template_not_baseline(tmp_path):
     assert _diffs(spec, st, store)[1] == "parent's files not saved"
 
 
+def test_run_sources_template_root_has_algorithm_cu(tmp_path):
+    # mutation: run_sources keeping the single-file root, or reading only mod.rs of a node
+    from dataclasses import replace
+    hyps = [{"iteration": 1, "against": 0, "mean_rel_delta": -0.4}]
+    files = {1: {"mod.rs": "A\n", "algorithm.cu": "B\n"}}
+    spec, st, store = make_run(tmp_path, hyps, start="template", iteration_files=files,
+                               template="RS\n")
+    (store.run_dir / "challenge" / "template.cu").write_bytes(b"CU\n")  # LF, as talos writes it
+    sources = run_sources(store.run_dir, replace(spec, challenge="hypergraph"), st)
+    assert sources(0) == {"mod.rs": "RS\n", "algorithm.cu": "CU\n"}
+    assert sources(1) == {"mod.rs": "A\n", "algorithm.cu": "B\n"}
+
+
 def test_identical_files_say_no_change(tmp_path):
     hyps = [{"iteration": 1, "against": 0}]
     spec, st, store = make_run(tmp_path, hyps,
