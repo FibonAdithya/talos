@@ -3015,7 +3015,10 @@ def _template_job(tmp_path, extra=()):
 def test_start_template_refuses_an_unsupported_challenge(tmp_path, monkeypatch, capsys):
     # mutation: dropping the TEMPLATE_START_FILES check fetches docs that do not exist and
     # creates a job before failing
+    from talos.challenges import TEMPLATE_START_FILES
     monkeypatch.chdir(tmp_path)
+    # every challenge has a list now; a challenge dropped from it in future must still refuse
+    monkeypatch.delitem(TEMPLATE_START_FILES, "knapsack")
     monkeypatch.setattr(cli.FAKE_MAINNET, "fetch_challenge_docs",
                         lambda ch: pytest.fail("must not fetch for an unsupported challenge"))
     rc = cli.main(["run", "--fake", "--yes", "--start", "template", "--challenge", "knapsack",
