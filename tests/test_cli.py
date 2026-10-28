@@ -799,6 +799,49 @@ def test_event_line_scored_says_how_many_nonces_were_not_run():
         "scored -50.000% vs baseline (worst track -50.000%, errors 95.0%, 37 not run)"
 
 
+SCORED = {"mean_rel_delta": 0.004, "worst_rel_delta": -0.0012, "error_rate": 0.0,
+          "runtime_ratio": 1.02}
+TAIL = "worst track -0.120%, errors 0.0%, runtime x1.02)"
+
+
+# Full-length lines exceed EVENT_LINE_WIDTH; talos run passes the terminal width.
+def test_event_line_scored_shows_the_noise_figure():
+    # mutation: the ratio formatted with :.2f, or the band left out
+    data = {**SCORED, "mean_rel_se": 0.0031, "noise_ratio": 1.29, "noise_band": "marginal",
+            "noise_state": "ok"}
+    assert cli._event_line("scored", data, width=200) == \
+        "scored +0.400% vs baseline (±0.310%, 1.3x noise, marginal; " + TAIL
+
+
+@pytest.mark.parametrize("state,se,text", [
+    ("n1", None, "n=1"), ("identical", 0.0, "identical on every nonce"),
+    ("no_spread", 0.0, "±0, no spread")])
+def test_event_line_scored_names_the_undefined_cases(state, se, text):
+    data = {**SCORED, "mean_rel_se": se, "noise_ratio": None, "noise_band": None,
+            "noise_state": state}
+    assert cli._event_line("scored", data, width=200) == \
+        f"scored +0.400% vs baseline ({text}; " + TAIL
+
+
+@pytest.mark.parametrize("se", [None, 0.0, 0.009])
+def test_event_line_scored_over_the_ceiling_has_no_noise(se):
+    # spec Tests 10. mutation: switching on the SE value instead of noise_state prints "n=1"
+    # or "no spread" for a broken candidate
+    data = {**SCORED, "mean_rel_se": se, "noise_ratio": None, "noise_band": None,
+            "noise_state": "over_ceiling"}
+    assert cli._event_line("scored", data, width=200) == "scored +0.400% vs baseline (" + TAIL
+
+
+def test_event_line_scored_noise_survives_truncation():
+    # Review Focus 2. mutation: appending the noise after the runtime puts it past the cut
+    data = {**SCORED, "mean_rel_se": 0.0031, "noise_ratio": 1.29, "noise_band": "marginal",
+            "noise_state": "ok"}
+    # the noise text with its ";" is 58 characters; width 70 keeps 67 of them, then "..."
+    line = cli._event_line("scored", data, width=70)
+    assert line.startswith("scored +0.400% vs baseline (±0.310%, 1.3x noise, marginal;")
+    assert len(line) == 70 and line.endswith("...")
+
+
 def test_event_line_compile_failed_is_one_line_with_the_first_error():
     # mutation: printing the output as it is spills rustc's multi-line diagnostic over the
     # terminal; taking the last line instead of the first error prints "error: aborting due to"

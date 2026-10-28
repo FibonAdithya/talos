@@ -565,6 +565,22 @@ def _holdout_text(data: dict) -> str:
             f"(worst track {h['worst_rel_delta']:+.3%})")
 
 
+def _noise_text(data: dict) -> str | None:
+    """The noise figure of a scored event, or None when the line shows none.
+    Reads the recorded noise_state only; an event written before Task 2 has no state."""
+    state = data.get("noise_state")
+    if state == "ok":
+        return (f"±{data.get('mean_rel_se', 0):.3%}, {data.get('noise_ratio', 0):.1f}x noise, "
+                f"{data.get('noise_band')}")
+    if state == "n1":
+        return "n=1"
+    if state == "identical":
+        return "identical on every nonce"
+    if state == "no_spread":
+        return "±0, no spread"
+    return None
+
+
 def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | None:
     """One loop event as one terminal line, or None for an event the terminal does not show.
     timeline.jsonl keeps every event with every field; this is the summary of it."""
@@ -579,8 +595,10 @@ def _event_line(kind: str, data: dict, width: int = EVENT_LINE_WIDTH) -> str | N
         text = f"trying: {data.get('title', '')}{tag}"
     elif kind == "scored":
         runtime = data.get("runtime_ratio")
-        text = (f"scored {data['mean_rel_delta']:+.3%} vs baseline "
-                f"(worst track {data['worst_rel_delta']:+.3%}, errors {data['error_rate']:.1%}"
+        noise = _noise_text(data)
+        text = (f"scored {data['mean_rel_delta']:+.3%} vs baseline ("
+                + (f"{noise}; " if noise else "")
+                + f"worst track {data['worst_rel_delta']:+.3%}, errors {data['error_rate']:.1%}"
                 + (f", runtime x{runtime:.2f}" if runtime is not None else "")
                 + (f", {data['not_run']} not run" if data.get("not_run") else "") + ")")
     elif kind == "compile_failed":
