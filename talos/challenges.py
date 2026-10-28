@@ -187,7 +187,7 @@ CHALLENGES: dict[str, ChallengeSpec] = {
         _gpu("vector_search", "c004"),
         _gpu("hypergraph", "c005", status="tested"),
         _gpu("neuralnet_optimizer", "c006"),
-        _cpu("job_scheduling", "c007", status="known broken", issue=36),
+        _cpu("job_scheduling", "c007", status="tested"),
         _cpu("energy_arbitrage", "c008", status="tested"),
     )
 }
