@@ -210,6 +210,11 @@ def fetch_template(name: str, get_text=_get_text) -> str:
     return get_text(f"{GH_RAW}/{MONOREPO_REF}/tig-algorithms/src/{name}/template.rs")
 
 
+def fetch_template_cu(name: str, get_text=_get_text) -> str:
+    """A GPU challenge's kernel template, the template root's algorithm.cu."""
+    return get_text(f"{GH_RAW}/{MONOREPO_REF}/tig-algorithms/src/{name}/template.cu")
+
+
 def fetch_challenge_docs(name: str, get_text=_get_text) -> dict[str, str]:
     """The challenge's own files at the pinned monorepo commit, for a template start. The
     reference-algorithm policy does not apply: nothing here is an algorithm."""

@@ -318,3 +318,12 @@ def test_recall_in_a_tree_names_parent_nodes_not_bests(kw, root):
     assert "- Node fail [failed:compile, against node #3]" in other
     _, distill = distill_prompts(ctx(**kw), TREE_FAILURES)
     assert f"against {root}]" in distill and "against node #3]" in distill
+
+
+def test_gpu_template_hypothesis_prompt_shows_template_cu():
+    # mutation: the LLM is not told which file holds its kernels
+    c = ctx(challenge="hypergraph", start="template", is_gpu=True, template_cu="CU_MARKER")
+    system, _ = hypothesis_prompts(c)
+    assert "algorithm.cu" in system and "CU_MARKER" in system
+    system, _ = hypothesis_prompts(ctx(challenge="hypergraph", start="template", is_gpu=True))
+    assert "algorithm.cu" not in system and "CU_MARKER" not in system

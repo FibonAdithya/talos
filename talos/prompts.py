@@ -67,6 +67,8 @@ class PromptContext:
     whole_file: bool = False
     search: str = "greedy"
     chains: int = 1
+    # A GPU template start's template.cu, the root's algorithm.cu; None otherwise.
+    template_cu: str | None = None
 
 
 def _files_block(files: dict[str, str]) -> str:
@@ -94,6 +96,14 @@ def gap_block(ctx: PromptContext) -> str:
     if ctx.start == "template":
         text += "\nThe baseline's code is not available to you; only its score is."
     return text
+
+
+def template_cu_block(ctx: PromptContext) -> str:
+    """For a GPU template start: which file holds the kernels, and its starting text."""
+    if ctx.start != "template" or ctx.template_cu is None:
+        return ""
+    return ("algorithm.cu holds your CUDA kernels; it starts as TIG's template.cu:\n"
+            f"```cuda\n{ctx.template_cu}\n```\n\n")
 
 
 def challenge_block(ctx: PromptContext) -> str:
@@ -205,6 +215,7 @@ def hypothesis_prompts(ctx: PromptContext) -> tuple[str, str]:
         f"TIG's own benchmark: higher verifier quality per nonce under a fixed fuel budget, "
         f"{scope}.\n\n{focus}"
         f"The solver must keep this contract (template.rs):\n```rust\n{ctx.template_rs}\n```\n\n"
+        f"{template_cu_block(ctx)}"
         f"Propose ONE specific change. Reply with a JSON object with keys \"title\" "
         f"(short), \"description\" (what to change and why it should raise quality), "
         f"\"design_family\" (a short name for the overall approach, such as "

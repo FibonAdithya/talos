@@ -15,7 +15,8 @@ from pathlib import Path
 from talos.executables import argv0
 from talos.providers.claude_cli import NO_COST, session_cost
 from talos.prompts import (PromptContext, STRATEGY_TAGS, _rust_rules, challenge_block,
-                           focus_sentence, gap_block, hyperparameters_block, recall_block)
+                           focus_sentence, gap_block, hyperparameters_block, recall_block,
+                           template_cu_block)
 
 
 class AgenticError(ValueError):
@@ -141,6 +142,9 @@ def prepare_worktree(ctx: PromptContext, parent: Path | None = None) -> Path:
         p.write_text(text, encoding="utf-8", newline="\n")
     challenge_md = (f"# {ctx.challenge} solver contract (template.rs)\n\n"
                     f"```rust\n{ctx.template_rs}\n```\n")
+    cu = template_cu_block(ctx)
+    if cu:
+        challenge_md += "\n" + cu.rstrip("\n") + "\n"
     docs = challenge_block(ctx)
     if docs:
         challenge_md += "\n" + docs + "\n"

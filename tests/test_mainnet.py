@@ -265,6 +265,14 @@ def test_challenge_docs_come_from_the_pin_and_skip_the_reference_policy():
     assert not any("baselines" in u for u in urls)
 
 
+def test_fetch_template_cu_is_pinned():
+    urls = []
+    assert mainnet.fetch_template_cu("hypergraph",
+                                     get_text=lambda u: urls.append(u) or "CU") == "CU"
+    # mutation: a branch name instead of the pinned commit, or template.rs
+    assert urls == [f"{mainnet.GH_RAW}/{MONOREPO_REF}/tig-algorithms/src/hypergraph/template.cu"]
+
+
 def test_challenge_docs_refuse_a_challenge_without_a_file_list():
     # mutation: `TEMPLATE_START_FILES.get(name, ())` returns {} and a template job would run
     # with no problem definition at all

@@ -501,6 +501,7 @@ FAKE_MAINNET = types.SimpleNamespace(
         for t in tracks},
     fetch_algorithm_files=lambda ch, name: {"mod.rs": "fn solve() { let k = 1; }\n"},
     fetch_template=lambda ch: "pub fn solve_challenge(",
+    fetch_template_cu=lambda ch: "// fake template.cu\n",
     # one stub per name on the challenge's list, so nested names (nn/linear.rs) are exercised
     fetch_challenge_docs=lambda ch: {
         name: "Fake challenge: maximise k.\n" if name == "README.md" else f"fake {ch}/{name}\n"
@@ -699,6 +700,11 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
                   f"start a new job with dev image {DEV_IMAGE_TAG} to remeasure the baseline "
                   "and candidates together", file=sys.stderr)
             return 2
+        cu_path = _template_cu_path(spec, store)
+        if cu_path is not None and not cu_path.is_file():
+            print(f"cannot resume {spec.job_id}: {cu_path} is missing; a GPU template start "
+                  "builds its algorithm.cu from it", file=sys.stderr)
+            return 1
         previous = state.status
         # A hard-killed job (left researching, say) resumes without a shift: it was working
         # until it died, as far as its last save shows.
@@ -840,8 +846,11 @@ def execute_job(spec: JobSpec, store: JobStore, cfg: Config, resume: bool,
         challenge_docs = {f: (docs_dir / f).read_text(encoding="utf-8")
                           for f in TEMPLATE_START_FILES[spec.challenge]
                           if (docs_dir / f).is_file()}
+    cu_path = _template_cu_path(spec, store)
+    template_cu = (cu_path.read_bytes().decode("utf-8", errors="replace")
+                   if cu_path is not None else None)
     loop = Loop(spec, state, store, provider, bench, template_rs="", on_event=on_event,
-                challenge_docs=challenge_docs)
+                challenge_docs=challenge_docs, template_cu=template_cu)
     if cfg.mode == "agentic":
         attach_agentic(loop, cfg.provider, cfg.model)
     previous_sigint = signal.signal(signal.SIGINT,
@@ -959,6 +968,13 @@ def cmd_run(args, ask) -> int:
         return 130
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+def _template_cu_path(spec: JobSpec, store: JobStore) -> Path | None:
+    """runs/<job>/challenge/template.cu for a GPU template start, else None."""
+    if spec.start != "template" or not CHALLENGES[spec.challenge].is_gpu:
+        return None
+    return store.run_dir / "challenge" / "template.cu"
 
 
 def _run_job(spec: JobSpec, store: JobStore, cfg: Config, **kw) -> int:
@@ -1227,13 +1243,16 @@ def _cmd_run(args, ask) -> int:
         print(f"nonces per track must be between 1 and {HOLDOUT_START}, not {nonces}",
               file=sys.stderr)
         return 2
-    docs = template = None
+    docs = None
+    templates: dict[str, str] = {}
     if start == "template":
         # Before the job exists: a failed fetch leaves no run directory behind.
         api = FAKE_MAINNET if cfg.provider == "fake" else mainnet_api
         try:
             docs = api.fetch_challenge_docs(challenge)
-            template = api.fetch_template(challenge)
+            templates["template.rs"] = api.fetch_template(challenge)
+            if CHALLENGES[challenge].is_gpu:  # the root's algorithm.cu (talos/template_start.py)
+                templates["template.cu"] = api.fetch_template_cu(challenge)
         except MainnetError as e:
             print(f"mainnet unreachable: {e}", file=sys.stderr)
             return 1
@@ -1275,7 +1294,7 @@ def _cmd_run(args, ask) -> int:
     if docs is not None:
         docs_dir = store.run_dir / "challenge"
         docs_dir.mkdir()
-        for name, text in {**docs, "template.rs": template}.items():
+        for name, text in {**docs, **templates}.items():
             (docs_dir / name).parent.mkdir(parents=True, exist_ok=True)  # nn/linear.rs
             (docs_dir / name).write_text(text, encoding="utf-8", newline="\n")
     (store.run_dir / "tacit.md").write_text(user_tacit(direction),

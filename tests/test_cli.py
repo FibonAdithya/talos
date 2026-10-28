@@ -3036,6 +3036,54 @@ def test_template_start_writes_and_quotes_nested_docs(tmp_path, monkeypatch):
     assert any("tig-challenges/src/neuralnet_optimizer/nn/linear.rs" in p for p in prompts)
 
 
+def test_gpu_template_job_roots_carry_algorithm_cu(tmp_path, monkeypatch):
+    # mutation: cli not writing challenge/template.cu, or the loop root without it
+    monkeypatch.chdir(tmp_path)
+    rc, run_dir = _template_job(tmp_path, challenge="hypergraph")
+    assert (run_dir / "challenge" / "template.cu").read_text() == "// fake template.cu\n"
+    # the fake whole-file reply replaces mod.rs only, so algorithm.cu is the template's
+    first = run_dir / "iterations" / "0001"
+    assert (first / "algorithm.cu").read_text() == "// fake template.cu\n"
+
+
+def _stopped_gpu_template_job(tmp_path, monkeypatch):
+    """A one-iteration fake hypergraph template job, made resumable for one more iteration."""
+    monkeypatch.chdir(tmp_path)
+    fake_config(tmp_path)  # a resume reads the config; it names the fake provider
+    rc, run_dir = _template_job(tmp_path, challenge="hypergraph")
+    assert rc == 1
+    spec = json.loads((run_dir / "job.json").read_text())
+    spec["budget"]["iterations"] = 2
+    (run_dir / "job.json").write_text(json.dumps(spec))
+    st = json.loads((run_dir / "state.json").read_text())
+    st["status"] = "cancelled"  # an exhausted job is finished; a cancelled one resumes
+    (run_dir / "state.json").write_text(json.dumps(st))
+    return run_dir
+
+
+def test_gpu_template_resume_keeps_algorithm_cu(tmp_path, monkeypatch):
+    # mutation: resume not passing template_cu to the Loop (_node_files calls _root_files
+    # first, template_root raises, the job fails and iteration 2 writes no algorithm.cu).
+    # Iteration 2's parent is node 1 = state.best, whose files come from state.best.files.
+    run_dir = _stopped_gpu_template_job(tmp_path, monkeypatch)
+    cli.main(["run", "--resume", run_dir.name])
+    assert (run_dir / "iterations" / "0002" / "algorithm.cu").read_text() == \
+        "// fake template.cu\n"
+
+
+def test_gpu_template_resume_without_template_cu_fails_clearly(tmp_path, monkeypatch, capsys):
+    # mutation: a KeyError/ValueError traceback, or a resume that runs with a root missing
+    # the .cu, instead of a message naming the file
+    from talos.state import JobStore
+    run_dir = _stopped_gpu_template_job(tmp_path, monkeypatch)
+    (run_dir / "challenge" / "template.cu").unlink()
+    capsys.readouterr()
+    rc = cli.main(["run", "--resume", run_dir.name])
+    assert rc == 1
+    assert "template.cu" in capsys.readouterr().err
+    assert JobStore(run_dir).load().iteration == 1
+
+
 def test_start_template_refuses_an_unsupported_challenge(tmp_path, monkeypatch, capsys):
     # mutation: dropping the TEMPLATE_START_FILES check fetches docs that do not exist and
     # creates a job before failing

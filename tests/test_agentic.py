@@ -581,6 +581,16 @@ def test_template_worktree_carries_challenge_docs(tmp_path):
     assert "TEMPLATE-RS" in text
 
 
+def test_gpu_template_challenge_md_quotes_template_cu(tmp_path):
+    # mutation: prepare_worktree quoting only template.rs leaves the agent without the
+    # kernel contract
+    wt = prepare_worktree(template_ctx(is_gpu=True, template_cu="CU_MARKER"), parent=tmp_path)
+    text = (wt / "CHALLENGE.md").read_text()
+    assert "CU_MARKER" in text and "template.cu" in text
+    cpu = prepare_worktree(template_ctx(), parent=tmp_path)
+    assert "template.cu" not in (cpu / "CHALLENGE.md").read_text()
+
+
 def test_template_claude_md_shows_the_gap_and_family_key():
     # mutation: keeping "Your current best is" beside the gap block prints "-inf%"
     c = template_ctx()
