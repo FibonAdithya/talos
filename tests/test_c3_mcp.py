@@ -555,6 +555,16 @@ def test_deploy_sends_the_settings_the_c3_file_names_including_the_frozen_gpu(tm
     assert args["hardware"] == "h100" and args["docker_requires_accelerator"] == "cuda"
 
 
+def test_deploy_selects_the_legacy_storage_pathway_for_jobs_and_probes(tmp_path):
+    from talos.c3_jobdir import write_probe_dir
+    c = FakeClient({"deploy": {"job_id": "job_s"}})
+    McpTransport("k", client=c).deploy(job_dir_for(tmp_path))
+    McpTransport("k", client=c).deploy(write_probe_dir(tmp_path / "probe", "a100"))
+    # mutation: no storage argument means C3's JuiceFS default, which refuses inline files
+    # without runtime_storage (VALIDATION_ERROR), so every keyed deploy fails, probe first
+    assert [args["storage"] for _name, args in c.calls] == ["legacy", "legacy"]
+
+
 def test_deploy_uploads_a_probe_dir_with_its_own_settings(tmp_path):
     from talos.c3_jobdir import probe_settings, write_probe_dir
     c = FakeClient({"deploy": {"job_id": "job_p"}})

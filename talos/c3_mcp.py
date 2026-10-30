@@ -217,7 +217,11 @@ class McpTransport:
         except (OSError, ValueError) as e:
             raise C3CommandError(f"job dir is not one write_job_dir wrote: "
                                  f"{_redact(str(e))[:200]}") from None
-        args = {**settings, "files": files}
+        # C3's deploy tool now defaults to JuiceFS storage, which needs `runtime_storage`
+        # revisions and has no automatic fallback: inline `files` alone are refused with
+        # VALIDATION_ERROR (MEASURED 2026-10-29). `legacy` is the pathway that uploads the inline
+        # files, as every deploy did before.
+        args = {**settings, "storage": "legacy", "files": files}
         doc = self._c.tool("deploy", args, timeout_s=600)
         job_id = doc.get("job_id") or doc.get("id")
         if not job_id:
