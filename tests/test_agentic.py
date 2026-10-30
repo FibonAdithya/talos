@@ -405,6 +405,7 @@ def test_agentic_error_is_a_failed_iteration_not_a_crash():
 def test_attach_agentic_timeout_is_agentic_error_and_talos_is_on_path(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-leak")
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "ms-leak")
+    monkeypatch.setenv("HOME", "/home/u")  # set, not read: Windows need not define HOME
     seen = {}
 
     def run(cmd, **kw):
@@ -424,7 +425,7 @@ def test_attach_agentic_timeout_is_agentic_error_and_talos_is_on_path(tmp_path, 
     assert seen["env"]["PATH"].split(os.pathsep)[0] == str(Path(sys.executable).parent)
     # mutation: inheriting the parent environment hands the agent every credential Talos holds
     assert "ANTHROPIC_API_KEY" not in seen["env"] and "MODAL_TOKEN_SECRET" not in seen["env"]
-    assert seen["env"]["HOME"] == os.environ["HOME"]
+    assert seen["env"]["HOME"] == "/home/u"
     # mutation: dropping these makes the CLI look logged out wherever its config is not in $HOME
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/cc")
     monkeypatch.setenv("CODEX_HOME", "/tmp/ch")
